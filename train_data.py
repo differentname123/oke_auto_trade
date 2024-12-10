@@ -18,7 +18,7 @@ np.random.seed(42)
 file_path = "BTC-USDT-SWAP_1m_20230116_20241210.csv"
 data = pd.read_csv(file_path)
 data = data.sort_values(by="timestamp").reset_index(drop=True)
-# data = data.tail(50000)
+data = data.tail(50000)
 
 # === Step 2: 数据预处理 ===
 features = ["open", "high", "low", "close", "volume"]
@@ -53,7 +53,7 @@ data = add_technical_indicators(data)
 
 # 更新特征列表
 features += ['ma5', 'ma10', 'ma20', 'returns', 'volatility', 'rsi', 'macd']
-target = "close_up_0.03_t5"
+target = "close_up_0.02_t5"
 
 # 打印目标变量比例
 print("目标变量分布：")
@@ -67,7 +67,7 @@ scaler = StandardScaler()
 data[features] = scaler.fit_transform(data[features])
 
 # === Step 3: 创建时间序列数据集 ===
-sequence_length = 60
+sequence_length = 100
 
 
 class TimeSeriesDataset(Dataset):
@@ -222,30 +222,53 @@ y_pred_probs = np.array(y_pred_probs)
 y_true = np.array(y_true)
 
 # 自定义阈值列表
-thresholds = [x * 0.02 for x in range(25, 50)]
+thresholds = [x * 0.01 for x in range(50, 100)]
+# thresholds = [x * 0.02 for x in range(25, 50)]
 print("自定义阈值列表：", thresholds)
+
+# 用于保存每个阈值的结果
+results = []
+
 for threshold in thresholds:
-    y_pred = (y_pred_probs >= threshold).astype(int)
-    print(f"\n阈值：{threshold}")
-    print(classification_report(y_true, y_pred, digits=4))
-    conf_matrix = confusion_matrix(y_true, y_pred)
-    print("混淆矩阵：")
-    print(conf_matrix)
-    precision, recall, _ = precision_recall_curve(y_true, y_pred_probs)
-    pr_auc = auc(recall, precision)
-    roc_auc = roc_auc_score(y_true, y_pred_probs)
-    print(f"PR-AUC: {pr_auc:.4f}")
-    print(f"ROC-AUC: {roc_auc:.4f}")
+    # 定义预测为 1 和预测为 0 的掩码
+    y_pred = np.full_like(y_pred_probs, -1)  # 初始化为 -1，表示未分类
+    y_pred[y_pred_probs >= threshold] = 1   # 预测为 1 的条件
+    y_pred[y_pred_probs < (1 - threshold)] = 0  # 预测为 0 的条件
 
-# 绘制精确率-召回率曲线
-import matplotlib.pyplot as plt
+    # 过滤掉未分类的样本
+    valid_indices = y_pred != -1
+    valid_y_true = y_true[valid_indices]
+    valid_y_pred = y_pred[valid_indices]
 
-precision, recall, thresholds_pr = precision_recall_curve(y_true, y_pred_probs)
-plt.figure()
-plt.plot(recall, precision, label='PR curve')
-plt.xlabel('Recall')
-plt.ylabel('Precision')
-plt.title('Precision-Recall Curve')
-plt.legend()
-plt.grid()
-plt.show()
+    # 计算混淆矩阵
+    if len(valid_y_true) == 0:  # 如果没有有效样本，跳过该阈值
+        print(f"阈值 {threshold:.2f} 下没有有效样本，跳过")
+        continue
+
+    conf_matrix = confusion_matrix(valid_y_true, valid_y_pred, labels=[0, 1])
+    tn, fp, fn, tp = conf_matrix.ravel()  # 混淆矩阵的元素顺序为 [tn, fp, fn, tp]
+
+    # 计算 1 的准确率和 0 的准确率
+    pred_1_total = tp + fp  # 预测为 1 的总数量
+    pred_0_total = tn + fn  # 预测为 0 的总数量
+
+    acc_1 = tp / pred_1_total if pred_1_total > 0 else 0  # 1 的准确率
+    acc_0 = tn / pred_0_total if pred_0_total > 0 else 0  # 0 的准确率
+
+    # 保存结果到列表
+    results.append({
+        "阈值": threshold,
+        "1的准确率": acc_1,
+        "预测为1的数量": pred_1_total,
+        "总有效数量": len(valid_y_true),  # 有效样本的总数量
+        "0的准确率": acc_0,
+        "预测为0的数量": pred_0_total
+    })
+
+# 转换为 DataFrame
+results_df = pd.DataFrame(results)
+
+# 保存到 CSV 文件
+results_df.to_csv("threshold_results.csv", index=False, encoding="utf-8-sig")
+
+print("结果已保存到 threshold_results.csv 文件中")
