@@ -1,332 +1,334 @@
 import pandas as pd
 import numpy as np
-import math
+
+# 导入必要的库
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, classification_report
+from lightgbm import LGBMClassifier, early_stopping, log_evaluation
+
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import confusion_matrix
-from sklearn.utils.class_weight import compute_class_weight
-import itertools
-import multiprocessing
-import os
 
-# 设置随机种子
-torch.manual_seed(42)
-np.random.seed(42)
+# 检查是否有可用的GPU
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", device)
 
-# === Step 3: 创建时间序列数据集 ===
+# ===================== 数据读入与预处理 =====================
+# 假设数据文件名为 "BTC-USDT-SWAP_1m_20241105_20241212_features.csv"
+data = pd.read_csv("BTC-USDT-SWAP_1m_20240627_20241212_features.csv")
+
+
+
+
+
+# 假设数据中有:
+# timestamp: 时间戳
+# close_up_0.02_t5: 目标变量(0/1)
+# 其他列为特征(价格与技术指标)
+TARGET_COL = "close_up_0.02_t5"
+
+# 将timestamp设为索引（如果需要）
+if 'timestamp' in data.columns:
+    data['timestamp'] = pd.to_datetime(data['timestamp'])
+    data = data.set_index('timestamp').sort_index()
+
+# 找到列名中包含 "close_down" 或 "close_up" 的列，除了TARGET_COL
+feature_cols = [col for col in data.columns if ('close_down' in col or 'close_up' in col) and col != TARGET_COL]
+
+# 删除feature_cols中的列
+data = data.drop(columns=feature_cols)
+
+
+mask = (data.replace([np.inf, -np.inf], np.nan).isnull().any(axis=1)) | \
+       ((data > np.finfo('float64').max).any(axis=1)) | \
+       ((data < np.finfo('float64').min).any(axis=1))
+
+print(f"Removing {mask.sum()} rows with invalid values")
+# 删除这些行
+data = data[~mask]
+
+
+
+# 特征与标签
+features = data.drop(columns=[TARGET_COL])
+labels = data[TARGET_COL]
+
+# 数据集划分（按比例切分，保证时间顺序，避免数据泄露）
+train_size = 0.8
+val_size = 0.1
+test_size = 0.1
+
+# 计算分割点索引
+n_total = len(features)
+train_end = int(n_total * train_size)
+val_end = int(n_total * (train_size + val_size))
+
+# 划分数据集
+train_data = features.iloc[:train_end]
+train_labels = labels.iloc[:train_end]
+
+val_data = features.iloc[train_end:val_end]
+val_labels = labels.iloc[train_end:val_end]
+
+test_data = features.iloc[val_end:]
+test_labels = labels.iloc[val_end:]
+
+# 对特征进行缩放处理（仅使用训练集的统计量）
+scaler = StandardScaler()
+scaler.fit(train_data)
+
+train_data_scaled = scaler.transform(train_data)
+val_data_scaled = scaler.transform(val_data)
+test_data_scaled = scaler.transform(test_data)
+
+# 转换回DataFrame（可选）
+train_data_scaled = pd.DataFrame(train_data_scaled, index=train_data.index, columns=train_data.columns)
+val_data_scaled = pd.DataFrame(val_data_scaled, index=val_data.index, columns=train_data.columns)
+test_data_scaled = pd.DataFrame(test_data_scaled, index=test_data.index, columns=train_data.columns)
+
+# ===================== 构建PyTorch数据集 =====================
 class TimeSeriesDataset(Dataset):
-    def __init__(self, data, features, target, sequence_length):
-        self.X, self.y = [], []
-        data_features = data[features].values
-        data_target = data[target].values
-        for i in range(len(data) - sequence_length):
-            self.X.append(data_features[i:i + sequence_length])
-            self.y.append(data_target[i + sequence_length])
-        self.X = np.array(self.X)
-        self.y = np.array(self.y)
+    def __init__(self, X, y, seq_len=30, offset=0):
+        # X, y为DataFrame或ndarray
+        self.X = torch.tensor(X.values, dtype=torch.float32) if hasattr(X, 'values') else torch.tensor(X, dtype=torch.float32)
+        self.y = torch.tensor(y.values, dtype=torch.long) if hasattr(y, 'values') else torch.tensor(y, dtype=torch.long)
+        self.seq_len = seq_len
+        self.offset = offset  # 当前数据集在整个数据集中的起始索引
 
     def __len__(self):
-        return len(self.X)
+        return len(self.X) - self.seq_len
 
     def __getitem__(self, idx):
-        return torch.tensor(self.X[idx], dtype=torch.float32), torch.tensor(self.y[idx], dtype=torch.long)
+        X_seq = self.X[idx: idx + self.seq_len]
+        y_label = self.y[idx + self.seq_len]
+        absolute_idx = self.offset + idx + self.seq_len  # 计算在整个数据集中的绝对索引
+        return X_seq, y_label, absolute_idx
 
-# === Step 4: 定义优化后的 Transformer 模型 ===
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, dropout=0.1, max_len=5000):
-        super(PositionalEncoding, self).__init__()
-        self.dropout = nn.Dropout(p=dropout)
+seq_len = 200
 
-        # 创建位置编码矩阵
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float32) * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)  # 偶数列
-        pe[:, 1::2] = torch.cos(position * div_term)  # 奇数列
-        pe = pe.unsqueeze(0)
-        self.register_buffer('pe', pe)
+# 创建数据集，传入正确的 offset
+train_dataset = TimeSeriesDataset(train_data_scaled, train_labels, seq_len=seq_len, offset=0)
+val_dataset = TimeSeriesDataset(val_data_scaled, val_labels, seq_len=seq_len, offset=train_end)
+test_dataset = TimeSeriesDataset(test_data_scaled, test_labels, seq_len=seq_len, offset=val_end)
+
+# 创建数据加载器
+train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
+test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
+
+# ===================== 定义LSTM模型 =====================
+class LSTMModel(nn.Module):
+    def __init__(self, input_size, hidden_size=128, num_layers=2, num_classes=2):
+        super(LSTMModel, self).__init__()
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers=num_layers, batch_first=True, dropout=0.2)
+        self.fc = nn.Linear(hidden_size, num_classes)
 
     def forward(self, x):
-        # x: [batch_size, seq_len, embed_dim]
-        x = x + self.pe[:, :x.size(1), :]
-        return self.dropout(x)
+        # x: (batch, seq_len, input_size)
+        out, _ = self.lstm(x)
+        # 取最后时刻的输出
+        out = out[:, -1, :]
+        out = self.fc(out)
+        return out
 
+# ===================== 定义Transformer模型 =====================
 class TransformerModel(nn.Module):
-    def __init__(self, feature_size, embed_dim, num_classes, num_heads, num_encoder_layers, dropout):
+    def __init__(self, input_size, num_layers=2, d_model=128, nhead=8, dim_feedforward=256, num_classes=2):
         super(TransformerModel, self).__init__()
-        self.embedding = nn.Linear(feature_size, embed_dim)
-        self.pos_encoder = PositionalEncoding(embed_dim, dropout)
-        encoder_layers = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, dropout=dropout,
-                                                    batch_first=True)
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers=num_encoder_layers)
-        self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(embed_dim, num_classes)
+        self.embedding = nn.Linear(input_size, d_model)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead,
+                                                   dim_feedforward=dim_feedforward, dropout=0.2, batch_first=True)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.fc = nn.Linear(d_model, num_classes)
 
-    def forward(self, src):
-        src = self.embedding(src) * math.sqrt(src.size(-1))
-        src = self.pos_encoder(src)
-        transformer_output = self.transformer_encoder(src)
-        output = transformer_output[:, -1, :]  # 取最后一个时间步的输出
-        output = self.dropout(output)
-        output = self.fc(output)
-        return output
+    def forward(self, x):
+        # x: (batch, seq_len, input_size)
+        x = self.embedding(x)
+        out = self.transformer_encoder(x)
+        # 取平均值作为输出
+        out = out.mean(dim=1)  # (batch, d_model)
+        out = self.fc(out)
+        return out
 
-# === Step 2: 数据预处理 ===
-def prepare_data():
-    # 加载数据
-    file_path = "BTC-USDT-SWAP_1m_20230116_20241210.csv"
-    data = pd.read_csv(file_path)
-    data = data.sort_values(by="timestamp").reset_index(drop=True)
-    data = data.tail(50000)
+# ===================== 训练函数 =====================
+def train_model(model, train_loader, val_loader, lr=1e-3, epochs=50, patience=5, class_weights=None):
+    criterion = nn.CrossEntropyLoss(weight=class_weights).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', patience=3, factor=0.5)
 
-    features = ["open", "high", "low", "close", "volume"]
-
-    # 添加技术指标特征
-    def add_technical_indicators(df):
-        # 移动平均线
-        df['ma5'] = df['close'].rolling(window=5).mean()
-        df['ma10'] = df['close'].rolling(window=10).mean()
-        df['ma20'] = df['close'].rolling(window=20).mean()
-        # 价格变化率
-        df['returns'] = df['close'].pct_change()
-        # 波动率
-        df['volatility'] = df['returns'].rolling(window=10).std()
-        # RSI 相对强弱指数
-        delta = df['close'].diff()
-        up = delta.clip(lower=0)
-        down = -1 * delta.clip(upper=0)
-        roll_up = up.rolling(window=14).mean()
-        roll_down = down.rolling(window=14).mean()
-        rs = roll_up / roll_down
-        df['rsi'] = 100.0 - (100.0 / (1.0 + rs))
-        # MACD
-        ema12 = df['close'].ewm(span=12, adjust=False).mean()
-        ema26 = df['close'].ewm(span=26, adjust=False).mean()
-        df['macd'] = ema12 - ema26
-        return df
-
-    data = add_technical_indicators(data)
-
-    # 更新特征列表
-    features += ['ma5', 'ma10', 'ma20', 'returns', 'volatility', 'rsi', 'macd']
-    target = "close_up_0.02_t5"
-
-    # 处理缺失值
-    data = data.dropna()
-
-    # 打印目标变量比例
-    print("目标变量分布：")
-    print(data[target].value_counts(normalize=True))
-
-    # 标准化特征
-    scaler = StandardScaler()
-    data[features] = scaler.fit_transform(data[features])
-
-    return data, features, target
-
-# 定义用于训练和评估模型的函数
-def train_and_evaluate(args):
-    sequence_length, embed_dim, num_heads, num_encoder_layers, dropout, lr, data, features, target = args
-    print(f"\n正在训练模型，参数组合：sequence_length={sequence_length}, embed_dim={embed_dim}, num_heads={num_heads}, num_encoder_layers={num_encoder_layers}, dropout={dropout}, lr={lr}")
-
-    # 定义模型和结果文件路径
-    if not os.path.exists('models'):
-        os.makedirs('models')
-
-    best_model_path = f'models/best_model_seq{sequence_length}_emb{embed_dim}_heads{num_heads}_layers{num_encoder_layers}_dropout{dropout}_lr{lr}_target{target}_len{len(data)}.pth'
-    best_model_threshold_results_path = f'models/threshold_results_seq{sequence_length}_emb{embed_dim}_heads{num_heads}_layers{num_encoder_layers}_dropout{dropout}_lr{lr}_target{target}_len{len(data)}.csv'
-
-    # 如果结果文件已经存在，则跳过该参数组合
-    if os.path.exists(best_model_threshold_results_path):
-        print(f"结果文件 {best_model_threshold_results_path} 已存在，跳过该参数组合的训练。")
-        return
-
-    # 划分训练集、验证集和测试集
-    train_val_data, test_data = train_test_split(data, shuffle=False, test_size=0.2)
-    train_data, val_data = train_test_split(train_val_data, shuffle=False, test_size=0.1)  # 验证集占训练集的10%
-
-    # 创建数据集
-    train_dataset = TimeSeriesDataset(train_data.reset_index(drop=True), features, target, sequence_length)
-    val_dataset = TimeSeriesDataset(val_data.reset_index(drop=True), features, target, sequence_length)
-    test_dataset = TimeSeriesDataset(test_data.reset_index(drop=True), features, target, sequence_length)
-
-    print(f"训练集样本数：{len(train_dataset)}")
-    print(f"验证集样本数：{len(val_dataset)}")
-    print(f"测试集样本数：{len(test_dataset)}")
-
-    # 创建数据加载器，不打乱数据
-    batch_size = 64  # 如果需要调整批量大小，可以将其作为参数传入
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-
-    # === Step 5: 定义损失函数和优化器 ===
-    model = TransformerModel(feature_size=len(features), embed_dim=embed_dim, num_classes=2, num_heads=num_heads,
-                             num_encoder_layers=num_encoder_layers, dropout=dropout)
-
-    # 使用 CrossEntropyLoss 并正确设置类别权重
-    train_labels = train_dataset.y
-    class_weights = compute_class_weight(class_weight='balanced', classes=np.unique(train_labels), y=train_labels)
-    class_weights = torch.tensor(class_weights, dtype=torch.float32)
-    print(f"类别权重：{class_weights}")
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model.to(device)
-    class_weights = class_weights.to(device)
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
-
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
-
-    # === Step 6: 训练模型 ===
-    best_val_loss = float('inf')
-    num_epochs = 50  # 如果需要调整训练轮数，可以将其作为参数传入
-    for epoch in range(num_epochs):
+    best_val_acc = 0.0
+    patience_counter = 0
+    best_model_state = None
+    for epoch in range(epochs):
         model.train()
-        train_loss = 0.0
-        for X_batch, y_batch in train_loader:
-            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+        total_loss = 0
+        for X_batch, y_batch, _ in train_loader:
+            X_batch = X_batch.to(device)
+            y_batch = y_batch.to(device)
             optimizer.zero_grad()
             outputs = model(X_batch)
             loss = criterion(outputs, y_batch)
             loss.backward()
             optimizer.step()
-            train_loss += loss.item() * X_batch.size(0)
+            total_loss += loss.item()
 
-        train_loss = train_loss / len(train_dataset)
+        avg_train_loss = total_loss / len(train_loader)
 
-        # 验证集评估
+        # 验证
         model.eval()
-        val_loss = 0.0
+        val_preds = []
+        val_true = []
         with torch.no_grad():
-            for X_val, y_val in val_loader:
-                X_val, y_val = X_val.to(device), y_val.to(device)
-                outputs = model(X_val)
-                loss = criterion(outputs, y_val)
-                val_loss += loss.item() * X_val.size(0)
-        val_loss = val_loss / len(val_dataset)
+            for X_batch, y_batch, _ in val_loader:
+                X_batch = X_batch.to(device)
+                y_batch = y_batch.to(device)
+                outputs = model(X_batch)
+                preds = torch.argmax(outputs, dim=1)
+                val_preds.append(preds.cpu().numpy())
+                val_true.append(y_batch.cpu().numpy())
+        val_preds = np.concatenate(val_preds)
+        val_true = np.concatenate(val_true)
+        acc = accuracy_score(val_true, val_preds)
+        scheduler.step(acc)
 
-        print(f"Epoch {epoch + 1}/{num_epochs}, Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}")
-        scheduler.step(val_loss)
+        print(f"Epoch {epoch+1}/{epochs}, Train Loss: {avg_train_loss:.4f}, Validation Accuracy: {acc:.4f}")
 
-        # 保存最佳模型
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            torch.save(model.state_dict(), best_model_path)
+        if acc > best_val_acc:
+            best_val_acc = acc
+            patience_counter = 0
+            # 保存最优模型参数
+            best_model_state = model.state_dict()
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print("Early stopping triggered")
+                break
+    if best_model_state is not None:
+        # 加载最优模型参数
+        model.load_state_dict(best_model_state)
+    return best_val_acc
 
-    # 加载最佳模型
-    model.load_state_dict(torch.load(best_model_path))
+# 获取输入大小
+input_size = train_data_scaled.shape[1]
 
-    # === Step 7: 评估模型 ===
+# ===================== 处理类别不平衡 =====================
+# 计算训练集中的类别权重
+train_labels_np = train_labels.values[seq_len:]
+class_counts = np.bincount(train_labels_np)
+class_weights = 1.0 / class_counts
+class_weights = class_weights / class_weights.sum()
+class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
+
+print("Class weights:", class_weights)
+
+# 计算LightGBM的scale_pos_weight
+n_positive = np.sum(train_labels_np == 1)
+n_negative = np.sum(train_labels_np == 0)
+scale_pos_weight = n_negative / n_positive
+print("Scale pos weight for LightGBM:", scale_pos_weight)
+
+# ===================== 训练LSTM模型 =====================
+lstm_model = LSTMModel(input_size=input_size, hidden_size=128, num_layers=2).to(device)
+print("Training LSTM Model...")
+val_acc_lstm = train_model(lstm_model, train_loader, val_loader, epochs=50, patience=10, lr=1e-3, class_weights=class_weights_tensor)
+
+# ===================== 训练Transformer模型 =====================
+transformer_model = TransformerModel(input_size=input_size, num_layers=2, d_model=128, nhead=8, dim_feedforward=256).to(device)
+print("Training Transformer Model...")
+val_acc_transformer = train_model(transformer_model, train_loader, val_loader, epochs=50, patience=10, lr=1e-3, class_weights=class_weights_tensor)
+
+# ===================== 训练LightGBM模型 =====================
+# 为LightGBM模型准备数据，无需序列化
+X_train_np = train_data_scaled.values[seq_len:]  # 调整训练数据，以匹配时间序列模型的标签对齐
+y_train_np = train_labels_np
+X_val_np = val_data_scaled.values[seq_len:]  # 同样调整验证数据
+y_val_np = val_labels.values[seq_len:]
+
+lgbm = LGBMClassifier(n_estimators=500, scale_pos_weight=scale_pos_weight)
+
+lgbm.fit(
+    X_train_np,
+    y_train_np,
+    eval_set=[(X_val_np, y_val_np)],
+    callbacks=[
+        early_stopping(stopping_rounds=50),
+        log_evaluation(period=1)
+    ]
+)
+# ===================== 提取各模型预测用于Stacking =====================
+def get_model_predictions(model, loader):
     model.eval()
-    y_pred_probs, y_true = [], []
+    preds = []
+    indices = []
     with torch.no_grad():
-        for X_batch, y_batch in test_loader:
+        for X_batch, _, idx in loader:
             X_batch = X_batch.to(device)
             outputs = model(X_batch)
-            probs = torch.softmax(outputs, dim=1)[:, 1]  # 正类概率
-            y_pred_probs.extend(probs.cpu().numpy())
-            y_true.extend(y_batch.numpy())
+            prob = torch.softmax(outputs, dim=1)[:, 1].cpu().numpy()
+            preds.append(prob)
+            indices.extend(idx.numpy())
+    return np.concatenate(preds), np.array(indices)
 
-    y_pred_probs = np.array(y_pred_probs)
-    y_true = np.array(y_true)
+# 获取验证集预测结果及对应绝对索引
+val_preds_lstm, val_indices = get_model_predictions(lstm_model, val_loader)
+val_preds_transformer, _ = get_model_predictions(transformer_model, val_loader)
 
-    # 自定义阈值列表
-    thresholds = [x * 0.01 for x in range(50, 100)]
-    print("自定义阈值列表：", thresholds)
+# 获取LightGBM模型预测概率
+val_preds_lgbm = lgbm.predict_proba(val_data_scaled.values[seq_len:])[:, 1]
 
-    # 用于保存每个阈值的结果
-    results = []
+# 对齐索引
+val_indices_adjusted = val_indices - (train_end + seq_len)
 
-    for threshold in thresholds:
-        # 定义预测为 1 和预测为 0 的掩码
-        y_pred = np.full_like(y_pred_probs, -1)  # 初始化为 -1，表示未分类
-        y_pred[y_pred_probs >= threshold] = 1   # 预测为 1 的条件
-        y_pred[y_pred_probs < (1 - threshold)] = 0  # 预测为 0 的条件
+# 获取对应的真实标签
+val_labels_aligned = val_labels.values[val_indices - train_end]
 
-        # 过滤掉未分类的样本
-        valid_indices = y_pred != -1
-        valid_y_true = y_true[valid_indices]
-        valid_y_pred = y_pred[valid_indices]
+# Stacking特征
+stack_X_val = np.vstack([val_preds_lstm, val_preds_transformer, val_preds_lgbm[val_indices_adjusted]]).T
+stack_y_val = val_labels_aligned
 
-        if len(valid_y_true) == 0:  # 如果没有有效样本，跳过该阈值
-            print(f"阈值 {threshold:.2f} 下没有有效样本，跳过")
-            continue
+# 训练元模型（使用LightGBM作为元模型）
+meta_model = LGBMClassifier(n_estimators=100)
+meta_model.fit(stack_X_val, stack_y_val)
 
-        # 计算混淆矩阵
-        conf_matrix = confusion_matrix(valid_y_true, valid_y_pred, labels=[0, 1])
-        tn, fp, fn, tp = conf_matrix.ravel()  # 混淆矩阵的元素顺序为 [tn, fp, fn, tp]
+# ===================== 测试集评估 =====================
+# 获取测试集预测结果及对应绝对索引
+test_preds_lstm, test_indices = get_model_predictions(lstm_model, test_loader)
+test_preds_transformer, _ = get_model_predictions(transformer_model, test_loader)
+test_preds_lgbm = lgbm.predict_proba(test_data_scaled.values[seq_len:])[:, 1]
 
-        # 计算 1 的准确率和 0 的准确率
-        pred_1_total = tp + fp  # 预测为 1 的总数量
-        pred_0_total = tn + fn  # 预测为 0 的总数量
+# 对齐索引
+test_indices_adjusted = test_indices - (val_end + seq_len)
 
-        acc_1 = tp / pred_1_total if pred_1_total > 0 else 0
-        acc_0 = tn / pred_0_total if pred_0_total > 0 else 0
+# 获取对应的真实标签
+test_labels_aligned = test_labels.values[test_indices - val_end]
 
-        results.append({
-            "阈值": threshold,
-            "1的准确率": acc_1,
-            "预测为1的数量": pred_1_total,
-            "总有效数量": len(valid_y_true),
-            "0的准确率": acc_0,
-            "预测为0的数量": pred_0_total
-        })
+# Stacking特征
+stack_X_test = np.vstack([test_preds_lstm, test_preds_transformer, test_preds_lgbm[test_indices_adjusted]]).T
+stack_y_test = test_labels_aligned
 
-    # 转换为 DataFrame
-    results_df = pd.DataFrame(results)
-    # 保存到 CSV 文件
-    results_df.to_csv(best_model_threshold_results_path, index=False, encoding="utf-8-sig")
+# 使用元模型进行预测，获取预测概率
+final_probs = meta_model.predict_proba(stack_X_test)[:, 1]
 
-    print(f"结果已保存到 {best_model_threshold_results_path} 文件中")
+# 定义阈值范围
+thresholds = np.arange(0.5, 1, 0.01)
 
-    global all_results
-    all_results.append({
-        "sequence_length": sequence_length,
-        "embed_dim": embed_dim,
-        "num_heads": num_heads,
-        "num_encoder_layers": num_encoder_layers,
-        "dropout": dropout,
-        "learning_rate": lr,
-        "best_val_loss": best_val_loss,
-        "result_csv": best_model_threshold_results_path
-    })
+from sklearn.metrics import classification_report, confusion_matrix
 
-if __name__ == '__main__':
-    # === 数据加载和预处理 ===
-    data, features, target = prepare_data()
+for threshold in thresholds:
+    print(f"\nThreshold: {threshold:.2f}")
 
-    # 设置参数范围
-    sequence_length_list = [60, 120, 180, 240, 300]
-    embed_dim_list = [32, 64, 128, 256]
-    learning_rate_list = [0.0001, 0.0005, 0.001, 0.005]
+    # 生成预测类别
+    final_preds_adjusted = np.where(final_probs >= threshold, 1, 0)
 
-    num_heads_list = [2, 4]
-    num_encoder_layers_list = [2, 3]
-    dropout_list = [0.1, 0.2]
+    # 计算分类报告
+    report = classification_report(stack_y_test, final_preds_adjusted, digits=4)
+    print(report)
 
-    # 创建参数组合
-    param_combinations = list(itertools.product(sequence_length_list, embed_dim_list, num_heads_list, num_encoder_layers_list, dropout_list, learning_rate_list))
+    # 计算每个类别的准确率
+    cm = confusion_matrix(stack_y_test, final_preds_adjusted)
+    per_class_acc = cm.diagonal() / cm.sum(axis=1)
+    for idx, acc in enumerate(per_class_acc):
+        print(f"Accuracy for class {idx}: {acc:.4f}")
 
-    print(f"总共需要训练 {len(param_combinations)} 个模型。")
-
-    # 保存结果的列表
-    manager = multiprocessing.Manager()
-    all_results = manager.list()
-
-    # 为每个参数组合准备参数，包括 data, features, target
-    args_list = [(seq_len, emb_dim, n_heads, n_layers, drop, lr, data, features, target)
-                 for (seq_len, emb_dim, n_heads, n_layers, drop, lr) in param_combinations]
-
-    # 开始并行遍历参数组合
-    with multiprocessing.Pool(processes=20) as pool:
-        pool.map(train_and_evaluate, args_list)
-
-    # 最终将所有结果保存到一个文件中
-    all_results_df = pd.DataFrame(list(all_results))
-    all_results_df.to_csv("models/all_model_results.csv", index=False, encoding="utf-8-sig")
-    print("所有模型的结果已保存到 models/all_model_results.csv 文件中")
+print("Class weights:", class_weights)

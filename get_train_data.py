@@ -29,6 +29,7 @@ def get_kline_data(inst_id, bar="1m", limit=100, max_candles=1000):
     all_data = []
     after = ''  # 初始值为None，获取最新数据
     fetched_candles = 0  # 已获取的K线数量
+    fail_count = 0  # 失败次数
 
     while fetched_candles < max_candles:
         try:
@@ -37,29 +38,34 @@ def get_kline_data(inst_id, bar="1m", limit=100, max_candles=1000):
 
             if response["code"] != "0":
                 print(f"获取K线数据失败，错误代码：{response['code']}，错误消息：{response['msg']}")
-                break
+                time.sleep(1)
+                fail_count += 1
+                if fail_count >= 3:
+                    print("连续失败次数过多，停止获取。")
+                    break
+            else:
+                fail_count = 0
+                # 提取返回数据
+                data = response.get("data", [])
+                if not data:
+                    print("无更多数据，已全部获取。")
+                    break
 
-            # 提取返回数据
-            data = response.get("data", [])
-            if not data:
-                print("无更多数据，已全部获取。")
-                break
+                # 解析数据并添加到总数据中
+                all_data.extend(data)
+                fetched_candles += len(data)
 
-            # 解析数据并添加到总数据中
-            all_data.extend(data)
-            fetched_candles += len(data)
+                # 更新 `after` 参数为当前返回数据的最早时间戳，用于获取更早的数据
+                after = data[-1][0]
+                # 将时间戳转换为可读性更好的格式
+                print(f"已获取 {fetched_candles} 条K线数据，最新时间：{pd.to_datetime(after, unit='ms')}")
 
-            # 更新 `after` 参数为当前返回数据的最早时间戳，用于获取更早的数据
-            after = data[-1][0]
-            # 将时间戳转换为可读性更好的格式
-            print(f"已获取 {fetched_candles} 条K线数据，最新时间：{pd.to_datetime(after, unit='ms')}")
+                # 如果获取的数据量小于limit，说明数据已获取完毕
+                if len(data) < limit:
+                    break
 
-            # 如果获取的数据量小于limit，说明数据已获取完毕
-            if len(data) < limit:
-                break
-
-            # 短暂延迟，避免触发API限频
-            time.sleep(0.2)
+                # 短暂延迟，避免触发API限频
+                time.sleep(0.2)
 
         except Exception as e:
             print(f"获取K线数据时出现异常：{e}")
@@ -103,22 +109,26 @@ def add_target_variables(df, thresholds=None, max_decoder_length=5):
     :return: 添加了目标变量的DataFrame
     """
     if thresholds is None:
-        thresholds = [round(x * 0.1, 2) for x in range(1, 11)]  # [0.1, 0.2, ..., 1.0]
+        thresholds = [round(x * 0.01, 2) for x in range(1, 11)]  # [0.1, 0.2, ..., 1.0]
 
     # 创建一个新的字典，用于存储所有新增列
     new_columns = {}
 
-    for col in ["close", "high", "low"]:
+    for col in ["close"]:
         for step in range(1, max_decoder_length + 1):  # 未来 1 到 max_decoder_length 分钟
+            # 获取未来 step 个时间窗口内的最高价和最低价
+            future_max_high = df['high'].shift(-step).rolling(window=step, min_periods=1).max()
+            future_min_low = df['low'].shift(-step).rolling(window=step, min_periods=1).min()
+
             for threshold in thresholds:
-                # 计算涨幅超过阈值的列
+                # 计算涨幅超过阈值的列（使用未来的最高价）
                 new_columns[f"{col}_up_{threshold}_t{step}"] = (
-                    (df[col].shift(-step) - df[col]) / df[col] > threshold / 100
+                        (future_max_high - df[col]) / df[col] > threshold / 100
                 ).astype(int)
 
-                # 计算跌幅超过阈值的列
+                # 计算跌幅超过阈值的列（使用未来的最低价）
                 new_columns[f"{col}_down_{threshold}_t{step}"] = (
-                    (df[col].shift(-step) - df[col]) / df[col] < -threshold / 100
+                        (future_min_low - df[col]) / df[col] < -threshold / 100
                 ).astype(int)
 
     # 使用 pd.concat 一次性将所有新列添加到原数据框
@@ -132,7 +142,7 @@ if __name__ == "__main__":
     inst_id = "BTC-USDT-SWAP"
     bar = "1m"
     limit = 100
-    max_candles = 50000
+    max_candles = 1000000
 
     # 获取数据
     kline_data = get_kline_data(inst_id=inst_id, bar=bar, limit=limit, max_candles=max_candles)
@@ -141,7 +151,7 @@ if __name__ == "__main__":
         print("成功获取K线数据，开始处理...")
 
         # 添加时间特征
-        kline_data = add_time_features(kline_data)
+        # kline_data = add_time_features(kline_data)
 
         # 添加目标变量
         kline_data = add_target_variables(kline_data)
