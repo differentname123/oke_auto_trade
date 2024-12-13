@@ -42,20 +42,6 @@ def get_latest_price(inst_id):
         print("获取最新价格失败：", e)
     return None
 
-def get_position(inst_id):
-    """获取当前持仓信息"""
-    try:
-        positions = accountAPI.get_positions(instType="SWAP")
-        if positions and 'data' in positions:
-            for position in positions['data']:
-                if position['instId'] == inst_id:
-                    pos_side = position['posSide']  # 仓位方向：long 或 short
-                    avg_px = float(position['avgPx'])  # 持仓均价
-                    pos_size = float(position['pos'])  # 持仓数量
-                    return pos_side, avg_px, pos_size
-    except Exception as e:
-        print("获取持仓信息失败：", e)
-    return None, None, 0
 
 def place_order(inst_id, side, order_type, size, price=None, tp_price=None):
     """下单函数"""
@@ -83,6 +69,10 @@ def place_order(inst_id, side, order_type, size, price=None, tp_price=None):
 
         # 调用下单接口
         order = tradeAPI.place_order(**order_params)
+        # 将 order 增量写入到文件
+        with open("order_history.txt", "a") as f:
+            f.write(str(order) + "\n")
+
         print(f"{side.upper()} 订单成功：", order)
         return order
     except Exception as e:
@@ -92,7 +82,7 @@ def place_order(inst_id, side, order_type, size, price=None, tp_price=None):
 if __name__ == "__main__":
     offset = 25  # 下单价格的偏移量
     profit = 25
-    count = 1000000
+    count = 1000
     while True:
         count -= 1
         if count < 0:
@@ -106,7 +96,7 @@ if __name__ == "__main__":
         # 计算止盈价格
         take_profit_price_long = latest_price + profit  # 多头止盈价格为买入价格 + 10
         take_profit_price_short = latest_price - profit  # 空头止盈价格为卖出价格 - 10
-
+        print("最新价格：", latest_price)
         # 做多限价单
         place_order(
             INST_ID,
