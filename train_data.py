@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 import numpy as np
 
@@ -5,6 +6,7 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, classification_report
 from lightgbm import LGBMClassifier, early_stopping, log_evaluation
+import joblib  # 用于保存LightGBM模型
 
 import torch
 import torch.nn as nn
@@ -14,19 +16,22 @@ from torch.utils.data import Dataset, DataLoader
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 
+# ===================== 创建保存模型和报告的文件夹 =====================
+models_dir = "models"
+reports_dir = "reports"
+
+os.makedirs(models_dir, exist_ok=True)
+os.makedirs(reports_dir, exist_ok=True)
+
 # ===================== 数据读入与预处理 =====================
-# 假设数据文件名为 "BTC-USDT-SWAP_1m_20241105_20241212_features.csv"
+# 假设数据文件名为 "BTC-USDT-SWAP_1m_20240627_20241212_features.csv"
 data = pd.read_csv("BTC-USDT-SWAP_1m_20240627_20241212_features.csv")
-
-
-
-
 
 # 假设数据中有:
 # timestamp: 时间戳
 # close_up_0.02_t5: 目标变量(0/1)
 # 其他列为特征(价格与技术指标)
-TARGET_COL = "close_up_0.02_t5"
+TARGET_COL = "close_up_0.09_t4"
 
 # 将timestamp设为索引（如果需要）
 if 'timestamp' in data.columns:
@@ -39,7 +44,6 @@ feature_cols = [col for col in data.columns if ('close_down' in col or 'close_up
 # 删除feature_cols中的列
 data = data.drop(columns=feature_cols)
 
-
 mask = (data.replace([np.inf, -np.inf], np.nan).isnull().any(axis=1)) | \
        ((data > np.finfo('float64').max).any(axis=1)) | \
        ((data < np.finfo('float64').min).any(axis=1))
@@ -47,8 +51,6 @@ mask = (data.replace([np.inf, -np.inf], np.nan).isnull().any(axis=1)) | \
 print(f"Removing {mask.sum()} rows with invalid values")
 # 删除这些行
 data = data[~mask]
-
-
 
 # 特征与标签
 features = data.drop(columns=[TARGET_COL])
@@ -74,6 +76,24 @@ val_labels = labels.iloc[train_end:val_end]
 test_data = features.iloc[val_end:]
 test_labels = labels.iloc[val_end:]
 
+
+# ===================== 保存原始数据到文件 =====================
+
+# 保存训练集数据
+train_data_with_labels = pd.concat([train_data, train_labels], axis=1)
+train_data_with_labels.to_csv(os.path.join(models_dir, "train_data_with_labels.csv"), index=False)
+
+# 保存验证集数据
+val_data_with_labels = pd.concat([val_data, val_labels], axis=1)
+val_data_with_labels.to_csv(os.path.join(models_dir, "val_data_with_labels.csv"), index=False)
+
+# 保存测试集数据
+test_data_with_labels = pd.concat([test_data, test_labels], axis=1)
+test_data_with_labels.to_csv(os.path.join(models_dir, "test_data_with_labels.csv"), index=False)
+
+print("原始数据集已保存为 CSV 文件")
+
+
 # 对特征进行缩放处理（仅使用训练集的统计量）
 scaler = StandardScaler()
 scaler.fit(train_data)
@@ -81,6 +101,12 @@ scaler.fit(train_data)
 train_data_scaled = scaler.transform(train_data)
 val_data_scaled = scaler.transform(val_data)
 test_data_scaled = scaler.transform(test_data)
+
+# 保存 StandardScaler
+scaler_path = os.path.join(models_dir, "scaler.pkl")
+joblib.dump(scaler, scaler_path)
+print(f"Scaler 已保存至 {scaler_path}")
+
 
 # 转换回DataFrame（可选）
 train_data_scaled = pd.DataFrame(train_data_scaled, index=train_data.index, columns=train_data.columns)
@@ -233,10 +259,20 @@ lstm_model = LSTMModel(input_size=input_size, hidden_size=128, num_layers=2).to(
 print("Training LSTM Model...")
 val_acc_lstm = train_model(lstm_model, train_loader, val_loader, epochs=50, patience=10, lr=1e-3, class_weights=class_weights_tensor)
 
+# 保存LSTM模型
+lstm_model_path = os.path.join(models_dir, "lstm_model.pth")
+torch.save(lstm_model.state_dict(), lstm_model_path)
+print(f"LSTM模型已保存至 {lstm_model_path}")
+
 # ===================== 训练Transformer模型 =====================
 transformer_model = TransformerModel(input_size=input_size, num_layers=2, d_model=128, nhead=8, dim_feedforward=256).to(device)
 print("Training Transformer Model...")
 val_acc_transformer = train_model(transformer_model, train_loader, val_loader, epochs=50, patience=10, lr=1e-3, class_weights=class_weights_tensor)
+
+# 保存Transformer模型
+transformer_model_path = os.path.join(models_dir, "transformer_model.pth")
+torch.save(transformer_model.state_dict(), transformer_model_path)
+print(f"Transformer模型已保存至 {transformer_model_path}")
 
 # ===================== 训练LightGBM模型 =====================
 # 为LightGBM模型准备数据，无需序列化
@@ -256,6 +292,12 @@ lgbm.fit(
         log_evaluation(period=1)
     ]
 )
+
+# 保存LightGBM模型
+lgbm_model_path = os.path.join(models_dir, "lightgbm_model.pkl")
+joblib.dump(lgbm, lgbm_model_path)
+print(f"LightGBM模型已保存至 {lgbm_model_path}")
+
 # ===================== 提取各模型预测用于Stacking =====================
 def get_model_predictions(model, loader):
     model.eval()
@@ -291,6 +333,11 @@ stack_y_val = val_labels_aligned
 meta_model = LGBMClassifier(n_estimators=100)
 meta_model.fit(stack_X_val, stack_y_val)
 
+# 保存元模型
+meta_model_path = os.path.join(models_dir, "meta_model.pkl")
+joblib.dump(meta_model, meta_model_path)
+print(f"元模型已保存至 {meta_model_path}")
+
 # ===================== 测试集评估 =====================
 # 获取测试集预测结果及对应绝对索引
 test_preds_lstm, test_indices = get_model_predictions(lstm_model, test_loader)
@@ -315,8 +362,12 @@ thresholds = np.arange(0.5, 1, 0.01)
 
 from sklearn.metrics import classification_report, confusion_matrix
 
+# 收集所有报告
+all_reports = []
+
 for threshold in thresholds:
-    print(f"\nThreshold: {threshold:.2f}")
+    report_str = f"\nThreshold: {threshold:.2f}\n"
+    print(report_str)
 
     # 生成预测类别
     final_preds_adjusted = np.where(final_probs >= threshold, 1, 0)
@@ -324,11 +375,26 @@ for threshold in thresholds:
     # 计算分类报告
     report = classification_report(stack_y_test, final_preds_adjusted, digits=4)
     print(report)
+    report_str += report + "\n"
 
     # 计算每个类别的准确率
     cm = confusion_matrix(stack_y_test, final_preds_adjusted)
     per_class_acc = cm.diagonal() / cm.sum(axis=1)
     for idx, acc in enumerate(per_class_acc):
-        print(f"Accuracy for class {idx}: {acc:.4f}")
+        acc_str = f"Accuracy for class {idx}: {acc:.4f}\n"
+        print(acc_str)
+        report_str += acc_str
+
+    all_reports.append(report_str)
 
 print("Class weights:", class_weights)
+
+# 将所有报告写入文件
+report_file_path = os.path.join(reports_dir, "performance_report.txt")
+with open(report_file_path, "w") as f:
+    f.write("性能报告\n")
+    f.write("="*50 + "\n\n")
+    for report in all_reports:
+        f.write(report)
+        f.write("="*50 + "\n\n")
+print(f"性能报告已保存至 {report_file_path}")

@@ -142,7 +142,7 @@ if __name__ == "__main__":
     inst_id = "BTC-USDT-SWAP"
     bar = "1m"
     limit = 100
-    max_candles = 1000000
+    max_candles = 60 * 24 * 2
 
     # 获取数据
     kline_data = get_kline_data(inst_id=inst_id, bar=bar, limit=limit, max_candles=max_candles)

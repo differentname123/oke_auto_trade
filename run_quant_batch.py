@@ -20,16 +20,19 @@ os.environ['HTTPS_PROXY'] = 'http://127.0.0.1:7890'
 # 全局延时配置
 DELAY_SHORT = 1  # 短延时（秒）
 
+total_profit = 90
+OFFSET = -45
+PROFIT = total_profit - OFFSET
 # 配置区域
 CONFIG = {
     "INST_ID": "BTC-USDT-SWAP",  # 交易对
     "ORDER_SIZE": 10,  # 每次固定下单量
     "PRICE_THRESHOLD": 10,  # 最新价格变化的阈值
-    "OFFSET": 45,  # 下单价格偏移量（基础值）
-    "PROFIT": 45  # 止盈偏移量（基础值）
+    "OFFSET": OFFSET,  # 下单价格偏移量（基础值）
+    "PROFIT": PROFIT  # 止盈偏移量（基础值）
 }
 
-MAX_POSITION_RATIO = 0.9  # 最大持仓比例为0.9
+MAX_POSITION_RATIO = 1  # 最大持仓比例为0.9
 flag = "1"  # 实盘: 0, 模拟盘: 1
 
 # API 初始化
@@ -122,7 +125,7 @@ def get_position_ratio(inst_id, latest_price):
 
 
 def release_funds(inst_id, latest_price, release_len):
-    """根据当前价格和订单价格差距，取消指定数量的订单"""
+    """根据当前价格和订单价格差距，取消指定数量的订单。"""
     open_orders = get_open_orders()
     if not open_orders:
         logger.warning("当前没有未完成的订单。")
@@ -136,9 +139,22 @@ def release_funds(inst_id, latest_price, release_len):
 
     for order in sorted_orders[:release_len]:
         order_id = order['ordId']
+        order_price = float(order['px'])
+        price_diff = abs(latest_price - order_price)
+        last_updated = float(order['uTime']) / 1000  # 假设时间戳以毫秒为单位
+
+        # 检查价格偏移和时间间隔
+        if price_diff <= 200 and (time.time() - last_updated) <= 60:
+            logger.warning(
+                f"保留订单 {order_id}，订单价格：{order['px']}，最新价格：{latest_price}，差距：{price_diff}，时间间隔在1分钟内。"
+            )
+            continue
+
         logger.warning(
-            f"取消订单 {order_id}，订单价格：{order['px']}，最新价格：{latest_price} 差距：{abs(latest_price - float(order['px']))}")
+            f"取消订单 {order_id}，订单价格：{order['px']}，最新价格：{latest_price}，差距：{price_diff}"
+        )
         cancel_order(inst_id, order_id)
+
 
 
 def place_batch_orders(order_list):
@@ -177,7 +193,7 @@ def calc_adjustment(x, k=3):
     # 将value向上取整
     return np.ceil(value)
 
-def prepare_orders(latest_price, base_offset, base_profit, last_price, long_ratio, short_ratio):
+def prepare_orders(latest_price, base_offset, base_profit, long_ratio, short_ratio):
     """
     根据多空比例和价格变化动态调整offset和profit:
     - 假设：当一方比例更大时，对该方仅调整offset，对另一方仅调整profit。
@@ -284,24 +300,27 @@ if __name__ == "__main__":
 
             # 检查价格变化是否超出阈值
             if last_price is not None and abs(latest_price - last_price) < CONFIG["PRICE_THRESHOLD"]:
-                logger.info("价格变化不足，跳过本次下单。上次价格：%s, 最新价格：%s", last_price, latest_price)
+                logger.warning("价格变化不足，跳过本次下单。上次价格：%s, 最新价格：%s", last_price, latest_price)
                 time.sleep(DELAY_SHORT)
                 continue
 
-            prev_price = last_price
-            last_price = latest_price
+
 
             # 准备订单（根据多空比例差异和价格走势动态调整）
-            orders = prepare_orders(latest_price, CONFIG["OFFSET"], CONFIG["PROFIT"], prev_price, long_ratio,
+            orders = prepare_orders(latest_price, CONFIG["OFFSET"], CONFIG["PROFIT"], long_ratio,
                                     short_ratio)
 
             # 如果有可下单的订单则批量下单
+            # release_funds(CONFIG["INST_ID"], latest_price, 2)
             if orders:
                 result = place_batch_orders(orders)
                 result_str = str(result)
                 if result_str and 'failed' in result_str:
                     logger.error("批量下单失败：%s", result_str)
                     release_funds(CONFIG["INST_ID"], latest_price, 2)
+                else:
+                    prev_price = last_price
+                    last_price = latest_price
 
             time.sleep(DELAY_SHORT)
 

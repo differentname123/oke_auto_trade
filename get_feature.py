@@ -216,8 +216,6 @@ def feature_engineering(df):
     df_features["K_10_cross_down_D_10"] = (
                 (df_features["K_10_D_10_diff"] < 0) & (df_features["K_10_D_10_diff"].shift(1) > 0)).astype(int)
 
-    # ... 更多特征交叉可以根据你的理解和实验结果添加 ...
-
     # 合并原始数据和生成的特征数据
     df_combined = pd.concat([df, df_features], axis=1)
 
@@ -247,14 +245,22 @@ def get_dist(data_path):
     for col in feature_cols:
         value_counts = df[col].value_counts(normalize=True)  # 计算分布
         row = [col]  # 初始化行，包含列名
+        forward = col.split('_')[1]
+        ratio = float(col.split('_')[2])
+        period = col.split('_')[3]
+        row.append(forward)
+        row.append(period)
+        row.append(ratio)
         # 按照 0 和 1 顺序添加分布值
         row.append(value_counts.get(0, 0))  # 如果没有值，返回 0
         row.append(value_counts.get(1, 0))  # 如果没有值，返回 0
         distribution_data.append(row)
 
     # 创建 DataFrame 并添加列名
-    dist_df = pd.DataFrame(distribution_data, columns=['col', '0', '1'])
-    dist_df.to_csv('distribution.csv', index=False)
+    dist_df = pd.DataFrame(distribution_data, columns=['col', 'forward', 'period', 'ratio', '0', '1'])
+    return dist_df
+
+
 def gen_feature(origin_name):
     data = pd.read_csv(origin_name)
     # data = data.tail(1000)
@@ -263,6 +269,8 @@ def gen_feature(origin_name):
     df.to_csv(f'{origin_name[:-4]}_features.csv', index=False)
 
 if __name__ == '__main__':
-    file_name = 'BTC-USDT-SWAP_1m_20240627_20241212.csv'
-    get_dist(file_name)
+    file_name = 'BTC-USDT-SWAP_1m_20241212_20241214.csv'
+    long_df = get_dist(file_name)
+    short_df = get_dist('BTC-USDT-SWAP_1m_20240627_20241212.csv')
+    pass
     # gen_feature(file_name)
