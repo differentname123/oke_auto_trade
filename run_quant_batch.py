@@ -9,6 +9,13 @@ import okx.MarketData as Market
 import okx.Account as Account
 from common_utils import get_config
 
+"""
+当前策略说明:
+1.负偏差价格下单，基本上一下单就会秒成，增加下单的成功率（相应的盈利偏差就增加了 整体盈利差保持在90）
+2.多空差异大时会减小多的那个方向的买入价格（认为下降空间很大或者不想继续增加这个方向的仓位了）。会增加小的那个方向的止盈利润（未改变买入价 表示还是希望能够买入增加持仓量。同时增加止盈是认为如果继续往反方向变化的话能够盈利多一点 减小损失）
+3.价格相较于上一次的触发价格相差10才进行新的下单（避免单子都分布在一个价格区间）
+"""
+
 # 日志配置
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)

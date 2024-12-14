@@ -87,7 +87,7 @@ data = pd.read_csv(new_data_path)
 # timestamp: 时间戳
 # close_down_0.08_t5: 目标变量(0/1)
 # 其他列为特征(价格与技术指标)
-TARGET_COL = "close_down_0.08_t5"
+TARGET_COL = "close_up_0.09_t4"
 
 # 将timestamp设为索引（如果需要）
 if 'timestamp' in data.columns:
