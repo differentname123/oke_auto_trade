@@ -269,7 +269,7 @@ def gen_feature(origin_name):
     df.to_csv(f'{origin_name[:-4]}_features.csv', index=False)
 
 if __name__ == '__main__':
-    file_name = 'BTC-USDT-SWAP_1m_20241212_20241214.csv'
+    file_name = 'BTC-USDT-SWAP_1m_20230118_20241212.csv'
     long_df = get_dist(file_name)
     short_df = get_dist('BTC-USDT-SWAP_1m_20240627_20241212.csv')
     pass
