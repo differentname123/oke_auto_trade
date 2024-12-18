@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-
+import os
 
 def calculate_ma(data, period):
     """计算移动平均线 (MA)"""
@@ -236,6 +236,15 @@ def get_dist(data_path):
     :param output_csv_path: 输出CSV文件的路径
     :return: None
     """
+    output_path = f'{data_path[:-4]}_distribution.csv'
+    if os.path.exists(output_path):
+        data_df = pd.read_csv(output_path)
+        data_df['score'] = (data_df['ratio'] - 0.05) / (data_df['period']) * data_df['1'] * data_df['1']
+        # 将data_df['score']归一化
+        data_df['score'] = (data_df['score'] - data_df['score'].min()) / (data_df['score'].max() - data_df['score'].min())
+
+        return data_df
+
     df = pd.read_csv(data_path)
     feature_cols = [col for col in df.columns if 'close_down' in col or 'close_up' in col]
 
@@ -248,6 +257,7 @@ def get_dist(data_path):
         forward = col.split('_')[1]
         ratio = float(col.split('_')[2])
         period = col.split('_')[3]
+        period = int(period[1:])  # 去掉前缀 t
         row.append(forward)
         row.append(period)
         row.append(ratio)
@@ -258,6 +268,8 @@ def get_dist(data_path):
 
     # 创建 DataFrame 并添加列名
     dist_df = pd.DataFrame(distribution_data, columns=['col', 'forward', 'period', 'ratio', '0', '1'])
+    # 将dist_df保存到文件
+    dist_df.to_csv(output_path, index=False)
     return dist_df
 
 
