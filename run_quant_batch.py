@@ -117,6 +117,7 @@ def create_take_profit_order(inst_id, pos_side, tp_price, quantity):
         side = 'sell'
     else:
         side = 'buy'
+    quantity = round(quantity, 1)
     result = tradeAPI.place_algo_order(
         instId=inst_id,
         tdMode='cross',
@@ -155,15 +156,20 @@ def get_position_ratio(inst_id, latest_price):
         take_profit_orders_data = take_profit_orders['data']
 
         # 初始化止盈单计数器
-        existing_long_tp = 0
-        existing_short_tp = 0
+        long_tp_count = 0  # 多单止盈单个数
+        short_tp_count = 0  # 空单止盈单个数
+        existing_long_tp = 0  # 多单止盈单的数量总和
+        existing_short_tp = 0  # 空单止盈单的数量总和
         long_sz = 0
         short_sz = 0
 
+        # 统计已有的止盈单数量
         for order in take_profit_orders_data:
             if order['side'] == 'sell':  # 多单止盈
+                long_tp_count += 1
                 existing_long_tp += float(order['sz']) if order['sz'] != "" else 0
             elif order['side'] == 'buy':  # 空单止盈
+                short_tp_count += 1
                 existing_short_tp += float(order['sz']) if order['sz'] != "" else 0
 
         # 计算仓位价值和止盈单数量
@@ -182,21 +188,54 @@ def get_position_ratio(inst_id, latest_price):
         long_ratio = long_value / total_equity if total_equity > 0 else 0
         short_ratio = short_value / total_equity if total_equity > 0 else 0
 
-        print(f"多头数量: {long_sz}, 空头数量: {short_sz}, 多头占比: {long_ratio}, 空头占比: {short_ratio} 多头止盈数量: {existing_long_tp}, 空头止盈数量: {existing_short_tp}")
+        print(f"多头数量: {long_sz}, 空头数量: {short_sz}, 多头占比: {long_ratio}, 空头占比: {short_ratio} 多头止盈单数量: {long_tp_count}, 空头止盈单数量: {short_tp_count}")
+
+        # 检查单个方向的止盈单数量是否超过50个
+        def cancel_oldest_take_profit_order(inst_id, side):
+            """取消最早的止盈单，并更新计数器，直到止盈单数量小于50"""
+            nonlocal long_tp_count, short_tp_count, existing_long_tp, existing_short_tp
+
+            # 根据止盈单数量判断是否需要继续取消
+            if side == 'long' and long_tp_count >= 50:
+                while long_tp_count >= 50:
+                    # 取消最早的多单止盈单
+                    for order in take_profit_orders_data:
+                        if order['side'] == 'sell':
+                            algo_orders = [{"instId": inst_id, "algoId": order['algoId']}]
+                            tradeAPI.cancel_algo_order(algo_orders)
+                            long_tp_count -= 1  # 更新多单止盈单计数器
+                            existing_long_tp -= float(order['sz'])  # 更新多单止盈单数量总和
+                            print(f"取消多单止盈单，algoId: {order['algoId']}")
+                            break  # 取消一个后退出
+            elif side == 'short' and short_tp_count >= 50:
+                while short_tp_count >= 50:
+                    # 取消最早的空单止盈单
+                    for order in take_profit_orders_data:
+                        if order['side'] == 'buy':
+                            algo_orders = [{"instId": inst_id, "algoId": order['algoId']}]
+                            tradeAPI.cancel_algo_order(algo_orders)
+                            short_tp_count -= 1  # 更新空单止盈单计数器
+                            existing_short_tp -= float(order['sz'])  # 更新空单止盈单数量总和
+                            print(f"取消空单止盈单，algoId: {order['algoId']}")
+                            break  # 取消一个后退出
 
         # 为多单设置止盈单（计算差距并创建止盈单）
         if long_position_exists:
-            long_diff = long_sz - existing_long_tp  # 差距
+            long_diff = long_sz - existing_long_tp  # 差距（应该使用数量总和）
             if long_diff > 0:
-                tp_price_long = avg_long_price + total_profit  # 多单止盈价格
+                cancel_oldest_take_profit_order(inst_id, 'long')  # 如果已有50个多单止盈单，取消一个
+                long_diff = long_sz - existing_long_tp
+                tp_price_long = min(latest_price, avg_long_price) + total_profit  # 多单止盈价格
                 create_take_profit_order(inst_id, 'long', tp_price_long, long_diff)
                 print(f"为多单设置止盈单，止盈价格: {tp_price_long}, 数量: {long_diff}")
 
         # 为空单设置止盈单（计算差距并创建止盈单）
         if short_position_exists:
-            short_diff = short_sz - existing_short_tp  # 差距
+            short_diff = short_sz - existing_short_tp  # 差距（应该使用数量总和）
             if short_diff > 0:
-                tp_price_short = avg_short_price - total_profit  # 空单止盈价格
+                cancel_oldest_take_profit_order(inst_id, 'short')  # 如果已有50个空单止盈单，取消一个
+                short_diff = short_sz - existing_short_tp  # 差距（应该使用数量总和）
+                tp_price_short = max(avg_short_price, latest_price) - total_profit  # 空单止盈价格
                 create_take_profit_order(inst_id, 'short', tp_price_short, short_diff)
                 print(f"为空单设置止盈单，止盈价格: {tp_price_short}, 数量: {short_diff}")
 
@@ -228,7 +267,7 @@ def release_near_funds(inst_id):
     buy_orders = sorted(buy_orders, key=lambda order: float(order['px']))
     sell_orders = sorted(sell_orders, key=lambda order: float(order['px']))
 
-    canceled_count = 0  # 已取消的订单数量
+    max_price_diff = 2 * CONFIG["PRICE_THRESHOLD"]  # 最大价格差距
 
     # 取消买单方向的订单，检查相邻订单之间的价格差距
     for i in range(1, len(buy_orders)):
@@ -238,9 +277,8 @@ def release_near_funds(inst_id):
 
         price_diff = abs(float(order2['px']) - float(order1['px']))
 
-        # 如果价格差距小于100，取消这两个订单中的一个
-        if price_diff < CONFIG["PRICE_THRESHOLD"]:
-            order_id = order2['ordId']  # 取消后面一个订单
+        if price_diff < max_price_diff:
+            order_id = order1['ordId']  # 取消前面一个订单（价格低）
             logger.warning(
                 f"强制取消买单 {order_id}，价格差距：{price_diff}"
             )
@@ -255,8 +293,8 @@ def release_near_funds(inst_id):
         price_diff = abs(float(order2['px']) - float(order1['px']))
 
         # 如果价格差距小于100，取消这两个订单中的一个
-        if price_diff < CONFIG["PRICE_THRESHOLD"]:
-            order_id = order2['ordId']  # 取消后面一个订单
+        if price_diff < max_price_diff:
+            order_id = order2['ordId']  # 取消后面一个订单（价格高）
             logger.warning(
                 f"强制取消卖单 {order_id}，价格差距：{price_diff}"
             )
@@ -298,9 +336,6 @@ def release_funds(inst_id, latest_price, release_len):
 def place_batch_orders(order_list):
     """批量下单"""
     result = safe_api_call(tradeAPI.place_multiple_orders, order_list)
-    if result:
-        with open("order_history.txt", "a") as f:
-            f.write(str(result) + "\n")
     return result
 
 
@@ -316,6 +351,19 @@ def create_order(inst_id, side, price, size, pos_side, tp_px):
         "posSide": pos_side,
         "tpTriggerPx": str(tp_px),
         "tpOrdPx": str(tp_px)
+    }
+
+def create_trailing_stop_order(inst_id, side, trigger_price, size, pos_side, trail_value=10):
+    """生成一个移动止盈止损订单"""
+    return {
+        "instId": inst_id,               # 交易对
+        "tdMode": "cross",               # 交易模式（全仓）
+        "side": side,                    # 平仓方向（'buy' 或 'sell'）
+        "ordType": "move_order_stop",    # 移动止盈止损类型
+        "sz": str(size),                 # 数量
+        "posSide": pos_side,             # 仓位方向（'long' 或 'short'）
+        "activePx": str(trigger_price),  # 触发止盈止损的价格
+        "callbackSpread": str(10),   # 移动止盈止损的价格波动幅度
     }
 
 
@@ -348,6 +396,7 @@ def prepare_orders(latest_price, base_offset, base_profit, long_ratio, short_rat
     简化后逻辑：无论价格上涨或下跌，只要有明显强弱侧，就对强侧offset和弱侧profit根据差异放大。
     """
     order_list = []
+    move_order_list = []
     diff = abs(long_ratio - short_ratio)
 
     if diff <= 0.1:
@@ -394,6 +443,15 @@ def prepare_orders(latest_price, base_offset, base_profit, long_ratio, short_rat
                 latest_price + (adjusted_long_profit if short_ratio > long_ratio else base_profit)
             )
         )
+        move_order_list.append(
+            create_trailing_stop_order(
+                CONFIG["INST_ID"],
+                "buy",
+                latest_price - 2 * (adjusted_long_offset if long_ratio > short_ratio else base_offset),
+                CONFIG["ORDER_SIZE"],
+                "long"
+            )
+        )
     else:
         logger.warning("多头仓位比例过高，暂停开多。")
 
@@ -411,10 +469,21 @@ def prepare_orders(latest_price, base_offset, base_profit, long_ratio, short_rat
                 latest_price - (adjusted_short_profit if long_ratio > short_ratio else base_profit)
             )
         )
+        move_order_list.append(
+            create_trailing_stop_order(
+                CONFIG["INST_ID"],
+                "sell",
+                latest_price + 2 * (adjusted_short_offset if short_ratio > long_ratio else base_offset),
+                CONFIG["ORDER_SIZE"],
+                "short"
+            )
+        )
     else:
         logger.warning("空头仓位比例过高，暂停开空。")
-
-    return order_list
+    # 调整order_list的顺序，如果多头比例大于空头，将空头放在前面
+    if long_ratio > short_ratio:
+        order_list.reverse()
+    return order_list, move_order_list
 
 def get_take_profit_orders():
     """获取所有正在委托的止盈单"""
@@ -481,11 +550,13 @@ if __name__ == "__main__":
 
 
             # 准备订单（根据多空比例差异和价格走势动态调整）
-            orders = prepare_orders(latest_price, CONFIG["OFFSET"], CONFIG["PROFIT"], long_ratio,
+            orders, move_order_list = prepare_orders(latest_price, CONFIG["OFFSET"], CONFIG["PROFIT"], long_ratio,
                                     short_ratio)
 
             if orders:
-                release_near_funds(CONFIG["INST_ID"])
+                for order in move_order_list:
+                    result = tradeAPI.place_algo_order(**order)
+                    print(f"移动止盈止损订单：{result}")
                 for order in orders:
                     temp_order = [order]
                     logger.info("下单信息：%s", order)
@@ -499,6 +570,8 @@ if __name__ == "__main__":
                     prev_price = last_price
                     last_price = latest_price
                     print(orders)
+                release_near_funds(CONFIG["INST_ID"])
+
 
             time.sleep(DELAY_SHORT)
 

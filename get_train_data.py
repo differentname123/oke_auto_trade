@@ -99,7 +99,7 @@ def add_time_features(df):
     return df
 
 
-def add_target_variables(df, thresholds=None, max_decoder_length=5):
+def add_target_variables(df, thresholds=None, max_decoder_length=60):
     """
     添加目标变量，包括未来多个时间步的涨幅和跌幅，针对close、high、low的多阈值计算。
 
@@ -109,7 +109,7 @@ def add_target_variables(df, thresholds=None, max_decoder_length=5):
     :return: 添加了目标变量的DataFrame
     """
     if thresholds is None:
-        thresholds = [round(x * 0.01, 2) for x in range(1, 11)]  # [0.1, 0.2, ..., 1.0]
+        thresholds = [round(x * 0.05, 2) for x in range(1, 11)]  # [0.1, 0.2, ..., 1.0]
 
     # 创建一个新的字典，用于存储所有新增列
     new_columns = {}
@@ -142,7 +142,7 @@ if __name__ == "__main__":
     inst_id = "BTC-USDT-SWAP"
     bar = "1m"
     limit = 100
-    max_candles = 60 * 24 * 2
+    max_candles = 1000000
 
     # 获取数据
     kline_data = get_kline_data(inst_id=inst_id, bar=bar, limit=limit, max_candles=max_candles)
