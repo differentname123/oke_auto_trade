@@ -76,10 +76,19 @@ def get_open_orders():
     """获取未完成的订单"""
     return safe_api_call(tradeAPI.get_order_list, instType="SWAP")
 
+def get_alg_open_orders():
+    """获取未完成的订单"""
+    return safe_api_call(tradeAPI.order_algos_list, ordType="move_order_stop")
+
 
 def cancel_order(inst_id, order_id):
     """撤销订单"""
     return safe_api_call(tradeAPI.cancel_order, instId=inst_id, ordId=order_id)
+
+def cancel_alg_order(inst_id, order_id):
+    """撤销订单"""
+    param = [{"instId": inst_id, "algoId": order_id}]
+    return safe_api_call(tradeAPI.cancel_algo_order, param)
 
 
 def get_latest_price(inst_id):
@@ -163,14 +172,31 @@ def get_position_ratio(inst_id, latest_price):
         long_sz = 0
         short_sz = 0
 
+        # 当前时间（毫秒级）
+        current_time = int(time.time() * 1000)
+
         # 统计已有的止盈单数量
         for order in take_profit_orders_data:
             if order['side'] == 'sell':  # 多单止盈
                 long_tp_count += 1
                 existing_long_tp += float(order['sz']) if order['sz'] != "" else 0
+                # 检查是否超过2小时，超过则取消
+                if current_time - int(order['cTime']) > 10 * 60 * 60 * 1000:  # 超过2小时
+                    algo_orders = [{"instId": inst_id, "algoId": order['algoId']}]
+                    tradeAPI.cancel_algo_order(algo_orders)
+                    long_tp_count -= 1  # 更新多单止盈单计数器
+                    existing_long_tp -= float(order['sz'])  # 更新多单止盈单数量总和
+                    print(f"取消超过2小时的多单止盈单，algoId: {order['algoId']}")
             elif order['side'] == 'buy':  # 空单止盈
                 short_tp_count += 1
                 existing_short_tp += float(order['sz']) if order['sz'] != "" else 0
+                # 检查是否超过2小时，超过则取消
+                if current_time - int(order['cTime']) > 2 * 60 * 60 * 1000:  # 超过2小时
+                    algo_orders = [{"instId": inst_id, "algoId": order['algoId']}]
+                    tradeAPI.cancel_algo_order(algo_orders)
+                    short_tp_count -= 1  # 更新空单止盈单计数器
+                    existing_short_tp -= float(order['sz'])  # 更新空单止盈单数量总和
+                    print(f"取消超过2小时的空单止盈单，algoId: {order['algoId']}")
 
         # 计算仓位价值和止盈单数量
         for pos in positions:
@@ -244,6 +270,64 @@ def get_position_ratio(inst_id, latest_price):
     except Exception as e:
         print(f"发生错误: {e}")
         return 0, 0, 0, 0
+
+
+
+def release_alg_near_funds(inst_id):
+    """根据当前价格和订单价格差距，取消指定数量的订单，强制释放同一方向中，委托价格差距小于100的订单。"""
+    alg_open_orders = get_alg_open_orders()
+    px_key = 'activePx'
+    id_key = 'algoId'
+    if not alg_open_orders:
+        logger.warning("当前没有未完成的移动止盈止损订单。")
+        return
+
+    buy_orders = []
+    sell_orders = []
+
+    # 分类订单
+    for order in alg_open_orders['data']:
+        if order['side'] == 'buy':
+            buy_orders.append(order)
+        elif order['side'] == 'sell':
+            sell_orders.append(order)
+
+    # 按照价格排序：优先处理价格差距较小的订单
+    buy_orders = sorted(buy_orders, key=lambda order: float(order[px_key]))
+    sell_orders = sorted(sell_orders, key=lambda order: float(order[px_key]))
+
+    max_price_diff = 2 * CONFIG["PRICE_THRESHOLD"]  # 最大价格差距
+
+    # 取消买单方向的订单，检查相邻订单之间的价格差距
+    for i in range(1, len(buy_orders)):
+
+        order1 = buy_orders[i-1]
+        order2 = buy_orders[i]
+
+        price_diff = abs(float(order2[px_key]) - float(order1[px_key]))
+
+        if price_diff < max_price_diff:
+            order_id = order1[id_key]  # 取消前面一个订单（价格低）
+            logger.warning(
+                f"强制取消买单 {order_id}，价格差距：{price_diff}"
+            )
+            cancel_alg_order(inst_id, order_id)
+
+    # 取消卖单方向的订单，检查相邻订单之间的价格差距
+    for i in range(1, len(sell_orders)):
+
+        order1 = sell_orders[i-1]
+        order2 = sell_orders[i]
+
+        price_diff = abs(float(order2[px_key]) - float(order1[px_key]))
+
+        # 如果价格差距小于100，取消这两个订单中的一个
+        if price_diff < max_price_diff:
+            order_id = order2[id_key]  # 取消后面一个订单（价格高）
+            logger.warning(
+                f"强制取消卖单 {order_id}，价格差距：{price_diff}"
+            )
+            cancel_alg_order(inst_id, order_id)
 
 
 def release_near_funds(inst_id):
@@ -571,7 +655,7 @@ if __name__ == "__main__":
                     last_price = latest_price
                     print(orders)
                 release_near_funds(CONFIG["INST_ID"])
-
+                release_alg_near_funds(CONFIG["INST_ID"])
 
             time.sleep(DELAY_SHORT)
 
