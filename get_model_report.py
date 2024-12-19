@@ -17,13 +17,13 @@ print("Using device:", device)
 # timestamp: 时间戳
 # close_down_0.08_t5: 目标变量(0/1)
 # 其他列为特征(价格与技术指标)
-TARGET_COL = "close_down_0.15_t4"
-seq_len = 100  # 与训练时相同
+TARGET_COL = "close_down_0.2_t5"
+seq_len = 500  # 与训练时相同
 key_name = f'{seq_len}_{TARGET_COL}'
 
 # 假设新数据文件名为 "new_data.csv"
 # new_data_path = "models/test_data_with_labels.csv"
-new_data_path = "BTC-USDT-SWAP_1m_20241218_20241219_features_tail.csv"
+new_data_path = "BTC-USDT-SWAP_1m_20241218_20241220_features_tail.csv"
 
 models_dir = "models"
 reports_dir = "reports"
@@ -229,18 +229,22 @@ final_probs = meta_model.predict_proba(stack_X)[:, 1]
 if np.max(indices_lstm) >= len(data):
     raise IndexError("indices_lstm 中存在超出 data 索引范围的值")
 
-# 获取对应的时间戳
-timestamps = data.index[indices_lstm]
+try:
+    # 获取对应的时间戳
+    timestamps = data.index[indices_lstm]
 
-# 将时间戳转换为字符串格式，确保在CSV中正确显示
-timestamps_str = timestamps.strftime('%Y-%m-%d %H:%M:%S')
+    # 将时间戳转换为字符串格式，确保在CSV中正确显示
+    timestamps_str = timestamps.strftime('%Y-%m-%d %H:%M:%S')
 
-# 创建结果DataFrame
-results_df = pd.DataFrame({
-    'timestamp': timestamps_str,
-    'true_label': stack_y,
-    'pred_final_prob': final_probs
-})
+    # 创建结果DataFrame
+    results_df = pd.DataFrame({
+        'timestamp': timestamps_str,
+        'true_label': stack_y,
+        'pred_final_prob': final_probs
+    })
+except Exception as e:
+    print(f"保存预测结果时出现异常：{e}")
+    results_df = None
 
 # ===================== 生成性能报告 =====================
 # 定义阈值范围

@@ -638,9 +638,6 @@ if __name__ == "__main__":
                                     short_ratio)
 
             if orders:
-                for order in move_order_list:
-                    result = tradeAPI.place_algo_order(**order)
-                    print(f"移动止盈止损订单：{result}")
                 for order in orders:
                     temp_order = [order]
                     logger.info("下单信息：%s", order)
@@ -654,8 +651,11 @@ if __name__ == "__main__":
                     prev_price = last_price
                     last_price = latest_price
                     print(orders)
+                    for order in move_order_list:
+                        result = tradeAPI.place_algo_order(**order)
+                        print(f"移动止盈止损订单：{result}")
                     release_near_funds(CONFIG["INST_ID"])
-                release_alg_near_funds(CONFIG["INST_ID"])
+                    release_alg_near_funds(CONFIG["INST_ID"])
 
             time.sleep(DELAY_SHORT)
 

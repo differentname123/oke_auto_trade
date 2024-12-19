@@ -31,8 +31,8 @@ data = pd.read_csv("BTC-USDT-SWAP_1m_20230124_20241218_features_tail.csv")
 # timestamp: 时间戳
 # close_up_0.02_t5: 目标变量(0/1)
 # 其他列为特征(价格与技术指标)
-TARGET_COL = "close_down_0.15_t4"
-seq_len = 100
+TARGET_COL = "close_down_0.2_t5"
+seq_len = 500
 
 
 key_name = f'{seq_len}_{TARGET_COL}'
@@ -401,7 +401,7 @@ print("Class weights:", class_weights)
 # 将所有报告写入文件
 report_file_path = os.path.join(reports_dir, "performance_report.txt")
 with open(report_file_path, "w") as f:
-    f.write(f"性能报告 {class_weights}  {label_counts}\n")
+    f.write(f"性能报告 训练集比重{class_weights}  测试集比重{label_counts}\n")
     f.write("="*50 + "\n\n")
     for report in all_reports:
         f.write(report)
