@@ -33,13 +33,13 @@ os.environ['HTTPS_PROXY'] = 'http://127.0.0.1:7890'
 DELAY_SHORT = 1  # 短延时（秒）
 
 total_profit = 500
-OFFSET = 300
+OFFSET = 1000
 PROFIT = total_profit - OFFSET
 # 配置区域
 CONFIG = {
     "INST_ID": "BTC-USDT-SWAP",  # 交易对
     "ORDER_SIZE": 0.1,  # 每次固定下单量
-    "PRICE_THRESHOLD": 100,  # 最新价格变化的阈值
+    "PRICE_THRESHOLD": 500,  # 最新价格变化的阈值
     "OFFSET": OFFSET,  # 下单价格偏移量（基础值）
     "PROFIT": PROFIT  # 止盈偏移量（基础值）
 }
@@ -404,7 +404,7 @@ def release_funds(inst_id, latest_price, release_len):
         last_updated = float(order['uTime']) / 1000  # 假设时间戳以毫秒为单位
 
         # 检查价格偏移和时间间隔
-        if price_diff <= 1000 and (time.time() - last_updated) <= 60:
+        if price_diff <= 1000 and (time.time() - last_updated) <= 6000:
             logger.warning(
                 f"保留订单 {order_id}，订单价格：{order['px']}，最新价格：{latest_price}，差距：{price_diff}，时间间隔在1分钟内。"
             )
@@ -654,7 +654,7 @@ if __name__ == "__main__":
                     prev_price = last_price
                     last_price = latest_price
                     print(orders)
-                release_near_funds(CONFIG["INST_ID"])
+                    release_near_funds(CONFIG["INST_ID"])
                 release_alg_near_funds(CONFIG["INST_ID"])
 
             time.sleep(DELAY_SHORT)

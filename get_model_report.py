@@ -13,6 +13,18 @@ from lightgbm import LGBMClassifier
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 
+# 假设数据中有:
+# timestamp: 时间戳
+# close_down_0.08_t5: 目标变量(0/1)
+# 其他列为特征(价格与技术指标)
+TARGET_COL = "close_down_0.15_t4"
+seq_len = 100  # 与训练时相同
+key_name = f'{seq_len}_{TARGET_COL}'
+
+# 假设新数据文件名为 "new_data.csv"
+# new_data_path = "models/test_data_with_labels.csv"
+new_data_path = "BTC-USDT-SWAP_1m_20241218_20241219_features_tail.csv"
+
 models_dir = "models"
 reports_dir = "reports"
 os.makedirs(reports_dir, exist_ok=True)
@@ -69,25 +81,20 @@ class TimeSeriesDataset(Dataset):
         return X_seq, y_label, absolute_idx
 
 # ===================== 加载预处理器 =====================
-scaler_path = os.path.join(models_dir, "scaler.pkl")
+scaler_path = os.path.join(models_dir, f"{key_name}_scaler.pkl")
 if not os.path.exists(scaler_path):
     raise FileNotFoundError(f"Scaler文件未找到，请确保已在训练过程中保存了Scaler至 {scaler_path}")
 scaler = joblib.load(scaler_path)
 print(f"Scaler已从 {scaler_path} 加载")
 
 # ===================== 加载新数据并预处理 =====================
-# 假设新数据文件名为 "new_data.csv"
-new_data_path = "BTC-USDT-SWAP_1m_20241212_20241214_features.csv"
+
 if not os.path.exists(new_data_path):
     raise FileNotFoundError(f"新数据文件未找到，请确保存在 {new_data_path}")
 
 data = pd.read_csv(new_data_path)
 
-# 假设数据中有:
-# timestamp: 时间戳
-# close_down_0.08_t5: 目标变量(0/1)
-# 其他列为特征(价格与技术指标)
-TARGET_COL = "close_up_0.09_t4"
+
 
 # 将timestamp设为索引（如果需要）
 if 'timestamp' in data.columns:
@@ -113,6 +120,10 @@ data = data[~mask]
 features = data.drop(columns=[TARGET_COL])
 labels = data[TARGET_COL]
 
+# 获取labels的分布比例
+label_counts = labels.value_counts(normalize=True)
+print("Labels distribution:%s", label_counts)
+
 # 对特征进行缩放处理（使用已加载的Scaler）
 features_scaled = scaler.transform(features)
 
@@ -120,7 +131,6 @@ features_scaled = scaler.transform(features)
 features_scaled = pd.DataFrame(features_scaled, index=features.index, columns=features.columns)
 
 # ===================== 创建数据集和数据加载器 =====================
-seq_len = 200  # 与训练时相同
 
 dataset = TimeSeriesDataset(features_scaled, labels, seq_len=seq_len, offset=0)
 loader = DataLoader(dataset, batch_size=64, shuffle=False)
@@ -130,7 +140,7 @@ input_size = features_scaled.shape[1]
 
 # 加载LSTM模型
 lstm_model = LSTMModel(input_size=input_size, hidden_size=128, num_layers=2).to(device)
-lstm_model_path = os.path.join(models_dir, "lstm_model.pth")
+lstm_model_path = os.path.join(models_dir, f"{key_name}_lstm_model.pth")
 if not os.path.exists(lstm_model_path):
     raise FileNotFoundError(f"LSTM模型文件未找到，请确保存在 {lstm_model_path}")
 lstm_model.load_state_dict(torch.load(lstm_model_path, map_location=device))
@@ -139,7 +149,7 @@ print(f"LSTM模型已从 {lstm_model_path} 加载")
 
 # 加载Transformer模型
 transformer_model = TransformerModel(input_size=input_size, num_layers=2, d_model=128, nhead=8, dim_feedforward=256).to(device)
-transformer_model_path = os.path.join(models_dir, "transformer_model.pth")
+transformer_model_path = os.path.join(models_dir, f"{key_name}_transformer_model.pth")
 if not os.path.exists(transformer_model_path):
     raise FileNotFoundError(f"Transformer模型文件未找到，请确保存在 {transformer_model_path}")
 transformer_model.load_state_dict(torch.load(transformer_model_path, map_location=device))
@@ -147,14 +157,14 @@ transformer_model.eval()
 print(f"Transformer模型已从 {transformer_model_path} 加载")
 
 # 加载LightGBM模型
-lgbm_model_path = os.path.join(models_dir, "lightgbm_model.pkl")
+lgbm_model_path = os.path.join(models_dir, f"{key_name}_lightgbm_model.pkl")
 if not os.path.exists(lgbm_model_path):
     raise FileNotFoundError(f"LightGBM模型文件未找到，请确保存在 {lgbm_model_path}")
 lgbm_model = joblib.load(lgbm_model_path)
 print(f"LightGBM模型已从 {lgbm_model_path} 加载")
 
 # 加载Meta模型
-meta_model_path = os.path.join(models_dir, "meta_model.pkl")
+meta_model_path = os.path.join(models_dir, f"{key_name}_meta_model.pkl")
 if not os.path.exists(meta_model_path):
     raise FileNotFoundError(f"Meta模型文件未找到，请确保存在 {meta_model_path}")
 meta_model = joblib.load(meta_model_path)
@@ -212,6 +222,26 @@ stack_y = labels_aligned
 # ===================== 使用Meta模型进行最终预测 =====================
 final_probs = meta_model.predict_proba(stack_X)[:, 1]
 
+
+# ===================== 保存预测结果 =====================
+# 使用 indices_lstm 来获取对应的时间戳
+# 确保 indices_lstm 是从 0 开始且不越界
+if np.max(indices_lstm) >= len(data):
+    raise IndexError("indices_lstm 中存在超出 data 索引范围的值")
+
+# 获取对应的时间戳
+timestamps = data.index[indices_lstm]
+
+# 将时间戳转换为字符串格式，确保在CSV中正确显示
+timestamps_str = timestamps.strftime('%Y-%m-%d %H:%M:%S')
+
+# 创建结果DataFrame
+results_df = pd.DataFrame({
+    'timestamp': timestamps_str,
+    'true_label': stack_y,
+    'pred_final_prob': final_probs
+})
+
 # ===================== 生成性能报告 =====================
 # 定义阈值范围
 thresholds = np.arange(0.5, 1, 0.01)
@@ -242,9 +272,9 @@ for threshold in thresholds:
 
 base_name = os.path.basename(new_data_path)
 # ===================== 保存性能报告 =====================
-report_file_path = os.path.join(reports_dir, f"performance_report_{base_name}_{TARGET_COL}.txt")
+report_file_path = os.path.join(reports_dir, f"performance_report_{base_name}_{TARGET_COL}_{seq_len}.txt")
 with open(report_file_path, "w") as f:
-    f.write("性能报告\n")
+    f.write(f"性能报告 {label_counts}\n")
     f.write("="*50 + "\n\n")
     for report in all_reports:
         f.write(report)

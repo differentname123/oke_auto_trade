@@ -25,13 +25,17 @@ os.makedirs(reports_dir, exist_ok=True)
 
 # ===================== 数据读入与预处理 =====================
 # 假设数据文件名为 "BTC-USDT-SWAP_1m_20240627_20241212_features.csv"
-data = pd.read_csv("BTC-USDT-SWAP_1m_20240627_20241212_features.csv")
+data = pd.read_csv("BTC-USDT-SWAP_1m_20230124_20241218_features_tail.csv")
 
 # 假设数据中有:
 # timestamp: 时间戳
 # close_up_0.02_t5: 目标变量(0/1)
 # 其他列为特征(价格与技术指标)
-TARGET_COL = "close_up_0.09_t4"
+TARGET_COL = "close_down_0.15_t4"
+seq_len = 100
+
+
+key_name = f'{seq_len}_{TARGET_COL}'
 
 # 将timestamp设为索引（如果需要）
 if 'timestamp' in data.columns:
@@ -91,6 +95,10 @@ val_data_with_labels.to_csv(os.path.join(models_dir, "val_data_with_labels.csv")
 test_data_with_labels = pd.concat([test_data, test_labels], axis=1)
 test_data_with_labels.to_csv(os.path.join(models_dir, "test_data_with_labels.csv"), index=False)
 
+# 获取labels的分布比例
+label_counts = test_labels.value_counts(normalize=True)
+print("Labels distribution:%s", label_counts)
+
 print("原始数据集已保存为 CSV 文件")
 
 
@@ -102,8 +110,10 @@ train_data_scaled = scaler.transform(train_data)
 val_data_scaled = scaler.transform(val_data)
 test_data_scaled = scaler.transform(test_data)
 
+
+
 # 保存 StandardScaler
-scaler_path = os.path.join(models_dir, "scaler.pkl")
+scaler_path = os.path.join(models_dir, f"{key_name}_scaler.pkl")
 joblib.dump(scaler, scaler_path)
 print(f"Scaler 已保存至 {scaler_path}")
 
@@ -131,7 +141,6 @@ class TimeSeriesDataset(Dataset):
         absolute_idx = self.offset + idx + self.seq_len  # 计算在整个数据集中的绝对索引
         return X_seq, y_label, absolute_idx
 
-seq_len = 200
 
 # 创建数据集，传入正确的 offset
 train_dataset = TimeSeriesDataset(train_data_scaled, train_labels, seq_len=seq_len, offset=0)
@@ -260,7 +269,7 @@ print("Training LSTM Model...")
 val_acc_lstm = train_model(lstm_model, train_loader, val_loader, epochs=50, patience=10, lr=1e-3, class_weights=class_weights_tensor)
 
 # 保存LSTM模型
-lstm_model_path = os.path.join(models_dir, "lstm_model.pth")
+lstm_model_path = os.path.join(models_dir, f"{key_name}_lstm_model.pth")
 torch.save(lstm_model.state_dict(), lstm_model_path)
 print(f"LSTM模型已保存至 {lstm_model_path}")
 
@@ -270,7 +279,7 @@ print("Training Transformer Model...")
 val_acc_transformer = train_model(transformer_model, train_loader, val_loader, epochs=50, patience=10, lr=1e-3, class_weights=class_weights_tensor)
 
 # 保存Transformer模型
-transformer_model_path = os.path.join(models_dir, "transformer_model.pth")
+transformer_model_path = os.path.join(models_dir, f"{key_name}_transformer_model.pth")
 torch.save(transformer_model.state_dict(), transformer_model_path)
 print(f"Transformer模型已保存至 {transformer_model_path}")
 
@@ -294,7 +303,7 @@ lgbm.fit(
 )
 
 # 保存LightGBM模型
-lgbm_model_path = os.path.join(models_dir, "lightgbm_model.pkl")
+lgbm_model_path = os.path.join(models_dir, f"{key_name}_lightgbm_model.pkl")
 joblib.dump(lgbm, lgbm_model_path)
 print(f"LightGBM模型已保存至 {lgbm_model_path}")
 
@@ -334,7 +343,7 @@ meta_model = LGBMClassifier(n_estimators=100)
 meta_model.fit(stack_X_val, stack_y_val)
 
 # 保存元模型
-meta_model_path = os.path.join(models_dir, "meta_model.pkl")
+meta_model_path = os.path.join(models_dir, f"{key_name}_meta_model.pkl")
 joblib.dump(meta_model, meta_model_path)
 print(f"元模型已保存至 {meta_model_path}")
 
@@ -392,7 +401,7 @@ print("Class weights:", class_weights)
 # 将所有报告写入文件
 report_file_path = os.path.join(reports_dir, "performance_report.txt")
 with open(report_file_path, "w") as f:
-    f.write("性能报告\n")
+    f.write(f"性能报告 {class_weights}  {label_counts}\n")
     f.write("="*50 + "\n\n")
     for report in all_reports:
         f.write(report)

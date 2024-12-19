@@ -109,10 +109,19 @@ def feature_engineering(df):
     Returns:
         pandas.DataFrame: 包含特征的 DataFrame
     """
+    # 保留原始时间戳列
     df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df = df.set_index('timestamp')
-    df_features = pd.DataFrame(index=df.index)  # 创建一个空的 DataFrame 用于存储特征
 
+    # 设置时间戳为索引
+    df = df.set_index('timestamp')
+
+    # 创建一个空的 DataFrame 用于存储特征
+    df_features = pd.DataFrame(index=df.index)
+
+    # 将时间戳列添加到 df_features 中
+    df_features['timestamp'] = df.index
+
+    # 现在 df_features 中不仅包含特征数据，还包含时间戳信息
 
     # 1. 基础特征
     df_features["range"] = df["high"] - df["low"]
@@ -239,7 +248,10 @@ def get_dist(data_path):
     output_path = f'{data_path[:-4]}_distribution.csv'
     if os.path.exists(output_path):
         data_df = pd.read_csv(output_path)
-        data_df['score'] = (data_df['ratio'] - 0.05) / (data_df['period']) * data_df['1'] * data_df['1']
+        data_df['score*'] = 10*(data_df['ratio'] - 0.05)*10*(data_df['ratio'] - 0.05) / (data_df['period']) * data_df['1'] * data_df['1']
+        # 将data_df['score']归一化
+        data_df['score*'] = (data_df['score*'] - data_df['score*'].min()) / (data_df['score*'].max() - data_df['score*'].min())
+        data_df['score'] = 10*(data_df['ratio'] - 0.05)*10*(data_df['ratio'] - 0.05) / (data_df['period']) * data_df['1'] * data_df['1']
         # 将data_df['score']归一化
         data_df['score'] = (data_df['score'] - data_df['score'].min()) / (data_df['score'].max() - data_df['score'].min())
 
@@ -279,10 +291,12 @@ def gen_feature(origin_name):
     df = feature_engineering(data)
     # 将处理后的数据保存到文件
     df.to_csv(f'{origin_name[:-4]}_features.csv', index=False)
+    # 并且保留最新的100000条数据到文件
+    df.tail(100000).to_csv(f'{origin_name[:-4]}_features_tail.csv', index=False)
 
 if __name__ == '__main__':
-    file_name = 'BTC-USDT-SWAP_1m_20230124_20241218.csv'
-    long_df = get_dist(file_name)
-    short_df = get_dist('BTC-USDT-SWAP_1m_20240627_20241212.csv')
-    pass
-    # gen_feature(file_name)
+    file_name = 'BTC-USDT-SWAP_1m_20241218_20241219.csv'
+    # long_df = get_dist(file_name)
+    # short_df = get_dist('BTC-USDT-SWAP_1m_20240627_20241212.csv')
+    # pass
+    gen_feature(file_name)

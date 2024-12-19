@@ -76,7 +76,11 @@ def get_kline_data(inst_id, bar="1m", limit=100, max_candles=1000):
                                          "confirm"])
 
     # 数据类型转换
-    df["timestamp"] = pd.to_datetime(df["timestamp"].astype(float) / 1000, unit="s")
+    # 将时间戳转换为 datetime 对象，并将其设置为 UTC
+    df["timestamp"] = pd.to_datetime(df["timestamp"].astype(float) / 1000, unit="s", utc=True)
+
+    # 将 UTC 时间转换为北京时间（Asia/Shanghai 时区，UTC+8）
+    df["timestamp"] = df["timestamp"].dt.tz_convert('Asia/Shanghai')
     df[["open", "high", "low", "close", "volume"]] = df[["open", "high", "low", "close", "volume"]].astype(float)
 
     # 按时间排序
@@ -142,7 +146,7 @@ if __name__ == "__main__":
     inst_id = "BTC-USDT-SWAP"
     bar = "1m"
     limit = 100
-    max_candles = 1000000
+    max_candles = 60 * 24
 
     # 获取数据
     kline_data = get_kline_data(inst_id=inst_id, bar=bar, limit=limit, max_candles=max_candles)
