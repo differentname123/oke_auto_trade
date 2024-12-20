@@ -17,16 +17,17 @@ print("Using device:", device)
 # timestamp: 时间戳
 # close_down_0.08_t5: 目标变量(0/1)
 # 其他列为特征(价格与技术指标)
-TARGET_COL = "close_down_0.2_t5"
-seq_len = 100  # 与训练时相同
+TARGET_COL = "close_up_0.2_t9"
+seq_len = 200  # 与训练时相同
 key_name = f'{seq_len}_{TARGET_COL}'
+models_dir = f"models/BTC-USDT-SWAP_1m_20230124_20241218_features_tail/{key_name}"
+reports_dir = "reports/BTC-USDT-SWAP_1m_20230124_20241218_features_tail"
 
 # 假设新数据文件名为 "new_data.csv"
-# new_data_path = "models/test_data_with_labels.csv"
-new_data_path = "BTC-USDT-SWAP_1m_20241218_20241220_features_tail.csv"
+# new_data_path = f"{models_dir}/{key_name}_test_data_with_labels.csv"
+new_data_path = "BTC-USDT-SWAP_1m_20241219_20241220_features_tail.csv"
 
-models_dir = "models"
-reports_dir = "reports"
+
 os.makedirs(reports_dir, exist_ok=True)
 
 # ===================== 定义模型类 =====================
