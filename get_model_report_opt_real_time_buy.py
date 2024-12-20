@@ -430,7 +430,7 @@ def compute_intersection_proportion(result_df, sort_columns, percentiles, target
 
 
 def analyze_data(result_df):
-    sort_columns = ['pred_final_prob_400_close_up_0.25_t9', 'pred_final_prob_400_close_up_0.25_t8']  # 排序字段列表
+    sort_columns = ['pred_up_sum']  # 排序字段列表
     percentiles = [x / 200 for x in range(1, 30)]  # 分段比例列表
     percentiles.append(0.5)
     percentiles.append(1)
@@ -476,12 +476,12 @@ if __name__ == "__main__":
         start_time = time.time()
 
         # 这里可以控制每次循环间的间隔，避免不必要的频繁调用
-        # if start_time % 60 < 50:
-        #     time.sleep(1)
-        #     continue
+        if start_time % 60 < 50:
+            time.sleep(1)
+            continue
 
         # 获取最新的数据
-        # feature_df = get_latest_data(max_candles=4000)
+        feature_df = get_latest_data(max_candles=500)
 
         # 获取所有预测器的预测结果
         result_dfs = [predictor.predict(new_data_path) for predictor in predictors]
@@ -507,9 +507,9 @@ if __name__ == "__main__":
         result_df['pred_down_sum'] = result_df.filter(regex='pred.*down').sum(axis=1)
         result_df['cha'] = result_df['pred_up_sum'] - result_df['pred_down_sum']
         result_df['he'] = result_df['pred_up_sum'] + result_df['pred_down_sum']
-        analyze_data(result_df)
+        # analyze_data(result_df)
 
-        # cha < -2.22 买空 cha >3.8 买多
+        # pred_up_sum大于3.8的时候，买入
 
         # 获取最后一行数据
         latest_data = feature_df.iloc[-1]
@@ -521,10 +521,8 @@ if __name__ == "__main__":
         #找到latest_result中包含"pred_final_prob"的列
         pred_cols = [col for col in latest_result.index if 'pred_final_prob' in col]
         # 获取最大的概率值
-        max_prob = latest_result[pred_cols].max()
-        # 获取平均值
-        avg_prob = latest_result[pred_cols].mean()
-        if avg_prob > 0.5 and last_time_str != pre_time_str:
+
+        if latest_result['pred_up_sum'] > 3.8 and last_time_str != pre_time_str:
             pre_time_str = last_time_str
             place_order(
                 INST_ID,
@@ -534,8 +532,8 @@ if __name__ == "__main__":
                 price=latest_price,  # 买入价格
                 tp_price=latest_price + 200  # 止盈价格
             )
-            print(f"{current_time} 最新价格：{latest_price}，最大概率：{max_prob}， {latest_result[pred_cols]}，下单成功！下单价格：{latest_price}，止盈价格：{latest_price + 200}")
+            print(f"{current_time} 最新价格：{latest_price}，最大latest_result['pred_up_sum']：{latest_result['pred_up_sum']}， {latest_result[pred_cols]}，下单成功！下单价格：{latest_price}，止盈价格：{latest_price + 200}")
         else:
-            print(f"{current_time} 最新价格：{latest_price}，最大概率：{max_prob}  {latest_result[pred_cols]}")
+            print(f"{current_time} 最新价格：{latest_price}，最大latest_result['pred_up_sum']：{latest_result['pred_up_sum']} {latest_result[pred_cols]}")
         release_funds(INST_ID, latest_price, 5)
         print(f"耗时：{time.time() - start_time}秒")
