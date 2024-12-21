@@ -431,21 +431,16 @@ def compute_intersection_proportion(result_df, sort_columns, percentiles, target
     return result_list
 
 
-def analyze_data(result_df):
-    sort_columns = ['pred_up_sum']  # 排序字段列表
-    percentiles = [x / 200 for x in range(1, 30)]  # 分段比例列表
+def analyze_data(result_df, target_column='400_close_down_0.25_t8', sort_columns=['pred_down_sum']):
+    sort_columns = sort_columns # 排序字段列表
+    percentiles = [x / 200 for x in range(1, 15)]  # 分段比例列表
     percentiles.append(0.5)
     percentiles.append(1)
-    target_column = '400_close_up_0.25_t9'  # 目标列
+    target_column = target_column  # 目标列
 
     proportions = compute_intersection_proportion(result_df, sort_columns, percentiles, target_column)
 
-    # 输出每个分段的占比
-    for percentile, proportion in proportions.items():
-        print(f"前 {percentile * 100}% 数据中 '{target_column}' 为 1 的占比: {proportion:.4f}")
-    # 输出每个分段的占比
-    for percentile, proportion in proportions.items():
-        print(f"前 {percentile * 100}% 数据中 '400_close_up_0.25_t9' 为 1 的占比: {proportion:.4f}")
+    return proportions
 
 
 def merge_results(results):
@@ -458,108 +453,114 @@ def merge_results(results):
 # ===================== 使用示例 =====================
 if __name__ == "__main__":
     new_data_path = "kline_data/df_features.csv"
+    model_path = 'models/BTC-USDT-SWAP_1m_20230124_20241218_features_tail/'
+    target_column = '400_close_down_0.15_t9'
+    target_side = target_column.split('_')[2]
+    target_profit = float(target_column.split('_')[3])
+    target_period = int(target_column.split('t')[1])
+    predictors = []
+    seq_lens = []
+    target_cols = []
+    # 遍历莫models_path下的所有文件夹
+    for root, dirs, files in os.walk(model_path):
+        for dir in dirs:
+            # 尝试通过文件夹名字获取seq_len和TARGET_COL
+            try:
+                # 如果dir下面的文件数量不等于4，说明模型文件不全，跳过
+                if len(os.listdir(os.path.join(root, dir))) != 8:
+                    continue
+                split_list = dir.split('_')
+                seq_len = int(split_list[0])
+                TARGET_COL = '_'.join(split_list[1:])
+                profit = float(split_list[3])
+                period = int(int(dir.split('t')[1]))
+                side = split_list[2]
+                # if seq_len!=400:
+                #     continue
+                if side != target_side:
+                    continue
+                if period > target_period + 2:
+                    continue
+                if profit + 0.1 < target_profit:
+                    continue
+                seq_lens.append(seq_len)
+                target_cols.append(TARGET_COL)
+            except:
+                print(f"文件夹名字不符合规范：{dir}")
+                continue
+    predictors = []
 
-    # 定义seq_len和TARGET_COL的列表
-    seq_lens_up = [400] * 6
-    target_cols_up = ["close_up_0.2_t5", "close_up_0.2_t6", "close_up_0.2_t7", "close_up_0.2_t8", "close_up_0.25_t8", "close_up_0.25_t9"]
-
-    seq_lens_down = [400] * 6
-    target_cols_down = ["close_down_0.2_t5", "close_down_0.2_t6", "close_down_0.2_t7", "close_down_0.2_t8", "close_down_0.25_t8", "close_down_0.25_t9"]
-
-    predictors_up = []
-    predictors_down = []
-
-    # 创建看涨模型的预测器实例
-    for seq_len, target_col in zip(seq_lens_up, target_cols_up):
+    # 创建多个预测器实例
+    for seq_len, target_col in zip(seq_lens, target_cols):
         models_dir = f"models/BTC-USDT-SWAP_1m_20230124_20241218_features_tail/{seq_len}_{target_col}"
-        predictors_up.append(Predictor(models_dir, seq_len, target_col))
+        predictors.append(Predictor(models_dir, seq_len, target_col))
 
-    # 创建看跌模型的预测器实例
-    for seq_len, target_col in zip(seq_lens_down, target_cols_down):
-        models_dir = f"models/BTC-USDT-SWAP_1m_20230124_20241218_features_tail/{seq_len}_{target_col}"
-        predictors_down.append(Predictor(models_dir, seq_len, target_col))
-
-    pre_time_str_up = 0  # 用于记录上一次买入操作的时间
-    pre_time_str_down = 0  # 用于记录上一次卖出操作的时间
-
+    pre_time_str = 0
     while True:
         try:
             current_time = time.time()
             current_time = pd.to_datetime(current_time, unit='s')
             start_time = time.time()
 
-            # 控制每次循环的间隔，避免过于频繁地调用
-            if start_time % 60 < 58:
-                time.sleep(1)
-                continue
+            # # 这里可以控制每次循环间的间隔，避免不必要的频繁调用
+            # if start_time % 60 < 55:
+            #     time.sleep(1)
+            #     continue
 
             # 获取最新的数据
-            feature_df = get_latest_data(max_candles=500)
+            # feature_df = get_latest_data(max_candles=5000)
 
-            # 获取看涨模型的预测结果
-            result_dfs_up = [predictor.predict(new_data_path) for predictor in predictors_up]
-            # 为每个预测结果重命名列名，确保列名唯一
-            for i, df in enumerate(result_dfs_up):
-                seq_len = seq_lens_up[i]
-                target_col = target_cols_up[i]
-                df.rename(columns={df.columns[1]: f'{seq_len}_{target_col}'}, inplace=True)
+            # 获取所有预测器的预测结果
+            result_dfs = [predictor.predict(new_data_path) for predictor in predictors]
 
-            # 获取看跌模型的预测结果
-            result_dfs_down = [predictor.predict(new_data_path) for predictor in predictors_down]
-            # 为每个预测结果重命名列名，确保列名唯一
-            for i, df in enumerate(result_dfs_down):
-                seq_len = seq_lens_down[i]
-                target_col = target_cols_down[i]
+            # 为每个预测结果重命名列名，确保符合{seq_len}_{TARGET_COL}格式
+            for i, df in enumerate(result_dfs):
+                seq_len = seq_lens[i]
+                target_col = target_cols[i]
+                # 重命名列，将预测的目标列命名为 {seq_len}_{TARGET_COL}
                 df.rename(columns={df.columns[1]: f'{seq_len}_{target_col}'}, inplace=True)
 
             # 合并所有预测结果
-            result_df = merge_results(result_dfs_up + result_dfs_down)
+            result_df = merge_results(result_dfs)
+
             # 删除包含nan的行
             result_df = result_df.dropna()
 
-            # 计算看涨和看跌预测的总和
-            result_df['pred_up_sum'] = result_df.filter(regex='pred.*close_up').sum(axis=1)
-            result_df['pred_down_sum'] = result_df.filter(regex='pred.*close_down').sum(axis=1)
-            result_df['net_pred_sum'] = result_df['pred_up_sum'] - result_df['pred_down_sum']  # 净预测值
-            result_df['total_pred_sum'] = result_df['pred_up_sum'] + result_df['pred_down_sum']  # 总预测值
+            result_df['pred_up_sum'] = result_df.filter(regex='pred.*up').sum(axis=1)
+
+            # 计算包含 "down" 且包含 "pred" 的列的总和
+            result_df['pred_down_sum'] = result_df.filter(regex='pred.*down').sum(axis=1)
+            result_df['cha'] = result_df['pred_up_sum'] - result_df['pred_down_sum']
+            result_df['he'] = result_df['pred_up_sum'] + result_df['pred_down_sum']
+            result1 = analyze_data(result_df, target_column=target_column, sort_columns=[f'pred_final_prob_{target_column}'])
+            result2 = analyze_data(result_df, target_column=target_column, sort_columns=['pred_down_sum'])
+
+            # pred_up_sum大于3.8的时候，买入
 
             # 获取最后一行数据
             latest_data = feature_df.iloc[-1]
+            # 获取最后一行数据的价格
             latest_price = latest_data['close']
             last_time_str = latest_data['timestamp']
+            # 同时获取result_df的最后一行数据
             latest_result = result_df.iloc[-1]
+            #找到latest_result中包含"pred_final_prob"的列
+            pred_cols = [col for col in latest_result.index if 'pred_final_prob' in col]
+            # 获取最大的概率值
 
-            # 设置阈值，可以根据模型性能和需求进行调整
-            threshold = 3.8
-            buy_signal = (latest_result['pred_up_sum'] > threshold) or (latest_result['pred_final_prob_400_close_up_0.25_t8'] > 0.55 and latest_result['pred_final_prob_400_close_up_0.25_t9'] > 0.73)
-            sell_signal = (latest_result['pred_down_sum'] > threshold) or (latest_result['pred_final_prob_400_close_down_0.25_t8'] > 0.62 and latest_result['pred_final_prob_400_close_down_0.25_t9'] > 0.65)
-
-            # 根据预测结果决定买入或卖出
-            if buy_signal and last_time_str != pre_time_str_up:
-                pre_time_str_up = last_time_str  # 更新上一次买入操作的时间
+            if latest_result['pred_up_sum'] > 3.8 and last_time_str != pre_time_str:
+                pre_time_str = last_time_str
                 place_order(
                     INST_ID,
                     "buy",
-                    "limit",
+                    "limit",  # 限价单
                     ORDER_SIZE,
-                    price=latest_price,
-                    tp_price=latest_price + 200  # 设置止盈价格
+                    price=latest_price,  # 买入价格
+                    tp_price=latest_price + 200  # 止盈价格
                 )
-                print(f"{current_time} 最新价格：{latest_price}，净预测值：{latest_result['pred_up_sum']}，买入下单成功！下单价格：{latest_price}，止盈价格：{latest_price + 200}")
-            if sell_signal and last_time_str != pre_time_str_down:
-                pre_time_str_down = last_time_str  # 更新上一次卖出操作的时间
-                place_order(
-                    INST_ID,
-                    "sell",
-                    "limit",
-                    ORDER_SIZE,
-                    price=latest_price,
-                    tp_price=latest_price - 200  # 设置止盈价格
-                )
-                print(f"{current_time} 最新价格：{latest_price}，净预测值：{latest_result['pred_down_sum']}，卖出下单成功！下单价格：{latest_price}，止盈价格：{latest_price - 200}")
-
-            print(f"耗时：{current_time} 最新价格：{latest_price},总跌预测值：{latest_result['pred_down_sum']},总涨预测值：{latest_result['pred_up_sum']}")
-            # 释放资金或其他资金管理操作
+                print(f"{current_time} 最新价格：{latest_price}，最大latest_result['pred_up_sum']：{latest_result['pred_up_sum']}， {latest_result[pred_cols]}，下单成功！下单价格：{latest_price}，止盈价格：{latest_price + 200}")
+            else:
+                print(f"{current_time} 最新价格：{latest_price}，最大latest_result['pred_up_sum']：{latest_result['pred_up_sum']} {latest_result[pred_cols]}")
             release_funds(INST_ID, latest_price, 5)
             print(f"耗时：{time.time() - start_time}秒")
         except Exception as e:

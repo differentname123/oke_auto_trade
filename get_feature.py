@@ -37,7 +37,7 @@ def get_kline_data(inst_id, bar="1m", limit=100, max_candles=1000):
     while fetched_candles < max_candles:
         try:
             # 调用OKX API获取历史K线数据
-            response = marketAPI.get_candlesticks(instId=inst_id, bar=bar, after=after, limit=limit)
+            response = marketAPI.get_history_candlesticks(instId=inst_id, bar=bar, after=after, limit=limit)
 
             if response["code"] != "0":
                 print(f"获取K线数据失败，错误代码：{response['code']}，错误消息：{response['msg']}")
@@ -464,8 +464,8 @@ def get_latest_data(max_candles=1000):
     return feature_df
 
 if __name__ == '__main__':
-    # file_name = 'BTC-USDT-SWAP_1m_20230124_20241218.csv'
-    # long_df = get_dist(file_name)
+    file_name = 'BTC-USDT-SWAP_1m_20230124_20241218.csv'
+    long_df = get_dist(file_name)
     # short_df = get_dist('BTC-USDT-SWAP_1m_20240627_20241212.csv')
     # pass
     # gen_feature('BTC-USDT-SWAP_1m_20241219_20241220.csv')
