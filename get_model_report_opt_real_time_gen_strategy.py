@@ -1,5 +1,7 @@
+import json
 import os
 import traceback
+from multiprocessing import Pool
 
 import pandas as pd
 import numpy as np
@@ -386,7 +388,7 @@ def release_funds(inst_id, latest_price, release_len):
         cancel_order(inst_id, order_id)
 
 
-def compute_intersection_proportion(result_df, sort_columns, percentiles, target_column):
+def compute_intersection_proportion(result_df, sort_columns, percentiles, target_column, min_proportion=0.7):
     """
     计算每个排序字段的前 `percentile` 部分的交集，并计算目标列 `target_column` 为 1 的占比。
 
@@ -403,6 +405,7 @@ def compute_intersection_proportion(result_df, sort_columns, percentiles, target
     for percentile in percentiles:
         # 初始化一个布尔索引，用于存储所有排序字段的交集
         intersection_mask = pd.Series([True] * len(result_df), index=result_df.index)
+        threshold_dict = {}
 
         # 按照每个排序字段排序并取前 percentile 部分
         for col in sort_columns:
@@ -410,9 +413,11 @@ def compute_intersection_proportion(result_df, sort_columns, percentiles, target
             sorted_df = result_df.sort_values(by=col, ascending=False)
             threshold_idx = int(len(sorted_df) * percentile)
             current_mask = sorted_df.index[:threshold_idx]
+            threshold_dict[col] = sorted_df[col].iloc[threshold_idx - 1]
 
             # 对交集进行更新，取交集
             intersection_mask &= result_df.index.isin(current_mask)
+
 
         # 通过交集布尔索引，获取交集数据
         subset_df = result_df[intersection_mask]
@@ -422,9 +427,11 @@ def compute_intersection_proportion(result_df, sort_columns, percentiles, target
 
         # 存储结果
         proportions[percentile] = proportion
+        # if proportion > min_proportion or percentile>=0.5:
         result_list.append({
             'percentile': percentile,
             'proportion': proportion,
+            'threshold':threshold_dict,
             'count': len(subset_df)
         })
 
@@ -453,120 +460,328 @@ def merge_results(results):
     return merged_df
 
 # ===================== 使用示例 =====================
-if __name__ == "__main__":
-    new_data_path = "kline_data/df_features.csv"
+def extract_model_info(model_dir_name):
+    """从模型目录名中提取模型信息"""
+    try:
+        split_list = model_dir_name.split('_')
+        seq_len = int(split_list[0])
+        side = split_list[2]
+        profit = float(split_list[3])
+        period = int(split_list[4].replace('t', ''))
+        target_col = '_'.join(split_list[1:])
+        return seq_len, target_col, side, profit, period
+    except Exception as e:
+        print(f"文件夹名字不符合规范：{model_dir_name}，错误：{e}")
+        return None
+
+def collect_model_infos(model_path):
+    """遍历模型目录，收集模型信息"""
+    model_infos = []
+    for root, dirs, _ in os.walk(model_path):
+        for dir_name in dirs:
+            dir_path = os.path.join(root, dir_name)
+            if len(os.listdir(dir_path)) != 8:
+                continue  # 模型文件不完整，跳过
+            model_info = extract_model_info(dir_name)
+            if model_info:
+                model_infos.append({
+                    'dir_name': dir_name,
+                    'dir_path': dir_path,
+                    'seq_len': model_info[0],
+                    'target_col': model_info[1],
+                    'side': model_info[2],
+                    'profit': model_info[3],
+                    'period': model_info[4],
+                })
+    return model_infos
+def predictor_predict(args):
+    """单个预测器的预测函数，用于多进程调用"""
+    models_dir = args['models_dir']
+    seq_len = args['seq_len']
+    target_col = args['target_col']
+    data_path = args['data_path']
+    try:
+        start_time = time.time()
+        predictor = Predictor(models_dir, seq_len, target_col)
+        df = predictor.predict(data_path)
+        # 重命名预测列
+        pred_col_name = f"{seq_len}_{target_col}"
+        df.rename(columns={df.columns[1]: pred_col_name}, inplace=True)
+        elapsed_time = time.time() - start_time
+        # print(f"预测 {seq_len}_{target_col} 完成，耗时：{elapsed_time:.2f} 秒")
+        return df
+    except Exception as e:
+        print(f"预测 {seq_len}_{target_col} 失败，错误：{e}")
+        return None
+
+def generate_predictions(model_infos, data_path):
+    """获取所有预测器的预测结果，使用多进程"""
+    result_dfs = []
+    tasks = []
+    for info in model_infos:
+        args = {
+            'models_dir': info['dir_path'],
+            'seq_len': info['seq_len'],
+            'target_col': info['target_col'],
+            'data_path': data_path
+        }
+        tasks.append(args)
+
+    max_workers = 5
+    pool_size = min(max_workers, 5)
+
+    start_time = time.time()
+    with Pool(processes=pool_size) as pool:
+        results = pool.map(predictor_predict, tasks)
+    total_time = time.time() - start_time
+    print(f"所有预测器的预测结果已生成，耗时：{total_time:.2f} 秒")
+
+    count = 0
+    for df in results:
+        count += 1
+        if df is not None:
+            result_dfs.append(df)
+        else:
+            print(f"警告：第 {count} 个预测器的预测结果为空")
+    return result_dfs
+
+def filter_model_infos(model_infos, target_side, target_profit, target_period):
+    """根据条件筛选模型信息"""
+    filtered_infos = []
+    for info in model_infos:
+        if info['side'] != target_side:
+            continue
+        if abs(info['profit'] - target_profit) > 0.1:
+            continue
+        if abs(info['period'] - target_period) > 1:
+            continue
+        filtered_infos.append(info)
+    return filtered_infos
+
+def main():
+    strategy_results = []
+    data_path = "kline_data/df_features.csv"
     model_path = 'models/BTC-USDT-SWAP_1m_20230124_20241218_features_tail/'
-    target_column = '300_close_down_0.2_t9'
-    target_side = target_column.split('_')[2]
-    target_profit = float(target_column.split('_')[3])
-    target_period = int(target_column.split('t')[1])
-    predictors = []
+    all_result_df_path = 'all_result_df.csv'
+
+    # 收集所有模型信息
+    all_model_infos = collect_model_infos(model_path)
+
+    # # 只取前50个模型信息，方便测试
+    # all_model_infos = all_model_infos[:10]
+
+    # 尝试加载已有的预测结果
+    if os.path.exists(all_result_df_path):
+        result_df = pd.read_csv(all_result_df_path)
+        print(f"已加载已有的预测结果，共 {len(result_df)} 行")
+    else:
+        # 获取所有预测器的预测结果，使用多进程
+        result_dfs = generate_predictions(all_model_infos, data_path)
+
+        # 合并所有预测结果
+        result_df = merge_results(result_dfs)
+
+        # 删除包含 NaN 的行
+        result_df.dropna(inplace=True)
+
+        # 将result_df保存为CSV文件
+        result_df.to_csv(all_result_df_path, index=False)
+
+    # 获取所有唯一的目标列
+    target_column_set = set(info['target_col'] for info in all_model_infos)
+
+    for target_column in target_column_set:
+        # 提取目标列的参数
+        split_col = target_column.split('_')
+        target_side = split_col[1]
+        target_profit = float(split_col[2])
+        target_period = int(split_col[3].replace('t', ''))
+
+        # 根据条件筛选模型信息
+        filtered_model_infos = filter_model_infos(
+            all_model_infos, target_side, target_profit, target_period
+        )
+
+        if not filtered_model_infos:
+            continue  # 如果没有符合条件的模型，跳过
+
+        pred_final_prob_cols = []
+        for info in filtered_model_infos:
+            col_name = f"pred_final_prob_{info['seq_len']}_{info['target_col']}"
+            pred_final_prob_cols.append(col_name)
+
+        # 检查列是否存在于 result_df 中
+        missing_cols = [col for col in pred_final_prob_cols if col not in result_df.columns]
+        if missing_cols:
+            print(f"警告：以下列在 result_df 中不存在，已忽略：{missing_cols}")
+            # 从列表中移除缺失的列
+            pred_final_prob_cols = [col for col in pred_final_prob_cols if col in result_df.columns]
+
+        if not pred_final_prob_cols:
+            print(f"错误：没有可用的预测列进行计算，跳过该 target_column：{target_column}")
+            continue
+
+        # 计算预测概率的总和
+        result_df['pred_sum'] = result_df[pred_final_prob_cols].sum(axis=1)
+
+        # 计算 target_column
+        # 找到 pred_final_prob_cols 中包含 target_column 的列
+        temp_target_col_pred_cols = [col for col in pred_final_prob_cols if target_column in col]
+        if not temp_target_col_pred_cols:
+            print(f"错误：找不到包含 {target_column} 的列，跳过该 target_column")
+            continue
+        temp_seq_len = int(temp_target_col_pred_cols[0].split('_')[3])
+        sort_columns = ['pred_sum']
+        # sort_columns = pred_final_prob_cols
+        # 分析数据
+        result_list = analyze_data(
+            result_df,
+            target_column=f"{temp_seq_len}_{target_column}",
+            sort_columns=sort_columns
+        )
+
+        # 保存结果
+        temp_dict = {
+            'target_column': target_column,
+            'result_list': result_list,
+            # 'target_cols': [info['target_col'] for info in filtered_model_infos],
+            # 'seq_lens': [info['seq_len'] for info in filtered_model_infos],
+            'pred_final_prob_cols': pred_final_prob_cols
+        }
+        strategy_results.append(temp_dict)
+
+        print(f"Target Column: {target_column}")
+        # 如果需要，可以打印 result_list
+        # print(f"Result List: {result_list}")
+
+    # 保存策略结果
+    with open('strategy_result.json', 'w') as f:
+        json.dump(strategy_results, f, indent=4)
+
+def analyze_strategy_result():
+    # 读取策略结果
+    with open('strategy_result.json', 'r') as f:
+        strategy_results = json.load(f)
+    final_list = []
+    # 遍历策略结果
+    for result in strategy_results:
+        target_column = result['target_column']
+        print(f"Target Column: {target_column}")
+        for item in result['result_list']:
+            # 只保留proportion大于0.7的
+            if item['proportion'] > 0.7:
+                print(f"Percentile: {item['percentile']:.2f}, Proportion: {item['proportion']:.2f}, Count: {item['count']}, Threshold: {item['threshold']}")
+
+def order():
+    data_path = "kline_data/df_features.csv"
+    # 读取策略结果
+    with open('strategy_result.json', 'r') as f:
+        strategy_results = json.load(f)
+    dir_name_list = []
+    # 遍历策略结果
+    for result in strategy_results:
+        pred_final_prob_cols = result['pred_final_prob_cols']
+        for col in pred_final_prob_cols:
+            seq_col = col.split('prob_')[1]
+            dir_name_list.append(seq_col)
+    # 对seq_col_list去重
+    dir_name_list = list(set(dir_name_list))
     seq_lens = []
     target_cols = []
-    # 遍历莫models_path下的所有文件夹
-    for root, dirs, files in os.walk(model_path):
-        for dir in dirs:
-            # 尝试通过文件夹名字获取seq_len和TARGET_COL
-            try:
-                # 如果dir下面的文件数量不等于4，说明模型文件不全，跳过
-                if len(os.listdir(os.path.join(root, dir))) != 8:
-                    continue
-                split_list = dir.split('_')
-                seq_len = int(split_list[0])
-                TARGET_COL = '_'.join(split_list[1:])
-                profit = float(split_list[3])
-                period = int(int(dir.split('t')[1]))
-                side = split_list[2]
-                # if seq_len!=400:
-                #     continue
-                if side != target_side:
-                    continue
-                if abs(period - target_period) > 1:
-                    continue
-                if abs(profit - target_profit) > 0.1:
-                    continue
-                seq_lens.append(seq_len)
-                target_cols.append(TARGET_COL)
-            except:
-                print(f"文件夹名字不符合规范：{dir}")
-                continue
-    predictors = []
 
-    # 创建多个预测器实例
-    for seq_len, target_col in zip(seq_lens, target_cols):
-        models_dir = f"models/BTC-USDT-SWAP_1m_20230124_20241218_features_tail/{seq_len}_{target_col}"
-        predictors.append(Predictor(models_dir, seq_len, target_col))
+    all_model_infos = []
+    for dir_name in dir_name_list:
+        seq_len = dir_name.split('_')[0]
+        seq_lens.append(seq_len)
+        # target_col是以'_'分割除了seq_len的部分
+        target_col = '_'.join(dir_name.split('_')[1:])
+        target_cols.append(target_col)
+        model_info = extract_model_info(dir_name)
 
-    pre_time_str = 0
+        all_model_infos.append({
+            'dir_name': dir_name,
+            'dir_path': f"models/BTC-USDT-SWAP_1m_20230124_20241218_features_tail/{seq_len}_{target_col}",
+            'seq_len': model_info[0],
+            'target_col': model_info[1],
+            'side': model_info[2],
+            'profit': model_info[3],
+            'period': model_info[4],
+        })
+
+
     while True:
-        try:
-            current_time = time.time()
-            current_time = pd.to_datetime(current_time, unit='s')
-            start_time = time.time()
-
-            # # 这里可以控制每次循环间的间隔，避免不必要的频繁调用
-            # if start_time % 60 < 55:
-            #     time.sleep(1)
-            #     continue
-
-            # 获取最新的数据
-            # feature_df = get_latest_data(max_candles=5000)
-
-            # 获取所有预测器的预测结果
-            result_dfs = [predictor.predict(new_data_path) for predictor in predictors]
-
-            # 为每个预测结果重命名列名，确保符合{seq_len}_{TARGET_COL}格式
-            for i, df in enumerate(result_dfs):
-                seq_len = seq_lens[i]
-                target_col = target_cols[i]
-                # 重命名列，将预测的目标列命名为 {seq_len}_{TARGET_COL}
-                df.rename(columns={df.columns[1]: f'{seq_len}_{target_col}'}, inplace=True)
-
-            # 合并所有预测结果
-            result_df = merge_results(result_dfs)
-
-            # 删除包含nan的行
-            result_df = result_df.dropna()
-
-            result_df['pred_up_sum'] = result_df.filter(regex='pred.*up').sum(axis=1)
-
-            # 计算包含 "down" 且包含 "pred" 的列的总和
-            result_df['pred_down_sum'] = result_df.filter(regex='pred.*down').sum(axis=1)
-            result_df['cha'] = result_df['pred_up_sum'] - result_df['pred_down_sum']
-            result_df['he'] = result_df['pred_up_sum'] + result_df['pred_down_sum']
-            result1 = analyze_data(result_df, target_column=target_column, sort_columns=[f'pred_final_prob_{target_column}'])
-            result2 = analyze_data(result_df, target_column=target_column, sort_columns=['pred_down_sum'])
-
-            # pred_up_sum大于3.8的时候，买入
-
-            # 获取最后一行数据
-            latest_data = feature_df.iloc[-1]
-            # 获取最后一行数据的价格
-            latest_price = latest_data['close']
-            last_time_str = latest_data['timestamp']
-            # 同时获取result_df的最后一行数据
-            latest_result = result_df.iloc[-1]
-            #找到latest_result中包含"pred_final_prob"的列
-            pred_cols = [col for col in latest_result.index if 'pred_final_prob' in col]
-            # 获取最大的概率值
-
-            if latest_result['pred_up_sum'] > 3.8 and last_time_str != pre_time_str:
-                pre_time_str = last_time_str
-                place_order(
-                    INST_ID,
-                    "buy",
-                    "limit",  # 限价单
-                    ORDER_SIZE,
-                    price=latest_price,  # 买入价格
-                    tp_price=latest_price + 200  # 止盈价格
-                )
-                print(f"{current_time} 最新价格：{latest_price}，最大latest_result['pred_up_sum']：{latest_result['pred_up_sum']}， {latest_result[pred_cols]}，下单成功！下单价格：{latest_price}，止盈价格：{latest_price + 200}")
-            else:
-                print(f"{current_time} 最新价格：{latest_price}，最大latest_result['pred_up_sum']：{latest_result['pred_up_sum']} {latest_result[pred_cols]}")
-            release_funds(INST_ID, latest_price, 5)
-            print(f"耗时：{time.time() - start_time}秒")
-        except Exception as e:
-            print(f"出现异常：{e}")
-            traceback.print_exc()
+        start_time = time.time()
+        if start_time % 60 < 58:
             time.sleep(1)
             continue
+        # all_model_infos = all_model_infos[:10]
+        feature_df = get_latest_data(max_candles=550)
+        # result_df = pd.read_csv('single_result_df.csv')
+
+        result_df = generate_predictions(all_model_infos, data_path)
+        # 合并所有预测结果
+        result_df = merge_results(result_df)
+
+        # 删除包含 NaN 的行
+        result_df.dropna(inplace=True)
+        # 取最新的一行
+        # 将result_df保存为CSV文件
+        # result_df.to_csv('single_result_df.csv', index=False)
+
+        final_result = gen_detail_info(result_df, strategy_results)
+        print(final_result)
+        final_result['timestamp'] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        # 将timestamp移动到第一列
+        final_result = {k: final_result[k] for k in ['timestamp'] + list(final_result.keys())}
+
+        # 输出当前时间
+        print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
+        # 输出result_df的最后一行
+        print(result_df.iloc[-1])
+        print("耗时：", time.time() - start_time)
+        # 将final_result增量写入到文件
+        with open("final_result.txt", "a") as f:
+            f.write(str(final_result) + "\n")
+
+
+def gen_detail_info(result_df, strategy_results):
+    columns = result_df.columns
+    # result_df = result_df.iloc[-1]
+    final_result_dict = {}
+    for result in strategy_results:
+        pred_final_prob_cols = result['pred_final_prob_cols']
+        history_result_list = result['result_list']
+        target_column = result['target_column']
+        # 检查列是否存在于 result_df 中
+        missing_cols = [col for col in pred_final_prob_cols if col not in columns]
+        if missing_cols:
+            print(f"警告：以下列在 result_df 中不存在，已忽略：{missing_cols}")
+            # 从列表中移除缺失的列
+            pred_final_prob_cols = [col for col in pred_final_prob_cols if col in columns]
+
+        if not pred_final_prob_cols:
+            print(f"错误：没有可用的预测列进行计算，跳过该 target_column：{target_column}")
+            continue
+
+
+        result_df['pred_sum'] = result_df[pred_final_prob_cols].sum(axis=1)
+        for item in history_result_list:
+            if item['threshold']['pred_sum'] < result_df['pred_sum'].iloc[-1]:
+                break
+        final_result_dict[target_column] = item
+
+    filtered_items = {key: value for key, value in final_result_dict.items() if value['proportion'] >= 0.5}
+
+    # 2. 按 proportion 降序排序
+    sorted_items = sorted(filtered_items.items(), key=lambda item: item[1]['proportion'], reverse=True)
+
+    # 3. 将排序后的结果重新转换为字典
+    final_result_dict = dict(sorted_items)
+
+    return final_result_dict
+
+
+if __name__ == "__main__":
+    order()
+    # analyze_strategy_result()
+    # main()
