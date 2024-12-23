@@ -308,6 +308,50 @@ class Predictor:
 
         return result_df
 
+def gen_score(result_list, min_proportion=0.8):
+    # 假设 result_list 是一个列表，其中每个元素都是一个包含指标的字典
+    # 您需要根据自己的实际情况替换下面的实现
+    # 这里我们假设每个元素都有一个键为 'profit' 的值，我们将所有的 profit 相加作为 score
+    score = 0
+    for result in result_list:
+        if result['proportion'] >= min_proportion:
+            score += float(result['proportion']) * float(result['percentile'])
+    return score
+
+
+def process_strategy_results(input_file, output_file):
+    # 读取 strategy_result_back.json 文件
+    with open(input_file, 'r') as f:
+        strategy_results = json.load(f)
+
+    # 按照 'target_column' 分组
+    grouped_results = {}
+    for entry in strategy_results:
+        target_column = entry['target_column']
+        if target_column not in grouped_results:
+            grouped_results[target_column] = []
+        grouped_results[target_column].append(entry)
+
+    # 对每组中的每个 entry 调用 gen_score，并选择最高的 score
+    final_results = []
+    for target_column, entries in grouped_results.items():
+        for entry in entries:
+            # 对每个 entry 的 result_list 调用 gen_score
+            score = gen_score(entry['result_list'])
+            entry['score'] = score  # 将 score 添加到 entry 中
+        # sorted_entries = sorted(entries, key=lambda x: x['score'], reverse=True)
+        # 按照 score 排序，选择最高的
+        best_entry = max(entries, key=lambda x: x['score'])
+        final_results.append(best_entry)
+    # 将final_results按照score排序
+    final_results = sorted(final_results, key=lambda x: x['score'], reverse=True)
+    # 将最终的筛选结果写入 final_strategy_result.json
+    with open(output_file, 'w') as f:
+        json.dump(final_results, f, indent=4)
+
+    print(f"筛选完成，结果已保存到 {output_file}")
+
+
 def place_order(inst_id, side, order_type, size, price=None, tp_price=None):
     """下单函数"""
     try:
@@ -378,7 +422,7 @@ def release_funds(inst_id, latest_price, release_len):
         last_updated = float(order['uTime']) / 1000  # 假设时间戳以毫秒为单位
 
         # 检查价格偏移和时间间隔
-        if (time.time() - last_updated) <= 60:
+        if (time.time() - last_updated) <= 50:
             print(f"保留订单 {order_id}，订单价格：{order['px']}，最新价格：{latest_price}，差距：{price_diff}，时间间隔在1分钟内。")
             continue
 
@@ -559,6 +603,8 @@ def filter_model_infos(model_infos, target_side, target_profit, target_period):
     return filtered_infos
 
 def main():
+    from itertools import product
+
     strategy_results = []
     data_path = "kline_data/df_features.csv"
     model_path = 'models/BTC-USDT-SWAP_1m_20230124_20241218_features_tail/'
@@ -590,6 +636,22 @@ def main():
     # 获取所有唯一的目标列
     target_column_set = set(info['target_col'] for info in all_model_infos)
 
+    # 定义参数取值范围
+    min_profit_values = [-0.1, -0.05, 0]
+    max_profit_values = [0.1, 0.05, 0]
+    min_period_values = [-3, -2, -1, 0]
+    max_period_values = [3, 2, 1, 0]
+
+    # 生成参数组合，确保 min_profit <= max_profit 且 min_period <= max_period
+    parameter_combinations = []
+    for min_profit, max_profit in product(min_profit_values, max_profit_values):
+        if min_profit > max_profit:
+            continue
+        for min_period, max_period in product(min_period_values, max_period_values):
+            if min_period > max_period:
+                continue
+            parameter_combinations.append((min_profit, max_profit, min_period, max_period))
+    print(f"共 {len(parameter_combinations)} 种参数组合")
     for target_column in target_column_set:
         # 提取目标列的参数
         split_col = target_column.split('_')
@@ -597,65 +659,70 @@ def main():
         target_profit = float(split_col[2])
         target_period = int(split_col[3].replace('t', ''))
 
-        # 根据条件筛选模型信息
-        filtered_model_infos = filter_model_infos(
-            all_model_infos, target_side, target_profit, target_period
-        )
+        for min_profit, max_profit, min_period, max_period in parameter_combinations:
+            # 根据条件筛选模型信息
+            filtered_model_infos = filter_model_infos(
+                all_model_infos, target_side, target_profit, target_period,
+                min_profit, max_profit, min_period, max_period
+            )
 
-        if not filtered_model_infos:
-            continue  # 如果没有符合条件的模型，跳过
+            if not filtered_model_infos:
+                continue  # 如果没有符合条件的模型，跳过
 
-        pred_final_prob_cols = []
-        for info in filtered_model_infos:
-            col_name = f"pred_final_prob_{info['seq_len']}_{info['target_col']}"
-            pred_final_prob_cols.append(col_name)
+            pred_final_prob_cols = []
+            for info in filtered_model_infos:
+                col_name = f"pred_final_prob_{info['seq_len']}_{info['target_col']}"
+                pred_final_prob_cols.append(col_name)
 
-        # 检查列是否存在于 result_df 中
-        missing_cols = [col for col in pred_final_prob_cols if col not in result_df.columns]
-        if missing_cols:
-            print(f"警告：以下列在 result_df 中不存在，已忽略：{missing_cols}")
-            # 从列表中移除缺失的列
-            pred_final_prob_cols = [col for col in pred_final_prob_cols if col in result_df.columns]
+            # 检查列是否存在于 result_df 中
+            missing_cols = [col for col in pred_final_prob_cols if col not in result_df.columns]
+            if missing_cols:
+                print(f"警告：以下列在 result_df 中不存在，已忽略：{missing_cols}")
+                # 从列表中移除缺失的列
+                pred_final_prob_cols = [col for col in pred_final_prob_cols if col in result_df.columns]
 
-        if not pred_final_prob_cols:
-            print(f"错误：没有可用的预测列进行计算，跳过该 target_column：{target_column}")
-            continue
+            if not pred_final_prob_cols:
+                print(f"错误：没有可用的预测列进行计算，跳过该 target_column：{target_column}")
+                continue
 
-        # 计算预测概率的总和
-        result_df['pred_sum'] = result_df[pred_final_prob_cols].sum(axis=1)
+            # 计算预测概率的总和
+            result_df['pred_sum'] = result_df[pred_final_prob_cols].sum(axis=1)
 
-        # 计算 target_column
-        # 找到 pred_final_prob_cols 中包含 target_column 的列
-        temp_target_col_pred_cols = [col for col in pred_final_prob_cols if target_column in col]
-        if not temp_target_col_pred_cols:
-            print(f"错误：找不到包含 {target_column} 的列，跳过该 target_column")
-            continue
-        temp_seq_len = int(temp_target_col_pred_cols[0].split('_')[3])
-        sort_columns = ['pred_sum']
-        # sort_columns = pred_final_prob_cols
-        # 分析数据
-        result_list = analyze_data(
-            result_df,
-            target_column=f"{temp_seq_len}_{target_column}",
-            sort_columns=sort_columns
-        )
+            # 计算 target_column
+            # 找到 pred_final_prob_cols 中包含 target_column 的列
+            temp_target_col_pred_cols = [col for col in pred_final_prob_cols if target_column in col]
+            if not temp_target_col_pred_cols:
+                print(f"错误：找不到包含 {target_column} 的列，跳过该 target_column")
+                continue
+            temp_seq_len = int(temp_target_col_pred_cols[0].split('_')[3])
+            sort_columns = ['pred_sum']
+            # sort_columns = pred_final_prob_cols
+            # 分析数据
+            result_list = analyze_data(
+                result_df,
+                target_column=f"{temp_seq_len}_{target_column}",
+                sort_columns=sort_columns
+            )
 
-        # 保存结果
-        temp_dict = {
-            'target_column': target_column,
-            'result_list': result_list,
-            # 'target_cols': [info['target_col'] for info in filtered_model_infos],
-            # 'seq_lens': [info['seq_len'] for info in filtered_model_infos],
-            'pred_final_prob_cols': pred_final_prob_cols
-        }
-        strategy_results.append(temp_dict)
+            # 保存结果，添加参数标识
+            temp_dict = {
+                'min_profit': min_profit,
+                'max_profit': max_profit,
+                'min_period': min_period,
+                'max_period': max_period,
+                'pred_final_prob_cols_len': len(pred_final_prob_cols),
+                'target_column': target_column,
+                'result_list': result_list,
+                'pred_final_prob_cols': pred_final_prob_cols
+            }
+            strategy_results.append(temp_dict)
 
-        print(f"Target Column: {target_column}")
-        # 如果需要，可以打印 result_list
-        # print(f"Result List: {result_list}")
+            print(f"Target Column: {target_column}, Parameters: min_profit={min_profit}, max_profit={max_profit}, min_period={min_period}, max_period={max_period}")
+            # 如果需要，可以打印 result_list
+            # print(f"Result List: {result_list}")
 
     # 保存策略结果
-    with open('strategy_result.json', 'w') as f:
+    with open('strategy_result_back.json', 'w') as f:
         json.dump(strategy_results, f, indent=4)
 
 def analyze_strategy_result():
@@ -678,12 +745,16 @@ def order():
     with open('strategy_result.json', 'r') as f:
         strategy_results = json.load(f)
     dir_name_list = []
+    final_strategy_results = []
     # 遍历策略结果
     for result in strategy_results:
         pred_final_prob_cols = result['pred_final_prob_cols']
-        for col in pred_final_prob_cols:
-            seq_col = col.split('prob_')[1]
-            dir_name_list.append(seq_col)
+        if float(result['score']) > 0.1:
+            final_strategy_results.append(result)
+            for col in pred_final_prob_cols:
+                seq_col = col.split('prob_')[1]
+                dir_name_list.append(seq_col)
+    strategy_results = final_strategy_results
     # 对seq_col_list去重
     dir_name_list = list(set(dir_name_list))
     seq_lens = []
@@ -707,41 +778,79 @@ def order():
             'profit': model_info[3],
             'period': model_info[4],
         })
-
-
+    print(f"all_model_infos长度：{len(all_model_infos)}")
+    offset = 20
     while True:
-        start_time = time.time()
-        if start_time % 60 < 58:
-            time.sleep(1)
+        try:
+            latest_price = 100000
+            start_time = time.time()
+            if start_time % 60 < 58:
+                time.sleep(1)
+                continue
+            # all_model_infos = all_model_infos[:10]
+            feature_df = get_latest_data(max_candles=550)
+
+            # result_df = pd.read_csv('single_result_df.csv')
+
+            result_df = generate_predictions(all_model_infos, data_path)
+            # 合并所有预测结果
+            result_df = merge_results(result_df)
+
+            # 删除包含 NaN 的行
+            result_df.dropna(inplace=True)
+            # 取最新的一行
+            # 将result_df保存为CSV文件
+            # result_df.to_csv('single_result_df.csv', index=False)
+
+            final_result = gen_detail_info(result_df, strategy_results)
+            for key in final_result.keys():
+                if key == 'timestamp':
+                    continue
+                if final_result[key]['proportion'] >= 0.8 and final_result[key]['percentile'] < 0.5:
+                    latest_data = feature_df.iloc[-1]
+                    latest_price = latest_data['close']
+                    seq_len, target_col, side, profit, period = extract_model_info(f'100_{key}')
+                    if side == 'down':
+                        # 卖出
+                        result = place_order(
+                            INST_ID,
+                            "sell",
+                            "limit",
+                            ORDER_SIZE,
+                            price=latest_price - offset,
+                            tp_price=latest_price - profit*1000 + offset  # 设置止盈价格
+                        )
+                    else:
+                        # 买入
+                        result = place_order(
+                            INST_ID,
+                            "buy",
+                            "limit",
+                            ORDER_SIZE,
+                            price=latest_price + offset,
+                            tp_price=latest_price + profit*1000 - offset  # 设置止盈价格
+                        )
+                    print(f"下单成功：{key} {result} final_result[key]: {final_result[key]}")
+                    break
+            release_funds(INST_ID, latest_price, 5)
+
+            print(final_result)
+            final_result['timestamp'] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            # 将timestamp移动到第一列
+            final_result = {k: final_result[k] for k in ['timestamp'] + list(final_result.keys())}
+
+            # 输出当前时间
+            print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
+            # 输出result_df的最后一行
+            print(result_df.iloc[-1])
+            print("耗时：", time.time() - start_time)
+            # 将final_result增量写入到文件
+            with open("final_result.txt", "a") as f:
+                f.write(str(final_result) + "\n")
+        except Exception as e:
+            print(f"错误：{e}")
+            traceback.print_exc()
             continue
-        # all_model_infos = all_model_infos[:10]
-        feature_df = get_latest_data(max_candles=550)
-        # result_df = pd.read_csv('single_result_df.csv')
-
-        result_df = generate_predictions(all_model_infos, data_path)
-        # 合并所有预测结果
-        result_df = merge_results(result_df)
-
-        # 删除包含 NaN 的行
-        result_df.dropna(inplace=True)
-        # 取最新的一行
-        # 将result_df保存为CSV文件
-        # result_df.to_csv('single_result_df.csv', index=False)
-
-        final_result = gen_detail_info(result_df, strategy_results)
-        print(final_result)
-        final_result['timestamp'] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        # 将timestamp移动到第一列
-        final_result = {k: final_result[k] for k in ['timestamp'] + list(final_result.keys())}
-
-        # 输出当前时间
-        print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
-        # 输出result_df的最后一行
-        print(result_df.iloc[-1])
-        print("耗时：", time.time() - start_time)
-        # 将final_result增量写入到文件
-        with open("final_result.txt", "a") as f:
-            f.write(str(final_result) + "\n")
 
 
 def gen_detail_info(result_df, strategy_results):
@@ -767,6 +876,7 @@ def gen_detail_info(result_df, strategy_results):
         result_df['pred_sum'] = result_df[pred_final_prob_cols].sum(axis=1)
         for item in history_result_list:
             if item['threshold']['pred_sum'] < result_df['pred_sum'].iloc[-1]:
+                item['pred_sum'] = result_df['pred_sum'].iloc[-1]
                 break
         final_result_dict[target_column] = item
 
@@ -782,6 +892,8 @@ def gen_detail_info(result_df, strategy_results):
 
 
 if __name__ == "__main__":
+    # process_strategy_results('strategy_result_back.json', 'final_strategy_result.json')
+
     order()
     # analyze_strategy_result()
     # main()
