@@ -865,21 +865,25 @@ def order():
             #     time.sleep(1)
             #     continue
             # all_model_infos = all_model_infos[:10]
-            # feature_df = get_latest_data(max_candles=550)
+            feature_df = get_latest_data(max_candles=1500)
 
-            # result_df = pd.read_csv('single_result_df.csv')
+            result_df = pd.read_csv('single_result_df.csv')
 
-            result_df = generate_predictions(all_model_infos, data_path)
-            # 合并所有预测结果
-            result_df = merge_results(result_df)
-
-            # 删除包含 NaN 的行
-            result_df.dropna(inplace=True)
-            # 取最新的一行
-            # 将result_df保存为CSV文件
+            # result_df = generate_predictions(all_model_infos, data_path)
+            # # 合并所有预测结果
+            # result_df = merge_results(result_df)
+            #
+            # # 删除包含 NaN 的行
+            # result_df.dropna(inplace=True)
+            # # 取最新的一行
+            # # 将result_df保存为CSV文件
             # result_df.to_csv('single_result_df.csv', index=False)
 
-            final_result = gen_detail_info(result_df, strategy_results)
+            final_result_df = gen_detail_info(result_df, strategy_results)
+            # 将analysis_result移动到第一列
+            final_result_df = final_result_df[['analysis_result'] + [col for col in final_result_df.columns if col != 'analysis_result']]
+            # 获取最后一行的analysis_result
+            final_result = final_result_df.iloc[-1]['analysis_result']
             for key in final_result.keys():
                 if key == 'timestamp':
                     continue
@@ -894,7 +898,7 @@ def order():
                             "sell",
                             "limit",
                             ORDER_SIZE,
-                            price=latest_price - offset,
+                            price=latest_price + offset,
                             tp_price=latest_price - profit*1000 + offset  # 设置止盈价格
                         )
                     else:
@@ -904,7 +908,7 @@ def order():
                             "buy",
                             "limit",
                             ORDER_SIZE,
-                            price=latest_price + offset,
+                            price=latest_price - offset,
                             tp_price=latest_price + profit*1000 - offset  # 设置止盈价格
                         )
                     print(f"下单成功：{key} {result} final_result[key]: {final_result[key]}")
@@ -931,57 +935,75 @@ def order():
 
 
 def gen_detail_info(result_df, strategy_results):
-    columns = result_df.columns
-    # result_df = result_df.iloc[-1]
-    final_result_dict = {}
-    for result in strategy_results:
-        pred_final_prob_cols = result['pred_final_prob_cols']
-        history_result_list = result['result_list']
-        target_column = result['target_column']
-        # 检查列是否存在于 result_df 中
-        missing_cols = [col for col in pred_final_prob_cols if col not in columns]
-        if missing_cols:
-            print(f"警告：以下列在 result_df 中不存在，已忽略：{missing_cols}")
-            # 从列表中移除缺失的列
-            pred_final_prob_cols = [col for col in pred_final_prob_cols if col in columns]
+    from copy import deepcopy
 
-        if not pred_final_prob_cols:
-            print(f"错误：没有可用的预测列进行计算，跳过该 target_column：{target_column}")
-            continue
+    def process_row(row):
+        final_result_dict = {}
+        columns = row.index
 
+        for result in strategy_results:
+            pred_final_prob_cols = result['pred_final_prob_cols']
+            history_result_list = result['result_list']
+            target_column = result['target_column']
 
-        result_df['pred_sum'] = result_df[pred_final_prob_cols].sum(axis=1)
-        for item in history_result_list:
-            if item['threshold']['pred_sum'] < result_df['pred_sum'].iloc[-1]:
-                item['pred_sum'] = result_df['pred_sum'].iloc[-1]
-                break
-        final_result_dict[target_column] = item
+            # 检查列是否存在于 row 中
+            missing_cols = [col for col in pred_final_prob_cols if col not in columns]
+            if missing_cols:
+                print(f"警告：以下列在 row 中不存在，已忽略：{missing_cols}")
+                # 从列表中移除缺失的列
+                pred_final_prob_cols = [col for col in pred_final_prob_cols if col in columns]
 
-    filtered_items = {key: value for key, value in final_result_dict.items() if value['proportion'] >= 0.5 and value['percentile'] < 0.5}
+            if not pred_final_prob_cols:
+                print(f"错误：没有可用的预测列进行计算，跳过该 target_column：{target_column}")
+                continue
 
-    # 2. 按 proportion 降序排序
-    sorted_items = sorted(filtered_items.items(), key=lambda item: item[1]['percentile'], reverse=False)
+            row_pred_sum = row[pred_final_prob_cols].sum()
 
-    # 3. 将排序后的结果重新转换为字典
-    final_result_dict = dict(sorted_items)
+            result_found = False
+            for original_item in history_result_list:
+                # 深拷贝 original_item，以避免修改原始数据
+                item = deepcopy(original_item)
+                if item['threshold']['pred_sum'] < row_pred_sum:
+                    item['pred_sum'] = row_pred_sum
+                    final_result_dict[target_column] = item
+                    result_found = True
+                    break
+            if not result_found:
+                # 当没有匹配的项时，可以根据需要处理
+                pass
 
-    return final_result_dict
+        filtered_items = {key: value for key, value in final_result_dict.items() if value['proportion'] >= 0.5 and value['percentile'] < 0.5}
+
+        # 2. 按 percentile 升序排序
+        sorted_items = sorted(filtered_items.items(), key=lambda item: item[1]['percentile'], reverse=False)
+
+        # 3. 将排序后的结果重新转换为字典
+        final_result_dict = dict(sorted_items)
+
+        return final_result_dict
+
+    # 对每一行应用 process_row 函数，并将结果存储在新的列中
+    result_df['analysis_result'] = result_df.apply(process_row, axis=1)
+
+    return result_df
 
 
 def top_n_scores_by_group(json_file_path, n):
-    result_list = []
-    # 读取策略结果
-    with open('strategy_result.json', 'r') as f:
-        strategy_results = json.load(f)
-    dir_name_list = []
-    final_strategy_results = []
-    # 遍历策略结果
-    for result in strategy_results:
-        pred_final_prob_cols = result['pred_final_prob_cols']
-        if float(result['score']) > 0.1:
-            result_list.append(result)
+    # result_list = []
+    # # 读取策略结果
+    # with open('strategy_result.json', 'r') as f:
+    #     strategy_results = json.load(f)
+    # dir_name_list = []
+    # final_strategy_results = []
+    # # 遍历策略结果
+    # for result in strategy_results:
+    #     pred_final_prob_cols = result['pred_final_prob_cols']
+    #     if float(result['score']) > 0.01:
+    #         result_list.append(result)
+    #
+    # return result_list
 
-    return result_list
+
     # 读取 JSON 文件
     with open(json_file_path, 'r') as f:
         data = json.load(f)
