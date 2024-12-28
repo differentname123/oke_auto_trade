@@ -6,7 +6,7 @@ import pandas as pd
 import time
 import okx.MarketData as Market
 from common_utils import get_config
-
+import json
 # 设置代理（如果需要）
 os.environ['HTTP_PROXY'] = 'http://127.0.0.1:7890'
 os.environ['HTTPS_PROXY'] = 'http://127.0.0.1:7890'
@@ -33,18 +33,19 @@ def get_kline_data(inst_id, bar="1m", limit=100, max_candles=1000):
     after = ''  # 初始值为None，获取最新数据
     fetched_candles = 0  # 已获取的K线数量
     fail_count = 0  # 失败次数
+    max_retries = 3  # 最大重试次数
 
     while fetched_candles < max_candles:
         try:
             # 调用OKX API获取历史K线数据
-            response = marketAPI.get_candlesticks(instId=inst_id, bar=bar, after=after, limit=limit)
+            response = marketAPI.get_history_candlesticks(instId=inst_id, bar=bar, after=after, limit=limit)
 
-            if response["code"] != "0":
-                print(f"获取K线数据失败，错误代码：{response['code']}，错误消息：{response['msg']}")
+            if response.get("code") != "0":
+                print(f"获取K线数据失败，错误代码：{response.get('code')}，错误消息：{response.get('msg')}")
                 time.sleep(1)
                 fail_count += 1
-                if fail_count >= 3:
-                    print("连续失败次数过多，停止获取。")
+                if fail_count >= max_retries:
+                    print(f"连续失败 {max_retries} 次，停止获取。")
                     break
             else:
                 fail_count = 0
@@ -60,8 +61,6 @@ def get_kline_data(inst_id, bar="1m", limit=100, max_candles=1000):
 
                 # 更新 `after` 参数为当前返回数据的最早时间戳，用于获取更早的数据
                 after = data[-1][0]
-                # 将时间戳转换为可读性更好的格式
-                # print(f"已获取 {fetched_candles} 条K线数据，最新时间：{pd.to_datetime(after, unit='ms')}")
 
                 # 如果获取的数据量小于limit，说明数据已获取完毕
                 if len(data) < limit:
@@ -74,22 +73,25 @@ def get_kline_data(inst_id, bar="1m", limit=100, max_candles=1000):
             print(f"获取K线数据时出现异常：{e}")
             break
 
-    # 将所有数据转换为DataFrame
-    df = pd.DataFrame(all_data, columns=["timestamp", "open", "high", "low", "close", "volume", "volCcy", "volCcyQuote",
-                                         "confirm"])
+    # 将所有数据转换为DataFrame，即使all_data为空也能处理
+    if all_data:
+        df = pd.DataFrame(all_data, columns=["timestamp", "open", "high", "low", "close", "volume", "volCcy", "volCcyQuote",
+                                             "confirm"])
 
-    # 数据类型转换
-    # 将时间戳转换为 datetime 对象，并将其设置为 UTC
-    df["timestamp"] = pd.to_datetime(df["timestamp"].astype(float) / 1000, unit="s", utc=True)
+        # 数据类型转换
+        # 将时间戳转换为 datetime 对象，并将其设置为 UTC
+        df["timestamp"] = pd.to_datetime(df["timestamp"].astype(float) / 1000, unit="s", utc=True)
 
-    # 将 UTC 时间转换为北京时间（Asia/Shanghai 时区，UTC+8）
-    df["timestamp"] = df["timestamp"].dt.tz_convert('Asia/Shanghai')
-    df[["open", "high", "low", "close", "volume"]] = df[["open", "high", "low", "close", "volume"]].astype(float)
+        # 将 UTC 时间转换为北京时间（Asia/Shanghai 时区，UTC+8）
+        df["timestamp"] = df["timestamp"].dt.tz_convert('Asia/Shanghai')
+        df[["open", "high", "low", "close", "volume"]] = df[["open", "high", "low", "close", "volume"]].astype(float)
 
-    # 按时间排序
-    df = df.sort_values("timestamp").reset_index(drop=True)
-
-    return df
+        # 按时间排序
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        return df
+    else:
+        print("未能获取到任何K线数据。")
+        return pd.DataFrame() # 返回一个空的 DataFrame
 
 def calculate_ma(data, period):
     """计算移动平均线 (MA)"""
@@ -389,7 +391,7 @@ def gen_feature(origin_name):
     # df.tail(100000).to_csv(f'{origin_name[:-4]}_features_tail.csv', index=False)
     return df
 
-def add_target_variables(df, thresholds=None, max_decoder_length=60):
+def add_target_variables_op(df, max_decoder_length=30):
     """
     添加目标变量，包括未来多个时间步的涨幅和跌幅，针对close、high、low的多阈值计算。
 
@@ -398,29 +400,31 @@ def add_target_variables(df, thresholds=None, max_decoder_length=60):
     :param max_decoder_length: 预测未来的时间步长，默认5
     :return: 添加了目标变量的DataFrame
     """
-    if thresholds is None:
-        thresholds = [round(x * 0.05, 2) for x in range(1, 11)]  # [0.1, 0.2, ..., 1.0]
-
     # 创建一个新的字典，用于存储所有新增列
     new_columns = {}
 
+
     for col in ["close"]:
-        for step in range(1, max_decoder_length + 1):  # 未来 1 到 max_decoder_length 分钟
+        # 获取下一个时间点的最高价和最低价
+        next_high = df['high'].shift(-1)
+        next_low = df['low'].shift(-1)
+
+        # 计算下一个时间点的最高价和最低价相对于当前时间点的涨跌幅
+        new_columns[f"{col}_next_max_up"] = (next_high - df[col]) / df[col] * 100  # 最高价涨幅
+        new_columns[f"{col}_next_max_down"] = (df[col] - next_low) / df[col] * 100  # 最低价跌幅
+
+        for step in range(10, max_decoder_length + 1, 10):  # 未来 1 到 max_decoder_length 分钟
             # 获取未来 step 个时间窗口内的最高价和最低价
-            future_max_high = df['high'].shift(-step).rolling(window=step, min_periods=1).max()
-            future_min_low = df['low'].shift(-step).rolling(window=step, min_periods=1).min()
+            future_max_high = df['high'].rolling(window=step, min_periods=1).max().shift(-step)
+            future_min_low = df['low'].rolling(window=step, min_periods=1).min().shift(-step)
 
-            for threshold in thresholds:
-                # 计算涨幅超过阈值的列（使用未来的最高价）
-                new_columns[f"{col}_up_{threshold}_t{step}"] = (
-                        (future_max_high - df[col]) / df[col] > threshold / 100
-                ).astype(int)
+            # 计算未来 step 个时间窗口内的最大涨幅和跌幅 (修正部分)
+            new_columns[f"{col}_max_up_t{step}"] = (future_max_high - df[col]) / df[col] * 100 #最大涨幅用最高价
+            new_columns[f"{col}_max_down_t{step}"] = (df[col] - future_min_low) / df[col] * 100 #最大跌幅用最低价
 
-                # 计算跌幅超过阈值的列（使用未来的最低价）
-                new_columns[f"{col}_down_{threshold}_t{step}"] = (
-                        (future_min_low - df[col]) / df[col] < -threshold / 100
-                ).astype(int)
-
+            # 计算未来 step 个时间窗口的涨跌幅
+            future_return = (df['close'].shift(-step) - df['close']) / df['close'] * 100
+            new_columns[f"{col}_max_return_t{step}"] = future_return
     # 使用 pd.concat 一次性将所有新列添加到原数据框
     df = pd.concat([df, pd.DataFrame(new_columns, index=df.index)], axis=1)
 
@@ -442,7 +446,7 @@ def get_train_data(inst_id="BTC-USDT-SWAP", bar="1m", limit=100, max_candles=100
         # kline_data = add_time_features(kline_data)
 
         # 添加目标变量
-        kline_data = add_target_variables(kline_data)
+        kline_data = add_target_variables_op(kline_data)
 
         # 重置索引
         kline_data.reset_index(drop=True, inplace=True)
@@ -463,10 +467,1252 @@ def get_latest_data(max_candles=1000):
     feature_df = gen_feature(origin_data)
     return feature_df
 
+def generate_body_wick_signals(df):
+    """
+    根据 K 线实体和影线的关系生成多种参数的交易信号。
+    """
+    df_signals = pd.DataFrame(index=df.index)
+    body_ratios = [0.6, 0.7, 0.8]  # 实体相对于 K 线范围的比例
+    wick_ratios = [0.2, 0.3, 0.4]  # 影线相对于实体大小的比例
+
+    body = abs(df['close'] - df['open'])
+    candle_range = df['high'] - df['low']
+    upper_wick = df['high'] - df[['close', 'open']].max(axis=1)
+    lower_wick = df[['close', 'open']].min(axis=1) - df['low']
+
+    for body_ratio in body_ratios:
+        for wick_ratio in wick_ratios:
+            # 看涨信号
+            buy_condition = (
+                (body > candle_range * body_ratio) &
+                (upper_wick < body * wick_ratio) &
+                (lower_wick > body * wick_ratio)
+            )
+            df_signals[f'Bullish_BodyWick_B{int(body_ratio*100)}_W{int(wick_ratio*100)}_Buy'] = np.where(buy_condition, 1, 0)
+
+            # 看跌信号
+            sell_condition = (
+                (body > candle_range * body_ratio) &
+                (lower_wick < body * wick_ratio) &
+                (upper_wick > body * wick_ratio)
+            )
+            df_signals[f'Bearish_BodyWick_B{int(body_ratio*100)}_W{int(wick_ratio*100)}_Sell'] = np.where(sell_condition, 1, 0)
+
+    return pd.concat([df, df_signals], axis=1)
+
+
+def generate_volume_spike_signals(df):
+    """
+    生成基于多种周期成交量异动的交易信号。
+    """
+    df_signals = pd.DataFrame(index=df.index)
+    n_periods_list = [10, 20, 30]
+    volume_multipliers = [1.5, 2, 2.5]
+
+    for n_periods in n_periods_list:
+        for multiplier in volume_multipliers:
+            average_volume = df['volume'].rolling(window=n_periods).mean().shift(1)
+
+            buy_condition = (df['volume'] > average_volume * multiplier) & (df['close'] > df['open'])
+            df_signals[f'Volume_Spike_Up_{n_periods}_M{int(multiplier*10)}_Buy'] = np.where(buy_condition, 1, 0)
+
+            sell_condition = (df['volume'] > average_volume * multiplier) & (df['close'] < df['open'])
+            df_signals[f'Volume_Spike_Down_{n_periods}_M{int(multiplier*10)}_Sell'] = np.where(sell_condition, 1, 0)
+
+    return pd.concat([df, df_signals], axis=1)
+
+def generate_signals(df):
+    """
+    融合多种方法生成的买入和卖出信号。
+
+    Args:
+        df: 包含 'timestamp', 'open', 'high', 'low', 'close', 'volume' 列的 Pandas DataFrame。
+
+    Returns:
+        DataFrame:  包含原始数据和生成的信号列的 DataFrame。
+    """
+
+    df = df.copy()  # 避免修改原始 DataFrame
+    # df = generate_volume_spike_signals(df)
+    # df = generate_body_wick_signals(df)
+    # df = generate_consecutive_and_large_candle_signals(df)
+    # df = generate_ichimoku_signals(df)
+    # df = generate_price_extremes_reverse_signals(df)
+    df = generate_price_extremes_signals(df)
+    # df = generate_volume_signals(df)
+    # df = generate_price_signals(df)
+    # df = generate_moving_average_signals(df)
+    # df = generate_rsi_signals(df)
+    # df = generate_macd_signals(df)
+    # df = generate_bollinger_band_signals(df)
+    # df = generate_ema_cross_signals(df)
+    # df = generate_stochastic_signals(df)
+    # df = generate_cci_signals(df)
+    # df = generate_adx_signals(df)
+    # df = generate_obv_signals(df)
+    # df = generate_williams_r_signals(df)
+    # df = generate_cmf_signals(df)
+    # df = generate_mfi_signals(df)
+    # df = generate_roc_signals(df)
+    # df = generate_donchian_channel_signals(df)
+    # df = generate_keltner_channel_signals(df)
+
+    return df
+
+
+def generate_volume_signals(df, short_window=5, long_window=20):
+    """
+    基于成交量和其他指标生成买卖信号。
+
+    Args:
+        df (pd.DataFrame): 包含 'close' 和 'volume' 列的 DataFrame。
+        short_window (int): 短期均线的窗口大小。
+        long_window (int): 长期均线的窗口大小。
+
+    Returns:
+        pd.DataFrame: 包含信号列的 DataFrame。
+    """
+    df = df.copy()  # Create a copy to avoid modifying the original DataFrame
+
+    # 1. 基于成交量和价格变化的信号
+    price_change = df['close'].diff()
+    volume_change = df['volume'].diff()
+
+    df['Volume_Buy'] = np.where((price_change > 0) & (volume_change > 0), 1, 0)
+    df['Volume_Sell'] = np.where((price_change < 0) & (volume_change > 0), 1, 0)
+
+    # 2. 基于成交量移动平均线的信号
+    df['volume_short_ma'] = df['volume'].rolling(window=short_window).mean()
+    df['volume_long_ma'] = df['volume'].rolling(window=long_window).mean()
+
+    df['Volume_MA_Buy'] = np.where(df['volume_short_ma'] > df['volume_long_ma'], 1, 0)
+    df['Volume_MA_Sell'] = np.where(df['volume_short_ma'] < df['volume_long_ma'], 1, 0)
+
+    # 3. 基于价格和成交量移动平均线的信号(金叉死叉)
+    df['close_short_ma'] = df['close'].rolling(window=short_window).mean()
+    df['close_long_ma'] = df['close'].rolling(window=long_window).mean()
+
+    df['Price_Volume_GoldenCross_Buy'] = np.where(
+        (df['close_short_ma'] > df['close_long_ma']) & (df['volume_short_ma'] > df['volume_long_ma']), 1, 0)
+    df['Price_Volume_DeathCross_Sell'] = np.where(
+        (df['close_short_ma'] < df['close_long_ma']) & (df['volume_short_ma'] < df['volume_long_ma']), 1, 0)
+
+    # 4. 价格上涨且成交量大于其短期均线
+    df['PriceUp_VolumeAboveSMA_Buy'] = np.where((price_change > 0) & (df['volume'] > df['volume_short_ma']), 1, 0)
+
+    # 5. 价格下跌且成交量大于其短期均线
+    df['PriceDown_VolumeAboveSMA_Sell'] = np.where((price_change < 0) & (df['volume'] > df['volume_short_ma']), 1, 0)
+
+    # --- 可以添加更多信号 ---
+
+    # 删除中间生成的列
+    df.drop(columns=['volume_short_ma', 'volume_long_ma', 'close_short_ma', 'close_long_ma'], inplace=True)
+
+    return df
+
+def generate_price_signals(df):
+    """
+    生成多种价格突破相关的价格信号，买入信号包含_Buy，卖出信号包含_Sell。
+
+    Args:
+        df: 包含 'open', 'high', 'low', 'close' 列的 Pandas DataFrame。
+
+    Returns:
+        Pandas DataFrame，包含原始数据和生成的信号列。
+    """
+    df_signals = df.copy() # 创建副本，避免修改原始df
+
+    # 1. 简单价格突破
+    df_signals['Price_Breakout_Buy'] = np.where(df_signals['close'] > df_signals['high'].shift(1), 1, 0)
+    df_signals['Price_Breakout_Sell'] = np.where(df_signals['close'] < df_signals['low'].shift(1), 1, 0)
+
+    # 2. 更高周期的价格突破 (例如，突破前N天的最高价/最低价)
+    n_days = 5  # 可以根据需要调整周期
+    df_signals[f'High_Breakout_{n_days}D_Buy'] = np.where(df_signals['close'] > df_signals['high'].rolling(window=n_days).max().shift(1), 1, 0)
+    df_signals[f'Low_Breakout_{n_days}D_Sell'] = np.where(df_signals['close'] < df_signals['low'].rolling(window=n_days).min().shift(1), 1, 0)
+
+    # 3. 开盘价突破
+    df_signals['Open_Breakout_High_Buy'] = np.where(df_signals['close'] > df_signals['open'].shift(1), 1, 0)
+    df_signals['Open_Breakout_Low_Sell'] = np.where(df_signals['close'] < df_signals['open'].shift(1), 1, 0)
+
+    # 4. 组合突破 (例如，同时突破前一天的最高价和开盘价)
+    df_signals['Combined_HighOpen_Breakout_Buy'] = np.where((df_signals['close'] > df_signals['high'].shift(1)) & (df_signals['close'] > df_signals['open'].shift(1)), 1, 0)
+    df_signals['Combined_LowOpen_Breakout_Sell'] = np.where((df_signals['close'] < df_signals['low'].shift(1)) & (df_signals['close'] < df_signals['open'].shift(1)), 1, 0)
+
+    return df_signals
+
+def generate_moving_average_signals(df):
+    """
+    生成基于移动平均线的买卖信号，并探索不同参数下的信号。
+
+    Args:
+        df: 包含 'close' 列的 DataFrame。
+
+    Returns:
+        包含原始数据和生成信号的 DataFrame。
+    """
+
+    # 参数空间，用于探索不同的均线周期
+    short_windows = [3, 5, 7, 10]
+    long_windows = [15, 20, 30, 50]
+
+    for short_window in short_windows:
+        for long_window in long_windows:
+            if short_window >= long_window:
+                continue  # 确保短周期小于长周期
+
+            # 计算移动平均线
+            sma_short_col = f'SMA_{short_window}'
+            sma_long_col = f'SMA_{long_window}'
+            df[sma_short_col] = df['close'].rolling(window=short_window, min_periods=1).mean()
+            df[sma_long_col] = df['close'].rolling(window=long_window, min_periods=1).mean()
+
+            # 生成金叉和死叉信号
+            golden_cross_buy_signal = f'MA_Golden_Cross_{short_window}_{long_window}_Buy'
+            death_cross_sell_signal = f'MA_Death_Cross_{short_window}_{long_window}_Sell'
+            df[golden_cross_buy_signal] = np.where(
+                (df[sma_short_col] > df[sma_long_col]) & (df[sma_short_col].shift(1) <= df[sma_long_col].shift(1)), 1, 0)
+            df[death_cross_sell_signal] = np.where(
+                (df[sma_short_col] < df[sma_long_col]) & (df[sma_short_col].shift(1) >= df[sma_long_col].shift(1)), 1, 0)
+
+            # 生成价格突破均线信号
+            price_above_buy_signal = f'Price_Above_SMA_{short_window}_Buy'
+            price_below_sell_signal = f'Price_Below_SMA_{short_window}_Sell'
+            df[price_above_buy_signal] = np.where(
+                (df['close'] > df[sma_short_col]) & (df['close'].shift(1) <= df[sma_short_col].shift(1)), 1, 0)
+            df[price_below_sell_signal] = np.where(
+                (df['close'] < df[sma_short_col]) & (df['close'].shift(1) >= df[sma_short_col].shift(1)), 1, 0)
+
+            # 删除过程中生成的均线列，保留信号列
+            df.drop(columns=[sma_short_col, sma_long_col], inplace=True)
+
+    return df
+def generate_rsi_signals(df):
+    rsi_period = 14
+    delta = df['close'].diff()
+    up = delta.clip(lower=0)
+    down = -delta.clip(upper=0)
+    avg_gain = up.rolling(window=rsi_period, min_periods=rsi_period).mean()
+    avg_loss = down.rolling(window=rsi_period, min_periods=rsi_period).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    df['rsi'] = rsi  # 保留 RSI 用于后续信号生成
+
+    signals = {}
+    lower_threshold = 30
+    upper_threshold = 70
+    mid_level = 50
+
+    # RSI 阈值信号
+    signals['RSI_Threshold_Buy'] = np.where(df['rsi'] < lower_threshold, 1, 0)
+    signals['RSI_Threshold_Sell'] = np.where(df['rsi'] > upper_threshold, 1, 0)
+
+    # RSI 突破信号
+    signals['RSI_Break_Buy'] = np.where(
+        (df['rsi'] >= lower_threshold) & (df['rsi'].shift(1) < lower_threshold), 1, 0)
+    signals['RSI_Break_Sell'] = np.where(
+        (df['rsi'] <= upper_threshold) & (df['rsi'].shift(1) > upper_threshold), 1, 0)
+
+    # RSI 中线交叉信号
+    signals['RSI_Mid_Cross_Buy'] = np.where(
+        (df['rsi'] > mid_level) & (df['rsi'].shift(1) <= mid_level), 1, 0)
+    signals['RSI_Mid_Cross_Sell'] = np.where(
+        (df['rsi'] < mid_level) & (df['rsi'].shift(1) >= mid_level), 1, 0)
+
+    # RSI 背离信号 (简化版 - 仅考虑与价格的简单对比，更复杂的背离需要更多逻辑)
+    # 注意：这只是一个简化的示例，实际背离判断需要更精细的逻辑
+    # 找到局部高点和低点，并比较价格和 RSI 的趋势
+    # 这里仅作为示例，实际应用中可能需要更复杂的算法
+    # signals['RSI_Divergence_Buy'] = np.where(
+    #     (df['close'].diff(2) > 0) & (df['rsi'].diff(2) < 0), 1, 0)
+    # signals['RSI_Divergence_Sell'] = np.where(
+    #     (df['close'].diff(2) < 0) & (df['rsi'].diff(2) > 0), 1, 0)
+
+    # 将信号添加到 DataFrame
+    for col, signal in signals.items():
+        df[col] = signal
+
+    df.drop(columns=['rsi'], inplace=True) # 删除中间计算的 'rsi' 列
+    return df
+
+def generate_macd_signals(df):
+    # MACD 参数
+    short_ema = 12
+    long_ema = 26
+    signal_ema = 9
+
+    # 计算 EMA
+    ema_short = df['close'].ewm(span=short_ema, adjust=False).mean()
+    ema_long = df['close'].ewm(span=long_ema, adjust=False).mean()
+
+    # 计算 MACD 和信号线
+    macd = ema_short - ema_long
+    macd_signal = macd.ewm(span=signal_ema, adjust=False).mean()
+    macd_histogram = macd - macd_signal
+
+    signals = {}
+
+    # 1. MACD 金叉死叉信号
+    signals['MACD_Cross_Buy'] = np.where(
+        (macd > macd_signal) & (macd.shift(1) <= macd_signal.shift(1)), 1, 0)
+    signals['MACD_Cross_Sell'] = np.where(
+        (macd < macd_signal) & (macd.shift(1) >= macd_signal.shift(1)), 1, 0)
+
+    # 2. MACD Histogram 信号
+    signals['MACD_Histogram_Buy'] = np.where(
+        (macd_histogram > 0) & (macd_histogram.shift(1) <= 0), 1, 0)
+    signals['MACD_Histogram_Sell'] = np.where(
+        (macd_histogram < 0) & (macd_histogram.shift(1) >= 0), 1, 0)
+
+    # 3. MACD Histogram 零轴上金叉
+    signals['MACD_Histogram_AboveZero_Buy'] = np.where(
+        (macd_histogram > 0) & (macd_histogram > macd_histogram.shift(1)), 1, 0)
+
+    # 4. MACD Histogram 零轴下死叉
+    signals['MACD_Histogram_BelowZero_Sell'] = np.where(
+        (macd_histogram < 0) & (macd_histogram < macd_histogram.shift(1)), 1, 0)
+
+    # 5. MACD 向上穿越零轴
+    signals['MACD_ZeroCross_Up_Buy'] = np.where(
+        (macd > 0) & (macd.shift(1) <= 0), 1, 0)
+
+    # 6. MACD 向下穿越零轴
+    signals['MACD_ZeroCross_Down_Sell'] = np.where(
+        (macd < 0) & (macd.shift(1) >= 0), 1, 0)
+
+    # 7. MACD 信号线向上穿越零轴
+    signals['MACD_Signal_ZeroCross_Up_Buy'] = np.where(
+        (macd_signal > 0) & (macd_signal.shift(1) <= 0), 1, 0)
+
+    # 8. MACD 信号线向下穿越零轴
+    signals['MACD_Signal_ZeroCross_Down_Sell'] = np.where(
+        (macd_signal < 0) & (macd_signal.shift(1) >= 0), 1, 0)
+
+    df = df.assign(**signals)
+
+    # 删除过程生成的字段
+    columns_to_drop = ['ema_short', 'ema_long', 'macd', 'macd_signal', 'macd_histogram']
+    # 注意：这里只删除临时计算列，不删除原始df中的数据
+    df = df.drop(columns=[col for col in columns_to_drop if col in df.columns])
+
+    return df
+
+def generate_bollinger_band_signals(df):
+    # 布林带参数
+    bollinger_window = 20
+    bollinger_std = 2
+
+    # 计算布林带
+    rolling_mean = df['close'].rolling(window=bollinger_window).mean()
+    rolling_std = df['close'].rolling(window=bollinger_window).std(ddof=0)  # ddof=0 保持与其他软件一致
+    bollinger_upper = rolling_mean + bollinger_std * bollinger_std
+    bollinger_lower = rolling_mean - bollinger_std * bollinger_std
+
+    # 初始化信号字典
+    signals = {}
+
+    # 布林带突破信号
+    signals['Bollinger_Breakout_Buy'] = np.where(df['close'] > bollinger_upper, 1, 0)
+    signals['Bollinger_Breakout_Sell'] = np.where(df['close'] < bollinger_lower, 1, 0)
+
+    # 布林带触及信号
+    signals['Bollinger_Lower_Band_Touch_Buy'] = np.where(df['close'] <= bollinger_lower, 1, 0)
+    signals['Bollinger_Upper_Band_Touch_Sell'] = np.where(df['close'] >= bollinger_upper, 1, 0)
+
+    # 布林带反转突破信号
+    signals['Bollinger_Lower_Band_Reversal_Buy'] = np.where(
+        (df['close'] > bollinger_lower) & (df['close'].shift(1) <= bollinger_lower.shift(1)), 1, 0)
+    signals['Bollinger_Upper_Band_Reversal_Sell'] = np.where(
+        (df['close'] < bollinger_upper) & (df['close'].shift(1) >= bollinger_upper.shift(1)), 1, 0)
+
+    # 布林带中线交叉信号
+    signals['Bollinger_Middle_Cross_Above_Buy'] = np.where(
+        (df['close'] > rolling_mean) & (df['close'].shift(1) <= rolling_mean.shift(1)), 1, 0)
+    signals['Bollinger_Middle_Cross_Below_Sell'] = np.where(
+        (df['close'] < rolling_mean) & (df['close'].shift(1) >= rolling_mean.shift(1)), 1, 0)
+
+    # 布林带宽度收缩信号 - 买入信号（布林带变窄且价格上穿中线）
+    bollinger_band_width = bollinger_upper - bollinger_lower
+    bb_width_shrinking = bollinger_band_width < bollinger_band_width.rolling(window=5).mean()
+    signals['Bollinger_Width_Shrinking_Buy'] = np.where(
+        bb_width_shrinking & (df['close'] > rolling_mean), 1, 0)
+
+    # 布林带宽度收缩信号 - 卖出信号（布林带变窄且价格下穿中线）
+    signals['Bollinger_Width_Shrinking_Sell'] = np.where(
+        bb_width_shrinking & (df['close'] < rolling_mean), 1, 0)
+
+    # 将信号添加到 DataFrame，并删除中间过程字段
+    df_with_signals = df.assign(**signals)
+
+    return df_with_signals
+
+def generate_ema_cross_signals(df):
+    """
+    生成基于 EMA 交叉和价格与 EMA 关系的交易信号。
+
+    Args:
+        df: 包含 'close' 列的 Pandas DataFrame。
+
+    Returns:
+        包含新增信号列的 Pandas DataFrame。
+    """
+    ema_short_window = 12
+    ema_long_window = 26
+
+    ema_short = df['close'].ewm(span=ema_short_window, adjust=False).mean()
+    ema_long = df['close'].ewm(span=ema_long_window, adjust=False).mean()
+
+    signals = {}
+
+    # 1. 指数移动平均线 (EMA) 黄金交叉买入信号
+    signals['EMA_Golden_Cross_Buy'] = np.where(
+        (ema_short > ema_long) & (ema_short.shift(1) <= ema_long.shift(1)), 1, 0)
+
+    # 2. 指数移动平均线 (EMA) 死亡交叉卖出信号
+    signals['EMA_Death_Cross_Sell'] = np.where(
+        (ema_short < ema_long) & (ema_short.shift(1) >= ema_long.shift(1)), 1, 0)
+
+    # 3. 价格上穿短期 EMA 买入信号
+    signals['Price_Cross_Up_EMA_Short_Buy'] = np.where(
+        (df['close'] > ema_short) & (df['close'].shift(1) <= ema_short.shift(1)), 1, 0)
+
+    # 4. 价格下穿短期 EMA 卖出信号
+    signals['Price_Cross_Down_EMA_Short_Sell'] = np.where(
+        (df['close'] < ema_short) & (df['close'].shift(1) >= ema_short.shift(1)), 1, 0)
+
+    # 5. 价格上穿长期 EMA 买入信号 (可以根据策略选择是否添加)
+    signals['Price_Cross_Up_EMA_Long_Buy'] = np.where(
+        (df['close'] > ema_long) & (df['close'].shift(1) <= ema_long.shift(1)), 1, 0)
+
+    # 6. 价格下穿长期 EMA 卖出信号 (可以根据策略选择是否添加)
+    signals['Price_Cross_Down_EMA_Long_Sell'] = np.where(
+        (df['close'] < ema_long) & (df['close'].shift(1) >= ema_long.shift(1)), 1, 0)
+
+    df = df.assign(**signals)
+    return df
+
+def generate_stochastic_signals(df):
+    """
+    生成基于随机指标的更多买卖信号。
+
+    Args:
+        df: 包含 'high', 'low', 'close' 列的 Pandas DataFrame。
+
+    Returns:
+        Pandas DataFrame，新增了包含买卖信号的列。
+    """
+    stoch_window = 14
+    low_min = df['low'].rolling(window=stoch_window, min_periods=1).min()
+    high_max = df['high'].rolling(window=stoch_window, min_periods=1).max()
+    high_low_range = high_max - low_min
+    high_low_range = high_low_range.replace(0, np.nan) # 避免除以零
+
+    percent_k = ((df['close'] - low_min) / high_low_range) * 100
+    percent_d = percent_k.rolling(window=3, min_periods=1).mean()
+
+    signals = {}
+
+    # 1. 经典买入信号 (低于 20 并上穿)
+    signals['Stochastic_Buy_Classic'] = np.where(
+        (percent_k > percent_d) & (percent_k.shift(1) <= percent_d.shift(1)) & (percent_k < 20), 1, 0)
+
+    # 2. 经典卖出信号 (高于 80 并下穿)
+    signals['Stochastic_Sell_Classic'] = np.where(
+        (percent_k < percent_d) & (percent_k.shift(1) >= percent_d.shift(1)) & (percent_k > 80), 1, 0)
+
+    # 3. 激进买入信号 (低于 30 并上穿)
+    signals['Stochastic_Buy_Aggressive'] = np.where(
+        (percent_k > percent_d) & (percent_k.shift(1) <= percent_d.shift(1)) & (percent_k < 30), 1, 0)
+
+    # 4. 激进卖出信号 (高于 70 并下穿)
+    signals['Stochastic_Sell_Aggressive'] = np.where(
+        (percent_k < percent_d) & (percent_k.shift(1) >= percent_d.shift(1)) & (percent_k > 70), 1, 0)
+
+    # 5. 买入信号 (快速线上穿慢速线，不考虑超卖区)
+    signals['Stochastic_Buy_Crossover'] = np.where(
+        (percent_k > percent_d) & (percent_k.shift(1) <= percent_d.shift(1)), 1, 0)
+
+    # 6. 卖出信号 (快速线下穿慢速线，不考虑超买区)
+    signals['Stochastic_Sell_Crossover'] = np.where(
+        (percent_k < percent_d) & (percent_k.shift(1) >= percent_d.shift(1)), 1, 0)
+
+    # 7. 超卖区买入信号 (进入超卖区后，%K 上穿某个阈值，例如 10)
+    oversold_threshold = 10
+    signals['Stochastic_Buy_Oversold'] = np.where(
+        (percent_k > oversold_threshold) & (percent_k.shift(1) <= oversold_threshold) & (percent_k < percent_d), 1, 0)
+
+    # 8. 超买区卖出信号 (进入超买区后，%K 下穿某个阈值，例如 90)
+    overbought_threshold = 90
+    signals['Stochastic_Sell_Overbought'] = np.where(
+        (percent_k < overbought_threshold) & (percent_k.shift(1) >= overbought_threshold) & (percent_k > percent_d), 1, 0)
+
+    df = df.assign(**signals)
+    return df
+
+
+def generate_ichimoku_signals(df):
+    # 计算 Ichimoku 指标的各条线
+    high9 = df['high'].rolling(window=9).max()
+    low9 = df['low'].rolling(window=9).min()
+    df['tenkan_sen'] = (high9 + low9) / 2
+
+    high26 = df['high'].rolling(window=26).max()
+    low26 = df['low'].rolling(window=26).min()
+    df['kijun_sen'] = (high26 + low26) / 2
+
+    df['senkou_span_a'] = ((df['tenkan_sen'] + df['kijun_sen']) / 2).shift(26)
+    high52 = df['high'].rolling(window=52).max()
+    low52 = df['low'].rolling(window=52).min()
+    df['senkou_span_b'] = ((high52 + low52) / 2).shift(26)
+
+    df['chikou_span'] = df['close'].shift(-26)
+
+    # 生成买卖信号
+    df['Ichimoku_Buy'] = np.where((df['tenkan_sen'] > df['kijun_sen']) & (df['tenkan_sen'].shift(1) <= df['kijun_sen'].shift(1)), 1, 0)
+    df['Ichimoku_Sell'] = np.where((df['tenkan_sen'] < df['kijun_sen']) & (df['tenkan_sen'].shift(1) >= df['kijun_sen'].shift(1)), 1, 0)
+
+    return df
+
+def generate_consecutive_and_large_candle_signals(df):
+    """
+    生成基于连续上涨/下跌天数和大阳线/大阴线的交易信号，并考虑多个参数。
+
+    Args:
+        df (pd.DataFrame): 包含 'close' 列的 DataFrame。
+
+    Returns:
+        pd.DataFrame: 添加了信号列的 DataFrame。
+    """
+    df = df.copy()
+
+    # 连续上涨/下跌天数
+    n_values = [3, 5, 10]
+    df['Price_Change'] = df['close'].diff()
+    for n in n_values:
+        df[f'Consecutive_Up_{n}'] = (df['Price_Change'] > 0).rolling(window=n).sum() == n
+        df[f'Consecutive_Down_{n}'] = (df['Price_Change'] < 0).rolling(window=n).sum() == n
+        df[f'Consecutive_Up_{n}_Buy'] = np.where(df[f'Consecutive_Up_{n}'], 1, 0)
+        df[f'Consecutive_Down_{n}_Sell'] = np.where(df[f'Consecutive_Down_{n}'], 1, 0)
+
+    # 大阳线/大阴线
+    percentage_thresholds = [0.01, 0.02, 0.04]  # 1%, 2%, 4%
+    df['Pct_Change'] = df['close'].pct_change()
+    for threshold in percentage_thresholds:
+        df[f'Big_Up_{int(threshold*100)}_Buy'] = np.where(df['Pct_Change'] > threshold, 1, 0)
+        df[f'Big_Down_{int(threshold*100)}_Sell'] = np.where(df['Pct_Change'] < -threshold, 1, 0)
+
+    # 删除中间计算列，保持输出的整洁
+    df = df.drop(columns=['Price_Change', 'Pct_Change'], errors='ignore')
+
+    return df
+
+def generate_price_extremes_reverse_signals(df):
+    """
+    生成价格极值反转信号：
+    如果上一个时间点创造了最高或最低价，并且当前价格反转，则生成信号。
+
+    Args:
+        df (pd.DataFrame): 包含 'close' 列的 DataFrame。
+
+    Returns:
+        pd.DataFrame: 添加了价格极值信号列的 DataFrame。
+    """
+    periods = [10, 20, 40, 80, 100, 160, 200, 260,300,360]  # 可以根据需要调整周期
+    signals = {}
+    for period in periods:
+        # 计算指定周期内的最高价和最低价
+        highest_close = df['close'].rolling(window=period).max()
+        lowest_close = df['close'].rolling(window=period).min()
+
+        # 卖出信号：上一时间点创造了最高价，且当前价格下跌
+        signals[f'Highest_{period}_reverse_Sell'] = np.where(
+            (df['close'].shift(1) == highest_close.shift(1)) & (df['close'] < df['close'].shift(1)),
+            1,
+            0
+        )
+
+        # 买入信号：上一时间点创造了最低价，且当前价格上涨
+        signals[f'Lowest_{period}_reverse_Buy'] = np.where(
+            (df['close'].shift(1) == lowest_close.shift(1)) & (df['close'] > df['close'].shift(1)),
+            1,
+            0
+        )
+
+    # 将信号列添加到原始 DataFrame 中
+    df = df.assign(**signals)
+    return df
+
+def generate_price_extremes_signals(df):
+    """
+    根据指定周期内的最高价和最低价生成买入和卖出信号。
+
+    Args:
+        df (pd.DataFrame): 包含 'close' 列的 DataFrame。
+
+    Returns:
+        pd.DataFrame: 添加了价格极值信号列的 DataFrame。
+    """
+    periods = [160, 200, 260,300,360]  # 可以根据需要调整周期
+    signals = {}
+    for period in periods:
+        # 检查是否为指定周期内的最高价
+        highest_close = df['close'].rolling(window=period).max()
+        signals[f'Highest_{period}_Sell'] = np.where(df['close'] == highest_close, 1, 0)
+
+        # 检查是否为指定周期内的最低价
+        lowest_close = df['close'].rolling(window=period).min()
+        signals[f'Lowest_{period}_Buy'] = np.where(df['close'] == lowest_close, 1, 0)
+
+    df = df.assign(**signals)
+    return df
+
+def generate_cci_signals(df, cci_periods=[20], buy_threshold=-100, sell_threshold=100):
+    """
+    生成 CCI 买卖信号。
+
+    Args:
+        df: 包含 'high', 'low', 'close' 列的 Pandas DataFrame。
+        cci_periods: CCI 周期列表, 默认为 [20]。
+        buy_threshold: 买入阈值，默认为 -100。
+        sell_threshold: 卖出阈值，默认为 100。
+
+    Returns:
+        包含 CCI 买卖信号的 Pandas DataFrame。
+    """
+    df_copy = df.copy()  # 创建 df 的副本以避免修改原始数据
+
+    for cci_period in cci_periods:
+        tp = (df_copy['high'] + df_copy['low'] + df_copy['close']) / 3
+        ma_tp = tp.rolling(window=cci_period, min_periods=1).mean()
+        mad = tp.rolling(window=cci_period, min_periods=1).apply(
+            lambda x: np.mean(np.abs(x - x.mean())), raw=True)
+        cci = (tp - ma_tp) / (0.015 * mad)
+
+        # CCI 买卖信号
+        df_copy = df_copy.assign(
+            **{
+                f'CCI_{cci_period}_Buy': np.where((cci > buy_threshold) & (cci.shift(1) <= buy_threshold), 1, 0),
+                f'CCI_{cci_period}_Sell': np.where((cci < sell_threshold) & (cci.shift(1) >= sell_threshold), 1, 0)
+            }
+        )
+
+    return df_copy
+
+
+def generate_adx_signals(df):
+    """
+    生成 ADX 相关的买卖信号。
+
+    Args:
+        df: 包含 'high', 'low', 'close' 列的 Pandas DataFrame。
+
+    Returns:
+        Pandas DataFrame，包含原始数据和生成的信号列。
+    """
+    adx_period = 14
+
+    # 计算 +DM, -DM 和 TR
+    up_move = df['high'] - df['high'].shift(1)
+    down_move = df['low'].shift(1) - df['low']
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    tr1 = df['high'] - df['low']
+    tr2 = abs(df['high'] - df['close'].shift(1))
+    tr3 = abs(df['low'] - df['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    # 平滑 +DM, -DM 和 TR
+    plus_dm_smooth = pd.Series(plus_dm, index=df.index).rolling(window=adx_period, min_periods=1).sum()
+    minus_dm_smooth = pd.Series(minus_dm, index=df.index).rolling(window=adx_period, min_periods=1).sum()
+    tr_smooth = tr.rolling(window=adx_period, min_periods=1).sum()
+
+    # 计算 +DI, -DI
+    plus_di = 100 * (plus_dm_smooth / tr_smooth)
+    minus_di = 100 * (minus_dm_smooth / tr_smooth)
+
+    # 计算 DX 和 ADX
+    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di))
+    adx = dx.rolling(window=adx_period, min_periods=1).mean()
+
+    # 添加 ADX, +DI, -DI 到 DataFrame (便于后续分析，不用于生成信号可以注释掉)
+    # df['ADX'] = adx
+    # df['Plus_DI'] = plus_di
+    # df['Minus_DI'] = minus_di
+
+    # --- 生成信号 ---
+    # 1. 基于 +DI 和 -DI 交叉的信号
+    df['ADX_Cross_Buy'] = np.where((plus_di > minus_di) & (plus_di.shift(1) <= minus_di.shift(1)), 1, 0)
+    df['ADX_Cross_Sell'] = np.where((plus_di < minus_di) & (plus_di.shift(1) >= minus_di.shift(1)), 1, 0)
+
+    # 2. 基于 ADX 趋势的信号 (ADX > 25 表示趋势存在)
+    df['ADX_Trend_Buy'] = np.where((adx > 25) & (plus_di > minus_di), 1, 0)
+    df['ADX_Trend_Sell'] = np.where((adx > 25) & (plus_di < minus_di), 1, 0)
+
+    # 3. 结合 ADX 趋势和 +DI, -DI 交叉的信号
+    df['ADX_Combined_Buy'] = np.where((adx > 25) & (plus_di > minus_di) & (plus_di.shift(1) <= minus_di.shift(1)), 1, 0)
+    df['ADX_Combined_Sell'] = np.where((adx > 25) & (plus_di < minus_di) & (plus_di.shift(1) >= minus_di.shift(1)), 1,
+                                       0)
+
+    # 4. 基于ADX本身趋势的信号
+    df['ADX_Itself_Buy'] = np.where((adx > adx.shift(1)) & (adx.shift(1) < adx.shift(2)) & (plus_di > minus_di), 1, 0)
+    df['ADX_Itself_Sell'] = np.where((adx < adx.shift(1)) & (adx.shift(1) > adx.shift(2)) & (plus_di < minus_di), 1, 0)
+
+    return df
+
+
+def generate_obv_signals(df):
+    """
+    生成多种基于OBV的交易信号，并删除过程中生成的临时字段。
+
+    Args:
+        df: 包含'close'和'volume'列的DataFrame。
+
+    Returns:
+        添加了信号列的DataFrame。
+    """
+
+    # 计算OBV
+    obv = (np.sign(df['close'].diff()) * df['volume']).fillna(0).cumsum()
+    df['obv'] = obv  # 将OBV添加到DataFrame，方便后续计算，最后会删除
+
+    # 1. OBV 简单移动平均 (SMA) 信号
+    obv_sma_short = obv.rolling(window=5).mean()
+    obv_sma_long = obv.rolling(window=20).mean()
+    df['OBV_SMA_Buy'] = np.where((obv_sma_short > obv_sma_long) & (obv_sma_short.shift(1) <= obv_sma_long.shift(1)), 1, 0)
+    df['OBV_SMA_Sell'] = np.where((obv_sma_short < obv_sma_long) & (obv_sma_short.shift(1) >= obv_sma_long.shift(1)), 1, 0)
+
+    # 2. OBV 指数移动平均 (EMA) 信号 (原代码中的信号)
+    obv_ema = obv.ewm(span=20, adjust=False).mean()
+    df['OBV_EMA_Buy'] = np.where((obv > obv_ema) & (obv.shift(1) <= obv_ema.shift(1)), 1, 0)
+    df['OBV_EMA_Sell'] = np.where((obv < obv_ema) & (obv.shift(1) >= obv_ema.shift(1)), 1, 0)
+
+    # 3. OBV 斜率信号
+    obv_slope = obv.diff(5)  # 计算5周期OBV差值，可以调整周期
+    df['OBV_Slope_Buy'] = np.where((obv_slope > 0) & (obv_slope.shift(1) <= 0), 1, 0)
+    df['OBV_Slope_Sell'] = np.where((obv_slope < 0) & (obv_slope.shift(1) >= 0), 1, 0)
+
+    # 4. OBV 与价格背离信号
+    price_sma = df['close'].rolling(window=20).mean()
+    df['OBV_Divergence_Buy'] = np.where((df['close'] < price_sma) & (obv > obv_ema), 1, 0) # 价格下跌，OBV上升
+    df['OBV_Divergence_Sell'] = np.where((df['close'] > price_sma) & (obv < obv_ema), 1, 0) # 价格上涨，OBV下跌
+
+    # 删除临时字段
+    df.drop(columns=['obv'], inplace=True)
+
+    return df
+
+
+
+def generate_williams_r_signals(df, wr_period=14, overbought_threshold=-20, oversold_threshold=-80,
+                                generate_continuous_signal=False, generate_multi_level_signal=False,
+                                use_trend_filter=False, trend_ma_period=50):
+    """
+    生成基于威廉指标 (Williams %R) 的交易信号。
+
+    参数:
+        df: 包含 'high', 'low', 'close' 列的 DataFrame。
+        wr_period: 威廉指标的计算周期。
+        overbought_threshold: 超买阈值。
+        oversold_threshold: 超卖阈值。
+        generate_continuous_signal: 是否生成连续信号 (Williams R 值)。
+        generate_multi_level_signal: 是否生成多级信号。
+        use_trend_filter: 是否使用趋势过滤。
+        trend_ma_period: 用于趋势过滤的移动平均线周期。
+
+    返回:
+        包含原始数据和信号列的 DataFrame。
+    """
+
+    # 计算威廉指标
+    highest_high = df['high'].rolling(window=wr_period, min_periods=1).max()
+    lowest_low = df['low'].rolling(window=wr_period, min_periods=1).min()
+    williams_r = (highest_high - df['close']) / (highest_high - lowest_low) * -100
+
+    # 趋势过滤 (可选)
+    if use_trend_filter:
+        trend_ma = df['close'].rolling(window=trend_ma_period, min_periods=1).mean()
+        uptrend = df['close'] > trend_ma
+        downtrend = df['close'] < trend_ma
+    else:
+        uptrend = downtrend = pd.Series([True]*len(df), index=df.index)
+
+    # 初始化信号字典
+    signals = {}
+
+    # 原始买卖信号
+    buy_signal = (williams_r > oversold_threshold) & (williams_r.shift(1) <= oversold_threshold) & uptrend
+    sell_signal = (williams_r < overbought_threshold) & (williams_r.shift(1) >= overbought_threshold) & downtrend
+    signals['WilliamsR_Buy'] = np.where(buy_signal, 1, 0)
+    signals['WilliamsR_Sell'] = np.where(sell_signal, 1, 0)
+
+    # 多级信号 (可选)
+    if generate_multi_level_signal:
+        signals['WilliamsR_MultiLevel_Buy'] = np.where(williams_r < oversold_threshold, 1,
+                                                       np.where(williams_r < oversold_threshold + 10, 0.5, 0))
+        signals['WilliamsR_MultiLevel_Sell'] = np.where(williams_r > overbought_threshold, 1,
+                                                        np.where(williams_r > overbought_threshold - 10, 0.5, 0))
+
+    # 如果需要生成连续的威廉指标信号
+    if generate_continuous_signal:
+        signals['WilliamsR_Value'] = williams_r
+
+    # 将信号添加到 DataFrame
+    df = df.assign(**signals)
+
+    return df
+
+
+def generate_cmf_signals(df, cmf_periods=[20, 40], cmf_thresholds=[0, 0.1, -0.1]):
+    """
+    生成蔡金钱流量指标 (Chaikin Money Flow, CMF) 信号，并添加到 DataFrame 中。
+
+    参数:
+        df: 包含 'high', 'low', 'close', 'volume' 列的 DataFrame。
+        cmf_periods: CMF 计算周期的列表，例如 [20, 40]。
+        cmf_thresholds: CMF 阈值的列表，用于生成买卖信号，例如 [0, 0.05, -0.05]。
+
+    返回:
+        包含 CMF 信号的 DataFrame。
+    """
+
+    df = df.copy()  # Create a copy to avoid modifying the original DataFrame
+
+    for cmf_period in cmf_periods:
+        # 1. 计算 CMF
+        hl_diff = df['high'] - df['low']
+        hl_diff = hl_diff.replace(0, np.nan)  # 避免除以零错误
+        mfm = ((df['close'] - df['low']) - (df['high'] - df['close'])) / hl_diff
+        mfm = mfm.fillna(0)  # 填充 NaN 值为 0
+        mfv = mfm * df['volume']
+        cmf = mfv.rolling(window=cmf_period, min_periods=1).sum() / df['volume'].rolling(window=cmf_period,
+                                                                                         min_periods=1).sum()
+
+        # 2. 生成信号
+        for threshold in cmf_thresholds:
+            # 2.1 CMF 上穿阈值买入信号
+            df[f'CMF_{cmf_period}_Above_{threshold}_Buy'] = np.where(
+                (cmf > threshold) & (cmf.shift(1) <= threshold), 1, 0
+            )
+            # 2.2 CMF 下穿阈值卖出信号
+            df[f'CMF_{cmf_period}_Below_{threshold}_Sell'] = np.where(
+                (cmf < threshold) & (cmf.shift(1) >= threshold), 1, 0
+            )
+
+        # 2.3 CMF 持续在零线上方的买入信号
+        df[f'CMF_{cmf_period}_Above_Zero_Buy'] = np.where(cmf > 0, 1, 0)
+        # 2.4 CMF 持续在零线下方的卖出信号
+        df[f'CMF_{cmf_period}_Below_Zero_Sell'] = np.where(cmf < 0, 1, 0)
+
+        # 3. 删除中间计算字段，只在最后一次循环删除
+        if cmf_period == cmf_periods[-1]:
+            df.drop(columns=['hl_diff', 'mfm', 'mfv'], errors='ignore', inplace=True)
+
+    return df
+
+def generate_mfi_signals(df):
+    # 14. 资金流量指标 (MFI) 信号
+    signals = {}
+    mfi_period = 14
+    typical_price = (df['high'] + df['low'] + df['close']) / 3
+    raw_money_flow = typical_price * df['volume']
+    positive_money_flow = np.where(typical_price > typical_price.shift(1),
+                                   raw_money_flow, 0)
+    negative_money_flow = np.where(typical_price < typical_price.shift(1),
+                                   raw_money_flow, 0)
+
+    positive_mf_sum = pd.Series(positive_money_flow).rolling(window=mfi_period, min_periods=1).sum()
+    negative_mf_sum = pd.Series(negative_money_flow).rolling(window=mfi_period, min_periods=1).sum()
+
+    mfr = positive_mf_sum / negative_mf_sum
+    mfi = 100 - (100 / (1 + mfr))
+
+    # 原始 MFI 买卖信号
+    signals['MFI_Buy'] = np.where((mfi < 20) & (mfi.shift(1) >= 20), 1, 0)
+    signals['MFI_Sell'] = np.where((mfi > 80) & (mfi.shift(1) <= 80), 1, 0)
+
+    # 基于不同阈值的 MFI 买卖信号
+    signals['MFI_Buy_30'] = np.where((mfi < 30) & (mfi.shift(1) >= 30), 1, 0)
+    signals['MFI_Sell_70'] = np.where((mfi > 70) & (mfi.shift(1) <= 70), 1, 0)
+
+    # MFI 突破水平信号
+    signals['MFI_Cross_Above_20_Buy'] = np.where(mfi >= 20, 1, 0)
+    signals['MFI_Cross_Below_80_Sell'] = np.where(mfi <= 80, 1, 0)
+
+    #  MFI 持续在超卖/超买区间的信号
+    signals['MFI_Below_20_Buy'] = np.where(mfi < 20, 1, 0)
+    signals['MFI_Above_80_Sell'] = np.where(mfi > 80, 1, 0)
+
+    df = df.assign(**signals)
+
+    # 删除过程生成的字段 (这里实际上没有生成额外的中间字段)
+    # 如果有中间计算字段，可以使用类似下面的代码删除
+    # columns_to_drop = ['typical_price', 'raw_money_flow', ...]
+    # df = df.drop(columns=columns_to_drop, errors='ignore') # errors='ignore' 防止列不存在时报错
+
+    return df
+def generate_roc_signals(df):
+    # 15. 变动速率 (ROC) 信号
+    signals = {}
+    roc_periods = [5, 12, 20]  # 尝试不同的 ROC 周期
+
+    for period in roc_periods:
+        roc = ((df['close'] - df['close'].shift(period)) / df['close'].shift(period)) * 100
+        roc_name = f'ROC_{period}'
+
+        # 基本的 ROC 零轴交叉信号
+        signals[f'{roc_name}_Buy'] = np.where((roc > 0) & (roc.shift(1) <= 0), 1, 0)
+        signals[f'{roc_name}_Sell'] = np.where((roc < 0) & (roc.shift(1) >= 0), 1, 0)
+
+        # 基于 ROC 数值的信号 (例如，高于/低于特定阈值)
+        signals[f'{roc_name}_Above_10_Buy'] = np.where(roc > 10, 1, 0)
+        signals[f'{roc_name}_Below_minus_10_Sell'] = np.where(roc < -10, 1, 0)
+
+        # 基于 ROC 变化的信号 (例如，ROC 加速上涨/下跌)
+        signals[f'{roc_name}_Accelerate_Buy'] = np.where((roc > 0) & (roc > roc.shift(1)), 1, 0)
+        signals[f'{roc_name}_Accelerate_Sell'] = np.where((roc < 0) & (roc < roc.shift(1)), 1, 0)
+
+    df = df.assign(**signals)
+
+    # 删除过程中生成的字段 (例如，单独的 ROC 列，如果存在的话)
+    # 这里我们直接生成信号，没有单独的 ROC 列，所以不需要删除
+
+    return df
+
+def generate_donchian_channel_signals(df):
+    # 16. 唐奇安通道 (Donchian Channels) 信号
+    signals = {}
+
+    # 定义不同的唐奇安通道周期
+    donchian_periods = [10, 20, 30]
+
+    for period in donchian_periods:
+        donchian_high = df['high'].rolling(window=period, min_periods=1).max()
+        donchian_low = df['low'].rolling(window=period, min_periods=1).min()
+
+        # 唐奇安通道突破信号 (不同周期)
+        signals[f'Donchian_{period}_Breakout_Buy'] = np.where(df['close'] > donchian_high.shift(1), 1, 0)
+        signals[f'Donchian_{period}_Breakout_Sell'] = np.where(df['close'] < donchian_low.shift(1), 1, 0)
+
+        # 结合唐奇安通道的信号 (例如，价格接近通道边界)
+        close_to_high = donchian_high.shift(1) - df['close']
+        close_to_low = df['close'] - donchian_low.shift(1)
+
+        signals[f'Donchian_{period}_NearHigh_Buy'] = np.where((df['close'] < donchian_high.shift(1)) & (close_to_high < df['close'] * 0.01), 1, 0) # 接近上限一定比例时
+        signals[f'Donchian_{period}_NearLow_Sell'] = np.where((df['close'] > donchian_low.shift(1)) & (close_to_low < df['close'] * 0.01), 1, 0)  # 接近下限一定比例时
+
+    df = df.assign(**signals)
+
+    # 清理过程生成的字段 (这里不需要额外清理，因为我们直接将信号添加到 signals 字典)
+
+    return df
+
+def generate_keltner_channel_signals(df):
+    # 17. 肯特纳通道 (Keltner Channels) 信号
+    signals = {}
+    kc_ema_period = 20
+    kc_multiplier = 2
+    kc_atr_period = 10
+
+    keltner_ema = df['close'].ewm(span=kc_ema_period, adjust=False).mean()
+
+    # 计算真实波幅 (TR)
+    tr_kc = pd.DataFrame({
+        'high_low': df['high'] - df['low'],
+        'high_close': abs(df['high'] - df['close'].shift(1)),
+        'low_close': abs(df['low'] - df['close'].shift(1))
+    }).max(axis=1)
+
+    # 计算平均真实波幅 (ATR)
+    atr_kc = tr_kc.rolling(window=kc_atr_period, min_periods=1).mean()
+
+    keltner_upper = keltner_ema + kc_multiplier * atr_kc
+    keltner_lower = keltner_ema - kc_multiplier * atr_kc
+
+    # 肯特纳通道买卖信号
+    signals['Keltner_Breakout_Buy'] = np.where(df['close'] > keltner_upper, 1, 0)
+    signals['Keltner_Breakout_Sell'] = np.where(df['close'] < keltner_lower, 1, 0)
+
+    # 新增信号：价格触及上轨后回落卖出
+    signals['Keltner_TouchUpper_Sell'] = np.where((df['close'].shift(1) > keltner_upper.shift(1)) & (df['close'] <= keltner_upper), 1, 0)
+
+    # 新增信号：价格触及下轨后反弹买入
+    signals['Keltner_TouchLower_Buy'] = np.where((df['close'].shift(1) < keltner_lower.shift(1)) & (df['close'] >= keltner_lower), 1, 0)
+
+    # 新增信号：价格从上轨内跌破中轨卖出
+    signals['Keltner_BreakMidFromUpper_Sell'] = np.where((df['close'].shift(1) > keltner_ema.shift(1)) & (df['close'] <= keltner_ema) & (df['close'].shift(1) >= keltner_upper.shift(1)), 1, 0)
+
+    # 新增信号：价格从下轨内突破中轨买入
+    signals['Keltner_BreakMidFromLower_Buy'] = np.where((df['close'].shift(1) < keltner_ema.shift(1)) & (df['close'] >= keltner_ema) & (df['close'].shift(1) <= keltner_lower.shift(1)), 1, 0)
+
+    df = df.assign(**signals)
+    return df
+
+# 回测策略
+def backtest_strategy(signal_data_df):
+    """
+    回测策略，生成适合保存为 CSV 的扁平化结果数据。
+
+    Args:
+        signal_data_df (pd.DataFrame): 包含信号列和目标列的 DataFrame。
+                                        需要包含 '_Buy' 或 '_Sell' 结尾的列作为买入/卖出信号，
+                                        以及包含 'max' 的列作为目标列（未来涨跌幅）。
+
+    Returns:
+        list of dict: 包含扁平化回测结果的字典列表。
+    """
+
+    buy_signals = [col for col in signal_data_df.columns if col.endswith('_Buy')]
+    sell_signals = [col for col in signal_data_df.columns if col.endswith('_Sell')]
+    target_cols = [col for col in signal_data_df.columns if 'max' in col]
+    signals = buy_signals + sell_signals
+
+    if not target_cols:
+        print("警告：未找到包含 'max' 的目标列。")
+        return []
+
+    results = []
+    thresholds = [0.1, 0.2, 0.3]
+    total_samples = len(signal_data_df)
+
+    # 处理 Baseline
+    for target_col in target_cols:
+        key_target_col = target_col.replace('close_max_', '')
+        for threshold in thresholds:
+            count = signal_data_df[signal_data_df[target_col] > threshold].shape[0]
+            baseline_performance = round(count / total_samples, 4)
+            results.append({
+                "signal": "Baseline",
+                "target": key_target_col,
+                "threshold": threshold,
+                "signal_performance": baseline_performance,
+                "diff_vs_baseline": 0.0,
+                "count": total_samples,
+                "ratio": 1.0
+            })
+
+    # 处理买入/卖出信号
+    for signal in signals:
+        signal_data = signal_data_df[signal_data_df[signal] == 1]
+        signal_count = len(signal_data)
+        signal_ratio = round(signal_count / total_samples, 4) if total_samples > 0 else 0
+
+        for target_col in target_cols:
+            key_target_col = target_col.replace('close_max_', '')
+            for threshold in thresholds:
+                baseline_count = signal_data_df[signal_data_df[target_col] > threshold].shape[0]
+                baseline_performance = round(baseline_count / total_samples, 4)
+
+                if signal_count > 0:
+                    above_threshold_count = signal_data[signal_data[target_col] > threshold].shape[0]
+                    current_performance = round(above_threshold_count / signal_count, 4)
+                    diff_vs_baseline = round(current_performance - baseline_performance, 4)
+                else:
+                    current_performance = 0.0
+                    diff_vs_baseline = round(current_performance - baseline_performance, 4)
+
+                results.append({
+                    "signal": signal,
+                    "target": key_target_col,
+                    "threshold": threshold,
+                    "signal_performance": current_performance,
+                    "diff_vs_baseline": diff_vs_baseline,
+                    "count": signal_count,
+                    "ratio": signal_ratio
+                })
+    # 将results转化为dataframe格式
+    results_df = pd.DataFrame(results)
+    return results_df
+
+
+def analyze_backtest_results():
+    """
+     分析回测结果，生成信号与目标列表的映射字典，其中每个信号对应一个目标列表。
+     并将映射字典保存到 best_signal_list.json 文件中。
+     """
+    head_count = 15
+    backtest_path = 'backtest_result'
+    if not os.path.exists(backtest_path):
+        os.makedirs(backtest_path)
+    data_list = []
+    signal_to_target_map = {}  # 初始化信号到目标列表的映射字典
+
+    # 加载 backtest_path 下面所有的 statistic_*.csv 文件
+    files = os.listdir(backtest_path)
+    files = [file for file in files if file.startswith('statistic_')]
+    if len(files) > 0:
+        print('已经存在该文件，直接读取')
+
+    for file in files:
+        if '1s' in file and '100000' in file:
+            data = pd.read_csv(f'{backtest_path}/{file}')
+            data[file] = file
+            data_list.append(data)
+            data['score'] = 1 / (1 - data['signal_performance']) / (1 - data['signal_performance']) * data['ratio']
+            # 将 data 按照 signal_performance 降序排序
+            data = data.sort_values(by='diff_vs_baseline', ascending=False)
+
+            # # 获取 signal_performance 大于 0.8 且 diff_vs_baseline 大于 0.0 的数据
+            # signal_list = data[(data['signal_performance'] > 0.73) & (data['diff_vs_baseline'] > -0.03)]
+            # 分别获取target包含up和down的前10个
+            up_signal_list = data[(data['target'].str.contains('up'))].head(head_count)
+            down_signal_list = data[(data['target'].str.contains('down'))].head(head_count)
+            signal_list = pd.concat([up_signal_list, down_signal_list])
+
+            # 遍历 signal_list，构建 signal_to_target_map
+            for index, row in signal_list.iterrows():
+                signal = row['signal']
+                target = row['target']
+                if signal not in signal_to_target_map:
+                    signal_to_target_map[signal] = []
+                if target not in signal_to_target_map[signal]:  # 避免重复添加 target
+                    signal_to_target_map[signal].append(target)
+
+    # 对每个 signal 的 target 列表进行排序
+    for signal in signal_to_target_map:
+        signal_to_target_map[signal].sort()
+
+    # 保存 signal_to_target_map 到 best_signal_list.json 文件
+    best_signal_list_path = os.path.join(backtest_path, 'best_signal_list.json')
+    with open(best_signal_list_path, 'w') as f:
+        json.dump(signal_to_target_map, f, indent=4)  # 使用 indent=4 进行美化输出
+
+    return signal_to_target_map
+
+def run():
+    """
+      正式运行，得到买入或者卖出信号
+      :return:
+      """
+    bar = '1m'
+    max_candles = 1000
+    backtest_path = 'backtest_result'
+    best_signal_list_path = os.path.join(backtest_path, 'best_signal_list.json')
+
+    # 加载 signal_to_target_map
+    if os.path.exists(best_signal_list_path):
+        with open(best_signal_list_path, 'r') as f:
+            signal_to_target_map = json.load(f)
+    else:
+        signal_to_target_map = analyze_backtest_results()  # 如果不存在则运行
+
+    best_signal_list = list(signal_to_target_map.keys())
+
+    # 获取最新数据
+    data = get_train_data(max_candles=max_candles, bar=bar)
+    signal_data = generate_signals(data)
+    # 只保留signal_data最后的60行
+    signal_data = signal_data[-200:]
+
+
+
+    # 获取每一行中值为1的列名
+    active_signals = []
+    for index, row in signal_data.iterrows():
+        active_signals_row = [col for col in best_signal_list if col in row and row[col] == 1]
+        active_signals.append(active_signals_row)
+
+    # 将active_signals添加到signal_data中
+    signal_data['active_signals'] = active_signals
+
+    # 根据active_signals找到对应的target
+    corresponding_targets = []
+    for signals in signal_data['active_signals']:
+
+        if signals == ['Donchian_30_Breakout_Sell', 'Bollinger_Breakout_Sell', 'BB_Lower_Band_Touch_Buy', 'Donchian_20_Breakout_Sell', 'Keltner_Breakout_Sell', 'Donchian_10_Breakout_Sell', 'Stochastic_Buy', 'Price_Breakout_Sell', 'Volume_Sell']:
+            print('yes')
+        targets = []
+        targets_map = {}
+        # 将signals进行排序
+        signals = sorted(signals)
+        for signal in signals:
+            signal_key = signal.split('_')[0]
+            if signal_key not in targets_map.keys():
+                targets_map[signal_key] = []
+            if signal in signal_to_target_map:
+                targets_map[signal_key].extend(signal_to_target_map[signal])
+        for key in targets_map:
+            targets.extend(list(set(targets_map[key])))
+        corresponding_targets.append(targets)  # 将集合转换为列表
+
+    signal_data['corresponding_targets'] = corresponding_targets
+
+
+    # 统计 Buy 和 Sell 信号的数量
+    signal_data['buy_count'] = signal_data['corresponding_targets'].apply(lambda x: sum('up' in s for s in x))
+    signal_data['sell_count'] = signal_data['corresponding_targets'].apply(lambda x: sum('down' in s for s in x))
+    # 计算差值
+    signal_data['diff'] = signal_data['buy_count'] - signal_data['sell_count']
+    # 计算和
+    signal_data['sum'] = signal_data['buy_count'] + signal_data['sell_count']
+    # 调整列的顺序
+    cols = signal_data.columns.tolist()
+    cols = ['active_signals','corresponding_targets', 'buy_count', 'sell_count', 'diff', 'sum', 'close_max_up_t30', 'close_max_down_t30'] + [col for col in cols if col not in ['active_signals', 'corresponding_targets','buy_count', 'sell_count', 'diff', 'sum', 'close_max_down_t30', 'close_max_up_t30']]
+    signal_data = signal_data[cols]
+
+    # 在这里可以根据active_signals, buy_count, sell_count进一步处理，例如生成买入卖出信号
+
+    print(signal_data)
+    return signal_data
+
+
+def download_data():
+    backtest_path = 'kline_data'
+    base_file_path = 'origin_data.csv'
+    is_reload = False
+    if not os.path.exists(backtest_path):
+        os.makedirs(backtest_path)
+    bar_list = ['1s', '1m', '5m', '15m', '30m', '1h', '4h']
+    max_candles_list = [1000000]
+    for max_candles in max_candles_list:
+        for bar in bar_list:
+            final_file_path = f'{backtest_path}/{base_file_path[:-4]}_{bar}_{max_candles}.csv'
+            if os.path.exists(final_file_path) and not is_reload:
+                data = pd.read_csv(final_file_path)
+                print(f'已经存在该文件，直接读取 {final_file_path}')
+            else:
+                print('不存在该文件，开始获取')
+                data = get_train_data(max_candles=max_candles, bar=bar)
+                data.to_csv(final_file_path, index=False)
+
+def example():
+    # download_data()
+    # run_backtest()
+    # analyze_backtest_results()
+    run()
+
+
+
+
+def run_backtest():
+    backtest_path = 'kline_data'
+    if not os.path.exists(backtest_path):
+        os.makedirs(backtest_path)
+    base_file_path = 'origin_data.csv'
+    bar_list = ['1m', '1m', '5m', '15m', '30m', '1h', '4h']
+    max_candles_list = [1000000, 1000000]
+    for bar in bar_list:
+        full_final_file_path = f'{backtest_path}/{base_file_path[:-4]}_{bar}_{max_candles_list[-1]}.csv'
+        full_data = pd.read_csv(full_final_file_path)
+        for max_candles in max_candles_list:
+            try:
+                data = full_data[-max_candles:]
+                final_output_file_path = f'{backtest_path}/statistic_{base_file_path[:-4]}_{bar}_{max_candles}.csv'
+                # 去除后60行
+                data = data[:-60]
+                signal_data = generate_signals(data)
+                backtest_df = backtest_strategy(signal_data)
+                backtest_df.to_csv(final_output_file_path, index=False)
+                print(f'已经保存至{final_output_file_path}')
+            except Exception as e:
+                print(e)
+                continue
+
+
 if __name__ == '__main__':
-    file_name = 'BTC-USDT-SWAP_1m_20230124_20241218.csv'
-    long_df = get_dist(file_name)
-    # short_df = get_dist('BTC-USDT-SWAP_1m_20240627_20241212.csv')
-    # pass
-    # gen_feature('BTC-USDT-SWAP_1m_20241219_20241220.csv')
-    get_latest_data()
+    example()
+    # file_name = 'BTC-USDT-SWAP_1m_20230124_20241218.csv'
+    # long_df = get_dist(file_name)
+    # # short_df = get_dist('BTC-USDT-SWAP_1m_20240627_20241212.csv')
+    # # pass
+    # # gen_feature('BTC-USDT-SWAP_1m_20241219_20241220.csv')
+    # get_latest_data()
