@@ -253,17 +253,17 @@ def get_position_ratio(inst_id, latest_price):
         short_ratio = short_value / total_equity if total_equity > 0 else 0
 
         print(f"多头数量: {long_sz}, 空头数量: {short_sz}, 多头占比: {long_ratio}, 空头占比: {short_ratio} 已有多单止盈数量: {existing_long_tp_qty}, 已有空单止盈数量: {existing_short_tp_qty}")
-
+        diff_long_sz = long_sz - existing_long_tp_qty
         # 为多单设置止盈单
-        if long_position_exists and existing_long_tp_qty == 0 and long_sz > 0:
+        if long_position_exists and diff_long_sz > 0:
             tp_price_long = avg_long_price + total_profit  # 多单止盈价格
-            create_take_profit_order(inst_id, 'long', tp_price_long, long_sz)
+            create_take_profit_order(inst_id, 'long', tp_price_long, diff_long_sz)
             print(f"为多单设置止盈单，止盈价格: {tp_price_long}, 数量: {long_sz}")
-
+        diff_short_size = short_sz - existing_short_tp_qty
         # 为空单设置止盈单
-        if short_position_exists and existing_short_tp_qty == 0 and short_sz > 0:
+        if short_position_exists and diff_short_size > 0:
             tp_price_short = avg_short_price - total_profit  # 空单止盈价格
-            create_take_profit_order(inst_id, 'short', tp_price_short, short_sz)
+            create_take_profit_order(inst_id, 'short', tp_price_short, diff_short_size)
             print(f"为空单设置止盈单，止盈价格: {tp_price_short}, 数量: {short_sz}")
 
         return long_ratio, short_ratio, avg_long_price, avg_short_price
