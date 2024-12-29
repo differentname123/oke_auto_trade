@@ -84,6 +84,84 @@ def get_kline_data(inst_id, bar="1m", limit=100, max_candles=1000):
 
         # 将 UTC 时间转换为北京时间（Asia/Shanghai 时区，UTC+8）
         df["timestamp"] = df["timestamp"].dt.tz_convert('Asia/Shanghai')
+        df["timestamp"] = df["timestamp"].dt.tz_localize(None)
+
+        df[["open", "high", "low", "close", "volume"]] = df[["open", "high", "low", "close", "volume"]].astype(float)
+
+        # 按时间排序
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        return df
+    else:
+        print("未能获取到任何K线数据。")
+        return pd.DataFrame() # 返回一个空的 DataFrame
+
+def get_kline_data_newest(inst_id, bar="1m", limit=100, max_candles=1000):
+    """
+    从OKX获取历史K线数据，并返回DataFrame。
+
+    :param inst_id: 产品ID，例如 "BTC-USDT"
+    :param bar: 时间粒度，例如 "1m", "5m", "1H" 等
+    :param limit: 单次请求的最大数据量，默认100，最大100
+    :param max_candles: 请求的最大K线数量，默认1000
+    :return: pandas.DataFrame，包含K线数据
+    """
+    all_data = []
+    after = ''  # 初始值为None，获取最新数据
+    fetched_candles = 0  # 已获取的K线数量
+    fail_count = 0  # 失败次数
+    max_retries = 3  # 最大重试次数
+
+    while fetched_candles < max_candles:
+        try:
+            # 调用OKX API获取历史K线数据
+            response = marketAPI.get_candlesticks(instId=inst_id, bar=bar, after=after, limit=limit)
+
+            if response.get("code") != "0":
+                print(f"获取K线数据失败，错误代码：{response.get('code')}，错误消息：{response.get('msg')}")
+                time.sleep(1)
+                fail_count += 1
+                if fail_count >= max_retries:
+                    print(f"连续失败 {max_retries} 次，停止获取。")
+                    break
+            else:
+                fail_count = 0
+                # 提取返回数据
+                data = response.get("data", [])
+                if not data:
+                    print("无更多数据，已全部获取。")
+                    break
+
+                # 解析数据并添加到总数据中
+                all_data.extend(data)
+                fetched_candles += len(data)
+
+                # 更新 `after` 参数为当前返回数据的最早时间戳，用于获取更早的数据
+                after = data[-1][0]
+
+                # 如果获取的数据量小于limit，说明数据已获取完毕
+                if len(data) < limit:
+                    break
+
+                # 短暂延迟，避免触发API限频
+                time.sleep(0.2)
+
+        except Exception as e:
+            print(f"获取K线数据时出现异常：{e}")
+            break
+
+    # 将所有数据转换为DataFrame，即使all_data为空也能处理
+    if all_data:
+        df = pd.DataFrame(all_data, columns=["timestamp", "open", "high", "low", "close", "volume", "volCcy", "volCcyQuote",
+                                             "confirm"])
+
+        # 数据类型转换
+        # 将时间戳转换为 datetime 对象，并将其设置为 UTC
+        df["timestamp"] = pd.to_datetime(df["timestamp"].astype(float) / 1000, unit="s", utc=True)
+
+        # 将 UTC 时间转换为北京时间（Asia/Shanghai 时区，UTC+8）
+        df["timestamp"] = df["timestamp"].dt.tz_convert('Asia/Shanghai')
+        df["timestamp"] = df["timestamp"].dt.tz_localize(None)
+
         df[["open", "high", "low", "close", "volume"]] = df[["open", "high", "low", "close", "volume"]].astype(float)
 
         # 按时间排序
@@ -430,14 +508,17 @@ def add_target_variables_op(df, max_decoder_length=30):
 
     return df
 
-def get_train_data(inst_id="BTC-USDT-SWAP", bar="1m", limit=100, max_candles=1000):
+def get_train_data(inst_id="BTC-USDT-SWAP", bar="1m", limit=100, max_candles=1000, is_newest=False):
     # inst_id = "BTC-USDT-SWAP"
     # bar = "1m"
     # limit = 100
     # max_candles = 60 * 24
 
     # 获取数据
-    kline_data = get_kline_data(inst_id=inst_id, bar=bar, limit=limit, max_candles=max_candles)
+    if is_newest:
+        kline_data = get_kline_data_newest(inst_id=inst_id, bar=bar, limit=limit, max_candles=max_candles)
+    else:
+        kline_data = get_kline_data(inst_id=inst_id, bar=bar, limit=limit, max_candles=max_candles)
 
     if not kline_data.empty:
         # print("成功获取K线数据，开始处理...")
@@ -450,17 +531,10 @@ def get_train_data(inst_id="BTC-USDT-SWAP", bar="1m", limit=100, max_candles=100
 
         # 重置索引
         kline_data.reset_index(drop=True, inplace=True)
-
-        # 保存文件
-        start_date = kline_data["timestamp"].iloc[0].strftime("%Y%m%d")
-        end_date = kline_data["timestamp"].iloc[-1].strftime("%Y%m%d")
-        filename = f"{inst_id}_{bar}_{start_date}_{end_date}.csv"
-
-        # kline_data.to_csv(filename, index=False)
-        # print(f"数据已保存至文件：{filename}")
         return kline_data
     else:
         print("未能获取到任何K线数据。")
+        return pd.DataFrame()
 
 def get_latest_data(max_candles=1000):
     origin_data = get_train_data(max_candles=max_candles)
@@ -503,22 +577,30 @@ def generate_body_wick_signals(df):
 
 def generate_volume_spike_signals(df):
     """
-    生成基于多种周期成交量异动的交易信号。
+    优化后的函数，使用向量化操作生成基于多种周期成交量异动的交易信号。
+    通过一次性连接列来避免DataFrame碎片化。
     """
-    df_signals = pd.DataFrame(index=df.index)
-    n_periods_list = [10, 20, 30]
-    volume_multipliers = [1.5, 2, 2.5]
+    start_time = time.time()
+    signal_cols = []  # 用于存储生成的信号列
+
+    n_periods_list = [20, 30, 40, 50, 60, 70, 80, 90, 100, 120, 150, 200, 250, 300, 400, 500, 600, 700, 800, 900, 1000,1100,1200,1300,1400,1500,1600,1700,1800,1900,2000]
+    volume_multipliers = [1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 6, 7, 8, 10]
 
     for n_periods in n_periods_list:
+        average_volume = df['volume'].rolling(window=n_periods).mean().shift(1)
         for multiplier in volume_multipliers:
-            average_volume = df['volume'].rolling(window=n_periods).mean().shift(1)
-
+            # 向量化计算买入和卖出条件
             buy_condition = (df['volume'] > average_volume * multiplier) & (df['close'] > df['open'])
-            df_signals[f'Volume_Spike_Up_{n_periods}_M{int(multiplier*10)}_Buy'] = np.where(buy_condition, 1, 0)
-
             sell_condition = (df['volume'] > average_volume * multiplier) & (df['close'] < df['open'])
-            df_signals[f'Volume_Spike_Down_{n_periods}_M{int(multiplier*10)}_Sell'] = np.where(sell_condition, 1, 0)
 
+            # 使用向量化赋值创建信号列，并添加到列表中
+            signal_cols.append(pd.Series(np.where(buy_condition, 1, 0), index=df.index, name=f'Volume_Spike_Up_{n_periods}_M{int(multiplier*10)}_Buy'))
+            signal_cols.append(pd.Series(np.where(sell_condition, 1, 0), index=df.index, name=f'Volume_Spike_Down_{n_periods}_M{int(multiplier*10)}_Sell'))
+
+    # 一次性连接所有信号列
+    df_signals = pd.concat(signal_cols, axis=1)
+
+    print(f"Volume spike signals generated in {time.time() - start_time:.2f} seconds.")
     return pd.concat([df, df_signals], axis=1)
 
 def generate_signals(df):
@@ -533,29 +615,30 @@ def generate_signals(df):
     """
 
     df = df.copy()  # 避免修改原始 DataFrame
-    df = generate_volume_spike_signals(df)
-    df = generate_body_wick_signals(df)
-    df = generate_consecutive_and_large_candle_signals(df)
-    df = generate_ichimoku_signals(df)
-    df = generate_price_extremes_reverse_signals(df)
+    # df = generate_volume_spike_signals(df)
+    # df = generate_price_extremes_reverse_signals(df)
     df = generate_price_extremes_signals(df)
-    df = generate_volume_signals(df)
-    df = generate_price_signals(df)
-    df = generate_moving_average_signals(df)
-    df = generate_rsi_signals(df)
-    df = generate_macd_signals(df)
-    df = generate_bollinger_band_signals(df)
-    df = generate_ema_cross_signals(df)
-    df = generate_stochastic_signals(df)
-    df = generate_cci_signals(df)
-    df = generate_adx_signals(df)
-    df = generate_obv_signals(df)
-    df = generate_williams_r_signals(df)
-    df = generate_cmf_signals(df)
-    df = generate_mfi_signals(df)
-    df = generate_roc_signals(df)
-    df = generate_donchian_channel_signals(df)
-    df = generate_keltner_channel_signals(df)
+    # df = generate_body_wick_signals(df)
+    # df = generate_consecutive_and_large_candle_signals(df)
+    # df = generate_ichimoku_signals(df)
+
+    # df = generate_volume_signals(df)
+    # df = generate_price_signals(df)
+    # df = generate_moving_average_signals(df)
+    # df = generate_rsi_signals(df)
+    # df = generate_macd_signals(df)
+    # df = generate_bollinger_band_signals(df)
+    # df = generate_ema_cross_signals(df)
+    # df = generate_stochastic_signals(df)
+    # df = generate_cci_signals(df)
+    # df = generate_adx_signals(df)
+    # df = generate_obv_signals(df)
+    # df = generate_williams_r_signals(df)
+    # df = generate_cmf_signals(df)
+    # df = generate_mfi_signals(df)
+    # df = generate_roc_signals(df)
+    # df = generate_donchian_channel_signals(df)
+    # df = generate_keltner_channel_signals(df)
 
     return df
 
@@ -1008,8 +1091,8 @@ def generate_consecutive_and_large_candle_signals(df):
 
 def generate_price_extremes_reverse_signals(df):
     """
-    根据指定周期内的最高价和最低价生成买入和卖出信号。
-    信号改进为只有在价格反转时才产生。
+    生成价格极值反转信号：
+    如果上一个时间点创造了最高或最低价，并且当前价格反转，则生成信号。
 
     Args:
         df (pd.DataFrame): 包含 'close' 列的 DataFrame。
@@ -1017,19 +1100,28 @@ def generate_price_extremes_reverse_signals(df):
     Returns:
         pd.DataFrame: 添加了价格极值信号列的 DataFrame。
     """
-    periods = [10, 20, 40, 80, 160]  # 可以根据需要调整周期
+    periods = [10, 20, 40, 80, 100, 160, 200, 260,300,360]  # 可以根据需要调整周期
     signals = {}
     for period in periods:
         # 计算指定周期内的最高价和最低价
         highest_close = df['close'].rolling(window=period).max()
         lowest_close = df['close'].rolling(window=period).min()
 
-        # 检查是否为指定周期内的最高价并且开始下跌
-        signals[f'Highest_{period}_reverse_Sell'] = np.where((df['close'] == highest_close) & (df['close'].shift(-1) < df['close']), 1, 0)
+        # 卖出信号：上一时间点创造了最高价，且当前价格下跌
+        signals[f'Highest_{period}_reverse_Sell'] = np.where(
+            (df['close'].shift(1) == highest_close.shift(1)) & (df['close'] < df['close'].shift(1)),
+            1,
+            0
+        )
 
-        # 检查是否为指定周期内的最低价并且开始上涨
-        signals[f'Lowest_{period}_reverse_Buy'] = np.where((df['close'] == lowest_close) & (df['close'].shift(-1) > df['close']), 1, 0)
+        # 买入信号：上一时间点创造了最低价，且当前价格上涨
+        signals[f'Lowest_{period}_reverse_Buy'] = np.where(
+            (df['close'].shift(1) == lowest_close.shift(1)) & (df['close'] > df['close'].shift(1)),
+            1,
+            0
+        )
 
+    # 将信号列添加到原始 DataFrame 中
     df = df.assign(**signals)
     return df
 
@@ -1043,7 +1135,7 @@ def generate_price_extremes_signals(df):
     Returns:
         pd.DataFrame: 添加了价格极值信号列的 DataFrame。
     """
-    periods = [10, 20, 40, 80, 160]  # 可以根据需要调整周期
+    periods = [160, 200, 260,300,360]  # 可以根据需要调整周期
     signals = {}
     for period in periods:
         # 检查是否为指定周期内的最高价
@@ -1449,9 +1541,11 @@ def backtest_strategy(signal_data_df):
                                         以及包含 'max' 的列作为目标列（未来涨跌幅）。
 
     Returns:
-        list of dict: 包含扁平化回测结果的字典列表。
+        pd.DataFrame: 包含扁平化回测结果的 DataFrame。
     """
+    start_time = time.time()
 
+    # 提取买入和卖出信号列，以及目标列
     buy_signals = [col for col in signal_data_df.columns if col.endswith('_Buy')]
     sell_signals = [col for col in signal_data_df.columns if col.endswith('_Sell')]
     target_cols = [col for col in signal_data_df.columns if 'max' in col]
@@ -1459,18 +1553,31 @@ def backtest_strategy(signal_data_df):
 
     if not target_cols:
         print("警告：未找到包含 'max' 的目标列。")
-        return []
+        return pd.DataFrame()
 
     results = []
-    thresholds = [0.1, 0.2, 0.3]
+    thresholds = [0.1, 0.15, 0.2]
     total_samples = len(signal_data_df)
 
-    # 处理 Baseline
+    # -----------------------------
+    # 优化点 1：预先计算并缓存 baseline_performance
+    # -----------------------------
+    # 用于存储 baseline_performance，减少重复计算
+    baseline_performances = {}
+
     for target_col in target_cols:
         key_target_col = target_col.replace('close_max_', '')
+
+        # 对于每个目标列，预先计算并缓存不同阈值下的性能指标
         for threshold in thresholds:
-            count = signal_data_df[signal_data_df[target_col] > threshold].shape[0]
+            # 计算满足条件的样本数量
+            count = (signal_data_df[target_col] > threshold).sum()
+            # 基准线性能 = 满足条件的样本数量 / 总样本数量
             baseline_performance = round(count / total_samples, 4)
+            # 缓存结果
+            baseline_performances[(target_col, threshold)] = baseline_performance
+
+            # 将结果添加到 results 列表中
             results.append({
                 "signal": "Baseline",
                 "target": key_target_col,
@@ -1481,26 +1588,59 @@ def backtest_strategy(signal_data_df):
                 "ratio": 1.0
             })
 
-    # 处理买入/卖出信号
+    # -----------------------------
+    # 优化点 2：使用布尔掩码和向量化计算
+    # -----------------------------
+    # 预先计算所有信号的布尔掩码和计数
+    signal_masks = {}
+    signal_counts = {}
+    signal_ratios = {}
+
     for signal in signals:
-        signal_data = signal_data_df[signal_data_df[signal] == 1]
-        signal_count = len(signal_data)
+        # 计算信号掩码
+        signal_mask = (signal_data_df[signal] == 1)
+        signal_masks[signal] = signal_mask
+        # 计算信号对应的样本数量和比例
+        signal_count = signal_mask.sum()
+        signal_counts[signal] = signal_count
         signal_ratio = round(signal_count / total_samples, 4) if total_samples > 0 else 0
+        signal_ratios[signal] = signal_ratio
+
+    # 预先计算目标列和阈值的布尔掩码
+    target_masks = {}
+    for target_col in target_cols:
+        target_masks[target_col] = {}
+        for threshold in thresholds:
+            # 计算目标列在不同阈值下的掩码
+            target_mask = (signal_data_df[target_col] > threshold)
+            target_masks[target_col][threshold] = target_mask
+
+    # -----------------------------
+    # 优化点 3：减少嵌套循环层次
+    # -----------------------------
+    # 遍历所有信号，目标列和阈值，计算结果
+    for signal in signals:
+        signal_mask = signal_masks[signal]
+        signal_count = signal_counts[signal]
+        signal_ratio = signal_ratios[signal]
 
         for target_col in target_cols:
             key_target_col = target_col.replace('close_max_', '')
             for threshold in thresholds:
-                baseline_count = signal_data_df[signal_data_df[target_col] > threshold].shape[0]
-                baseline_performance = round(baseline_count / total_samples, 4)
+                baseline_performance = baseline_performances[(target_col, threshold)]
 
                 if signal_count > 0:
-                    above_threshold_count = signal_data[signal_data[target_col] > threshold].shape[0]
+                    # 使用布尔掩码计算满足条件的数量
+                    above_threshold_count = (signal_mask & target_masks[target_col][threshold]).sum()
+                    # 当前信号性能 = 满足条件的样本数量 / 信号样本数量
                     current_performance = round(above_threshold_count / signal_count, 4)
-                    diff_vs_baseline = round(current_performance - baseline_performance, 4)
                 else:
                     current_performance = 0.0
-                    diff_vs_baseline = round(current_performance - baseline_performance, 4)
 
+                # 信号性能与基准线性能的差异
+                diff_vs_baseline = round(current_performance - baseline_performance, 4)
+
+                # 将结果添加到 results 列表中
                 results.append({
                     "signal": signal,
                     "target": key_target_col,
@@ -1510,8 +1650,10 @@ def backtest_strategy(signal_data_df):
                     "count": signal_count,
                     "ratio": signal_ratio
                 })
-    # 将results转化为dataframe格式
+
+    # 将 results 转化为 DataFrame 格式
     results_df = pd.DataFrame(results)
+    print(f"回测策略完成，耗时 {time.time() - start_time:.2f} 秒。")
     return results_df
 
 
@@ -1520,8 +1662,8 @@ def analyze_backtest_results():
      分析回测结果，生成信号与目标列表的映射字典，其中每个信号对应一个目标列表。
      并将映射字典保存到 best_signal_list.json 文件中。
      """
-    head_count = 15
-    backtest_path = 'backtest_result'
+    head_count = 50
+    backtest_path = 'kline_data'
     if not os.path.exists(backtest_path):
         os.makedirs(backtest_path)
     data_list = []
@@ -1534,20 +1676,25 @@ def analyze_backtest_results():
         print('已经存在该文件，直接读取')
 
     for file in files:
-        if '1s' in file and '100000' in file:
+        if '1m' in file and '1000000' in file:
             data = pd.read_csv(f'{backtest_path}/{file}')
             data[file] = file
             data_list.append(data)
+            # 删除target中包含next的行
+            data = data[~data['target'].str.contains('next')]
+
             data['score'] = 1 / (1 - data['signal_performance']) / (1 - data['signal_performance']) * data['ratio']
             # 将 data 按照 signal_performance 降序排序
-            data = data.sort_values(by='diff_vs_baseline', ascending=False)
+            data = data.sort_values(by='signal_performance', ascending=False)
 
             # # 获取 signal_performance 大于 0.8 且 diff_vs_baseline 大于 0.0 的数据
-            # signal_list = data[(data['signal_performance'] > 0.73) & (data['diff_vs_baseline'] > -0.03)]
-            # 分别获取target包含up和down的前10个
-            up_signal_list = data[(data['target'].str.contains('up'))].head(head_count)
-            down_signal_list = data[(data['target'].str.contains('down'))].head(head_count)
-            signal_list = pd.concat([up_signal_list, down_signal_list])
+            signal_list = data[(data['signal_performance'] > 0.8) & (data['diff_vs_baseline'] > -0.0)]
+
+
+            # # 分别获取target包含up和down的前10个
+            # up_signal_list = data[(data['target'].str.contains('up'))].head(head_count)
+            # down_signal_list = data[(data['target'].str.contains('down'))].head(head_count)
+            # signal_list = pd.concat([up_signal_list, down_signal_list])
 
             # 遍历 signal_list，构建 signal_to_target_map
             for index, row in signal_list.iterrows():
@@ -1574,9 +1721,9 @@ def run():
       正式运行，得到买入或者卖出信号
       :return:
       """
-    bar = '1s'
-    max_candles = 1000
-    backtest_path = 'backtest_result'
+    bar = '1m'
+    max_candles = 3000
+    backtest_path = 'kline_data'
     best_signal_list_path = os.path.join(backtest_path, 'best_signal_list.json')
 
     # 加载 signal_to_target_map
@@ -1592,7 +1739,9 @@ def run():
     data = get_train_data(max_candles=max_candles, bar=bar)
     signal_data = generate_signals(data)
     # 只保留signal_data最后的60行
-    signal_data = signal_data[-200:]
+    signal_data = signal_data[-1000:]
+
+
 
     # 获取每一行中值为1的列名
     active_signals = []
@@ -1650,7 +1799,7 @@ def download_data():
     is_reload = False
     if not os.path.exists(backtest_path):
         os.makedirs(backtest_path)
-    bar_list = ['1s', '1m', '5m', '15m', '30m', '1H', '2H', '4H']
+    bar_list = ['1s', '1m', '5m', '15m', '30m', '1h', '4h']
     max_candles_list = [1000000]
     for max_candles in max_candles_list:
         for bar in bar_list:
@@ -1664,10 +1813,10 @@ def download_data():
                 data.to_csv(final_file_path, index=False)
 
 def example():
-    download_data()
-    # run_backtest()
-    # analyze_backtest_results()
-    # run()
+    # download_data()
+    run_backtest()
+    analyze_backtest_results()
+    run()
 
 
 
@@ -1678,7 +1827,7 @@ def run_backtest():
         os.makedirs(backtest_path)
     base_file_path = 'origin_data.csv'
     bar_list = ['1m', '1m', '5m', '15m', '30m', '1h', '4h']
-    max_candles_list = [100000, 1000000]
+    max_candles_list = [1000000, 1000000]
     for bar in bar_list:
         full_final_file_path = f'{backtest_path}/{base_file_path[:-4]}_{bar}_{max_candles_list[-1]}.csv'
         full_data = pd.read_csv(full_final_file_path)
@@ -1692,6 +1841,7 @@ def run_backtest():
                 backtest_df = backtest_strategy(signal_data)
                 backtest_df.to_csv(final_output_file_path, index=False)
                 print(f'已经保存至{final_output_file_path}')
+                return
             except Exception as e:
                 print(e)
                 continue
