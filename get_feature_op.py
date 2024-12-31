@@ -33,7 +33,7 @@ def get_kline_data(inst_id, bar="1m", limit=100, max_candles=1000):
     after = ''  # 初始值为None，获取最新数据
     fetched_candles = 0  # 已获取的K线数量
     fail_count = 0  # 失败次数
-    max_retries = 3  # 最大重试次数
+    max_retries = 30  # 最大重试次数
 
     while fetched_candles < max_candles:
         try:
@@ -1125,7 +1125,7 @@ def generate_price_extremes_reverse_signals(df):
     df = df.assign(**signals)
     return df
 
-def generate_price_extremes_signals(df):
+def generate_price_extremes_signals(df, periods=[20]):
     """
     根据指定周期内的最高价和最低价生成买入和卖出信号。
 
@@ -1135,7 +1135,6 @@ def generate_price_extremes_signals(df):
     Returns:
         pd.DataFrame: 添加了价格极值信号列的 DataFrame。
     """
-    periods = [160, 200, 260,300,360]  # 可以根据需要调整周期
     signals = {}
     for period in periods:
         # 检查是否为指定周期内的最高价
@@ -1683,7 +1682,7 @@ def analyze_backtest_results():
             # 删除target中包含next的行
             data = data[~data['target'].str.contains('next')]
 
-            data['score'] = 1 / (1 - data['signal_performance']) / (1 - data['signal_performance']) * data['ratio']
+            data['score'] = data['diff_vs_baseline'] / (1 - data['signal_performance']) * data['ratio']
             # 将 data 按照 signal_performance 降序排序
             data = data.sort_values(by='signal_performance', ascending=False)
 
@@ -1813,10 +1812,12 @@ def download_data():
                 data.to_csv(final_file_path, index=False)
 
 def example():
+    data = get_kline_data("BTC-USDT-SWAP", max_candles=1000000000000000000)
+    data.to_csv('kline_data/max_1m_data.csv', index=False)
     # download_data()
-    run_backtest()
-    analyze_backtest_results()
-    run()
+    # run_backtest()
+    # analyze_backtest_results()
+    # run()
 
 
 

@@ -40,14 +40,14 @@ PROFIT = total_profit - OFFSET
 # 配置区域
 CONFIG = {
     "INST_ID": "BTC-USDT-SWAP",  # 交易对
-    "ORDER_SIZE": 0.1,  # 每次固定下单量
+    "ORDER_SIZE": 100,  # 每次固定下单量
     "PRICE_THRESHOLD": 500,  # 最新价格变化的阈值
     "OFFSET": OFFSET,  # 下单价格偏移量（基础值）
     "PROFIT": PROFIT  # 止盈偏移量（基础值）
 }
 
 MAX_POSITION_RATIO = 1  # 最大持仓比例为1
-flag = "0"  # 实盘: 0, 模拟盘: 1
+flag = "1"  # 实盘: 0, 模拟盘: 1
 
 # API 初始化
 if flag == "1":
@@ -267,8 +267,8 @@ def get_position_ratio(inst_id, latest_price):
             tp_price_short = min(tp_price_short, latest_price)  # 限制止盈价格
             create_take_profit_order(inst_id, 'short', tp_price_short, diff_short_size)
             print(f"为空单设置止盈单，止盈价格: {tp_price_short}, 数量: {short_sz}")
-
-        return long_ratio, short_ratio, avg_long_price, avg_short_price
+        # 计算还可以开多少单
+        return long_sz, short_sz, avg_long_price, avg_short_price
 
     except Exception as e:
         print(f"发生错误: {e}")
@@ -816,7 +816,7 @@ if __name__ == "__main__":
     while count > 0:
         try:
             count -= 1
-            period = 260
+            period = 60
             current_time = time.time()
             current_time = pd.to_datetime(current_time, unit='s')
             start_time = time.time()
@@ -828,18 +828,19 @@ if __name__ == "__main__":
 
             feature_df = newest_data.get_newest_data()
             latest_price = feature_df['close'].iloc[-1]
+            long_sz, short_sz, avg_long_price, avg_short_price = get_position_ratio("BTC-USDT-SWAP", latest_price)
 
             # 获取feature_df中最新数据close在period时间内的最大值和最小值
             max_price = feature_df['close'].iloc[-period:].max()
             min_price = feature_df['close'].iloc[-period:].min()
-            print(f"max_price: {max_price}, min_price: {min_price}")
+            print(f"max_price: {max_price}, min_price: {min_price} latest_price: {latest_price} long_sz: {long_sz} short_sz: {short_sz}")
             buy_result = tradeAPI.place_algo_order(
                 instId="BTC-USDT-SWAP",
                 tdMode="cross",
                 side="buy",
                 posSide="long",
                 ordType="move_order_stop",
-                sz="0.1",
+                sz=long_sz + CONFIG["ORDER_SIZE"],
                 callbackSpread="10",
                 activePx=min_price,
             )
@@ -849,12 +850,12 @@ if __name__ == "__main__":
                 side="sell",
                 posSide="short",
                 ordType="move_order_stop",
-                sz="0.1",
+                sz=short_sz + CONFIG["ORDER_SIZE"],
                 callbackSpread="10",
                 activePx=max_price,
             )
             release_alg_old_funds("BTC-USDT-SWAP")
-            get_position_ratio("BTC-USDT-SWAP", latest_price)
+            long_sz, short_sz, avg_long_price, avg_short_price = get_position_ratio("BTC-USDT-SWAP", latest_price)
         except Exception as e:
             print(f"发生错误: {e}")
             continue

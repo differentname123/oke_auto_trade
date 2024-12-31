@@ -5,15 +5,14 @@ import pandas as pd
 from get_feature_op import generate_price_extremes_signals
 
 
-def gen_buy_sell_signal(data_df):
+def gen_buy_sell_signal(data_df, profit=1/100, period=10):
     """
     为data生成相应的买卖信号，并生成相应的buy_price, sell_price
     :param data:
     :return:
     """
-    profit = 1 / 100 # 单次盈利比例
-    count = 0.001 # 单次买入数量
-    signal_df = generate_price_extremes_signals(data_df, periods=[360])
+    count = 0.001
+    signal_df = generate_price_extremes_signals(data_df, periods=[period])
     # 找到包含Buy的列和包含Sell的列名
     buy_col = [col for col in signal_df.columns if 'Buy' in col]
     sell_col = [col for col in signal_df.columns if 'Sell' in col]
@@ -209,64 +208,98 @@ def deal_pending_order(pending_order_list, row, position_info, lever, total_mone
     return pending_order_list, history_order_list, total_money
 
 
-def example():
-    lever = 100 # 杠杆倍数
-    total_money = 10000 # 初始资金
-    init_money = total_money
-    pending_order_list = [] # 委托单
-    all_history_order_list = [] # 历史订单
-    position_info_list = [] # 持仓信息
+import pandas as pd
+import multiprocessing as mp
+from tqdm import tqdm  # 用于显示进度条
 
-    file_path = 'kline_data/max_1m_data.csv'
-    data_df = pd.read_csv(file_path)
-    signal_df = gen_buy_sell_signal(data_df)
-    signal_df = signal_df[-10000:-1000]  # 只取最近1000条数据
-    # 遍历signal_df，根据信号进行买卖
-    for index, row in signal_df.iterrows():
+def create_order(order_type, row, lever):
+    """创建订单信息"""
+    return {
+        'buy_price': row['buy_price'],
+        'count': row['count'],
+        'timestamp': row['timestamp'],
+        'sell_price': row['sell_price'],
+        'type': order_type,
+        'lever': lever,
+        'side': 'kai'
+    }
+
+def process_signals(signal_df, lever, total_money, init_money):
+    """处理信号生成的订单并计算收益"""
+    pending_order_list = []
+    all_history_order_list = []
+    position_info_list = []
+
+    for _, row in signal_df.iterrows():
+        # 分析持仓信息
         position_info = analysis_position(pending_order_list, row, total_money, lever)
         position_info_list.append(position_info)
-        # 进行委托单处理
-        pending_order_list, history_order_list, total_money = deal_pending_order(pending_order_list, row, position_info, lever, total_money)
+
+        # 处理委托单
+        pending_order_list, history_order_list, total_money = deal_pending_order(
+            pending_order_list, row, position_info, lever, total_money
+        )
         all_history_order_list.extend(history_order_list)
 
-
-        timestamp = row['timestamp']
+        # 根据信号生成新订单
         if row['Buy'] == 1:
-            temp_long_order = {}
-            temp_long_order['buy_price'] = row['buy_price']
-            temp_long_order['count'] = row['count']
-            temp_long_order['timestamp'] = timestamp
-            temp_long_order['sell_price'] = row['sell_price']
-            temp_long_order['type'] = 'long'
-            temp_long_order['lever'] = lever
-            temp_long_order['side'] = 'kai'
-            pending_order_list.append(temp_long_order)
+            pending_order_list.append(create_order('long', row, lever))
         elif row['Sell'] == 1:
-            temp_short_order = {}
-            temp_short_order['buy_price'] = row['buy_price']
-            temp_short_order['count'] = row['count']
-            temp_short_order['timestamp'] = timestamp
-            temp_short_order['sell_price'] = row['sell_price']
-            temp_short_order['type'] = 'short'
-            temp_short_order['lever'] = lever
-            temp_short_order['side'] = 'kai'
-            pending_order_list.append(temp_short_order)
-    # 将position_info_list转换为DataFrame
+            pending_order_list.append(create_order('short', row, lever))
+
+    # 计算最终结果
     position_info_df = pd.DataFrame(position_info_list)
     final_total_money_if_close = position_info_df['final_total_money_if_close'].iloc[-1]
-    # 找到 close_available_funds 最小值
-    min_close_available_funds = position_info_df['close_available_funds'].min()
-    # 找到 high_available_funds 最小值
-    min_high_available_funds = position_info_df['high_available_funds'].min()
-    # 找到 low_available_funds 最小值
-    min_low_available_funds = position_info_df['low_available_funds'].min()
-    # 找到最小值
-    min_available_funds = min(min_close_available_funds, min_high_available_funds, min_low_available_funds)
+    min_available_funds = min(
+        position_info_df['close_available_funds'].min(),
+        position_info_df['high_available_funds'].min(),
+        position_info_df['low_available_funds'].min()
+    )
     max_cost_money = init_money - min_available_funds
-    final_profit = final_total_money_if_close - max_cost_money
-    return 0
+    final_profit = final_total_money_if_close - init_money
+    profit_ratio = final_profit / max_cost_money
 
+    last_data = position_info_df.iloc[-1].copy()  # 避免视图警告
+    last_data = last_data.to_dict()  # 转换为字典
+    last_data.update({
+        'final_total_money_if_close': final_total_money_if_close,
+        'final_profit': final_profit,
+        'max_cost_money': max_cost_money,
+        'profit_ratio': profit_ratio
+    })
 
+    return last_data
 
-if __name__ == '__main__':
+def calculate_combination(args):
+    """多进程计算单个组合的回测结果"""
+    profit, period, data_df, lever, init_money = args
+    signal_df = gen_buy_sell_signal(data_df, profit=profit, period=period)
+    last_data = process_signals(signal_df, lever, init_money, init_money)
+    last_data.update({'profit': profit, 'period': period})
+    return last_data
+
+def example():
+    file_path = 'kline_data/max_1m_data.csv'
+    data_df = pd.read_csv(file_path)[-100000:-1000]  # 只取最近1000条数据
+    data_len = len(data_df)
+    profit_list = [x / 1000 for x in range(1, 20)]
+    period_list = list(range(10, 2000, 10))
+    lever = 100
+    init_money = 10000000
+
+    # 准备参数组合
+    combinations = [(profit, period, data_df, lever, init_money) for profit in profit_list for period in period_list]
+    print(f"共有 {len(combinations)} 个组合，开始计算...")
+
+    # 使用多进程计算
+    with mp.Pool(processes=mp.cpu_count()) as pool:
+        results = list(tqdm(pool.imap(calculate_combination, combinations), total=len(combinations)))
+
+    # 保存结果
+    result_df = pd.DataFrame(results)
+    result_df.to_csv(f'result_{data_len}.csv', index=False)
+    print("结果已保存到 f'result_{data_len}.csv'")
+
+if __name__ == "__main__":
+    data_df = pd.read_csv('result_9000.csv')
     example()
