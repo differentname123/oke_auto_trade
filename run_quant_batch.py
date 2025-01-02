@@ -1,3 +1,5 @@
+import os
+import time
 from datetime import datetime
 
 import pandas as pd
@@ -5,15 +7,16 @@ import pandas as pd
 from get_feature_op import generate_price_extremes_signals
 
 
-def gen_buy_sell_signal(data_df):
+def gen_buy_sell_signal(data_df, profit=1 / 100, period=10):
     """
     为data生成相应的买卖信号，并生成相应的buy_price, sell_price
-    :param data:
+    :param data_df:
+    :param profit:
+    :param period:
     :return:
     """
-    profit = 1 / 100 # 单次盈利比例
-    count = 0.001 # 单次买入数量
-    signal_df = generate_price_extremes_signals(data_df, periods=[360])
+    # start_time = datetime.now()
+    signal_df = generate_price_extremes_signals(data_df, periods=[period])
     # 找到包含Buy的列和包含Sell的列名
     buy_col = [col for col in signal_df.columns if 'Buy' in col]
     sell_col = [col for col in signal_df.columns if 'Sell' in col]
@@ -33,7 +36,32 @@ def gen_buy_sell_signal(data_df):
     sell_rows = signal_df['Sell'] == 1
     signal_df.loc[sell_rows, 'buy_price'] = signal_df.loc[sell_rows, 'close']
     signal_df.loc[sell_rows, 'sell_price'] = signal_df.loc[sell_rows, 'close'] * (1 - profit)
-    signal_df['count'] = count
+
+    # 初始化 count 列
+    signal_df['count'] = 0.01
+
+    # # 遍历每一行，计算 count
+    # last_signal = None
+    # count = 0
+    # for index, row in signal_df.iterrows():
+    #     if row['Buy'] == 1:
+    #         current_signal = 'Buy'
+    #     elif row['Sell'] == 1:
+    #         current_signal = 'Sell'
+    #     else:
+    #         current_signal = None
+    #
+    #     if current_signal == last_signal:
+    #         if current_signal is not None:  # 只有在信号为 Buy 或 Sell 时才增加 count
+    #             count += 1
+    #     else:
+    #         count = 1 if current_signal is not None else 0  # 如果信号改变，并且新信号不是 None，则重置 count 为 1，否则为 0
+    #
+    #     if current_signal is not None:
+    #         signal_df.loc[index, 'count'] = count * 0.001
+    #
+    #     last_signal = current_signal
+    # print(f"gen_buy_sell_signal cost time: {datetime.now() - start_time}")
     return signal_df
 
 
@@ -54,9 +82,9 @@ def analysis_position(pending_order_list, row, total_money, leverage=100):
     short_avg_price = 0
 
     # 提取市场价格
-    high = row['high']
-    low = row['low']
-    close = row['close']
+    high = row.high
+    low = row.low
+    close = row.close
 
     # 计算多空仓位的总大小和成本
     for order in pending_order_list:
@@ -104,7 +132,7 @@ def analysis_position(pending_order_list, row, total_money, leverage=100):
         print("可用资金不足，无法进行交易！")
 
     return {
-        'timestamp': row['timestamp'],
+        'timestamp': row.timestamp,
         'long_sz': long_sz,
         'short_sz': short_sz,
         'long_avg_price': long_avg_price,
@@ -117,42 +145,24 @@ def analysis_position(pending_order_list, row, total_money, leverage=100):
     }
 
 
-def calculate_time_diff_minutes(time_str1, time_str2):
+def calculate_time_diff_minutes(time1, time2):
     """
-    计算两个字符串格式时间之间相差的分钟数。
-
-    Args:
-        time_str1: 第一个时间字符串，格式为 'YYYY-MM-DD HH:MM:SS'。
-        time_str2: 第二个时间字符串，格式为 'YYYY-MM-DD HH:MM:SS'。
-
-    Returns:
-        两个时间之间相差的分钟数（浮点数）。
-        如果时间字符串格式错误，则返回 None。
+    计算两个 datetime 对象之间相差的分钟数。
     """
-    try:
-        time1 = datetime.strptime(time_str1, '%Y-%m-%d %H:%M:%S')
-        time2 = datetime.strptime(time_str2, '%Y-%m-%d %H:%M:%S')
-        time_diff = time1 - time2
-        return abs(time_diff.total_seconds() / 60)
-    except ValueError:
-        print("错误：时间字符串格式不正确，请使用 'YYYY-MM-DD HH:MM:SS' 格式。")
-        return None
+    time_diff = time1 - time2
+    return time_diff.total_seconds() / 60
 
-def deal_pending_order(pending_order_list, row, position_info, lever, total_money, max_time_diff=2):
+
+def deal_pending_order(pending_order_list, row, position_info, lever, total_money, max_time_diff=2*1):
     """
     处理委托单
-    :param pending_order_list: 委托单列表
-    :param row: 当前市场数据，包含high、low、timestamp
-    :param position_info: 持仓信息，包含可用资金和持仓均价等
-    :param lever: 杠杆倍数
-    :param total_money: 总资金
-    :param max_time_diff: 最大时间差，单位秒，默认为5
-    :return: 更新的历史订单列表和总资金
     """
-    high = row['high']
-    low = row['low']
+    max_sell_time_diff = 1000000  # 最大卖出时间差
+    high = row.high
+    low = row.low
+    close = row.close
     close_available_funds = position_info['close_available_funds']
-    timestamp = row['timestamp']
+    timestamp = row.timestamp
     history_order_list = []
     fee = 0.0007  # 手续费
 
@@ -163,6 +173,7 @@ def deal_pending_order(pending_order_list, row, position_info, lever, total_mone
             if time_diff < max_time_diff:
                 if order['type'] == 'long':  # 开多仓
                     if order['buy_price'] > low:  # 买入价格高于最低价
+                        # order['count'] += long_sz
                         # 判断可用资金是否足够开仓
                         required_margin = order['count'] * order['buy_price'] / lever
                         if close_available_funds >= required_margin:
@@ -174,6 +185,7 @@ def deal_pending_order(pending_order_list, row, position_info, lever, total_mone
                             order['message'] = 'insufficient funds'
                 if order['type'] == 'short':  # 开空仓
                     if order['buy_price'] < high:
+                        # order['count'] += short_sz
                         # 判断可用资金是否足够开仓
                         required_margin = order['count'] * order['buy_price'] / lever
                         if close_available_funds >= required_margin:
@@ -188,20 +200,37 @@ def deal_pending_order(pending_order_list, row, position_info, lever, total_mone
                 order['message'] = 'time out'
 
         elif order['side'] == 'ping':  # 平仓
+            pin_time_diff = calculate_time_diff_minutes(timestamp, order['kai_time'])
             if order['type'] == 'long':  # 平多仓
                 if order['sell_price'] < high:
                     order['side'] = 'done'
                     order['ping_time'] = timestamp
                     # 计算收益并更新总资金
                     profit = order['count'] * (order['sell_price'] - order['buy_price'] - fee * order['sell_price'])
+                    order['profit'] = profit
+                    order['time_cost'] = pin_time_diff
                     total_money += profit
+                else:
+                    # 对超时的调整售出价格
+                    if pin_time_diff > max_sell_time_diff:
+                        order['sell_price'] = close - order['buy_price'] + order['sell_price']
+                        order['kai_time'] = timestamp
+                        order['message'] = 'sell time out'
             if order['type'] == 'short':  # 平空仓
                 if order['sell_price'] > low:
                     order['side'] = 'done'
                     order['ping_time'] = timestamp
                     # 计算收益并更新总资金
                     profit = order['count'] * (order['buy_price'] - order['sell_price'] - fee * order['sell_price'])
+                    order['profit'] = profit
+                    order['time_cost'] = pin_time_diff
                     total_money += profit
+                else:
+                    # 对超时的调整售出价格
+                    if pin_time_diff > max_sell_time_diff:
+                        order['sell_price'] = close - order['buy_price'] + order['sell_price']
+                        order['ping_time'] = timestamp
+                        order['message'] = 'sell time out'
 
     # 删除已经完成的订单，移动到history_order_list
     history_order_list.extend([order for order in pending_order_list if order['side'] == 'done'])
@@ -209,64 +238,159 @@ def deal_pending_order(pending_order_list, row, position_info, lever, total_mone
     return pending_order_list, history_order_list, total_money
 
 
-def example():
-    lever = 100 # 杠杆倍数
-    total_money = 10000 # 初始资金
-    init_money = total_money
-    pending_order_list = [] # 委托单
-    all_history_order_list = [] # 历史订单
-    position_info_list = [] # 持仓信息
+import pandas as pd
+import multiprocessing as mp
+from tqdm import tqdm  # 用于显示进度条
 
-    file_path = 'kline_data/max_1m_data.csv'
-    data_df = pd.read_csv(file_path)
-    signal_df = gen_buy_sell_signal(data_df)
-    signal_df = signal_df[-10000:-1000]  # 只取最近1000条数据
-    # 遍历signal_df，根据信号进行买卖
-    for index, row in signal_df.iterrows():
+
+def create_order(order_type, row, lever):
+    """创建订单信息"""
+    return {
+        'buy_price': row.buy_price,
+        'count': row.count,
+        'timestamp': row.timestamp,
+        'sell_price': row.sell_price,
+        'type': order_type,
+        'lever': lever,
+        'side': 'kai'
+    }
+
+
+def process_signals(signal_df, lever, total_money, init_money):
+    """处理信号生成的订单并计算收益"""
+    pending_order_list = []
+    all_history_order_list = []
+    position_info_list = []
+    # start_time = time.time()
+
+    # 确保 timestamp 为 datetime 对象
+    signal_df['timestamp'] = pd.to_datetime(signal_df['timestamp'])
+
+    for row in signal_df.itertuples():
+        # 分析持仓信息
         position_info = analysis_position(pending_order_list, row, total_money, lever)
         position_info_list.append(position_info)
-        # 进行委托单处理
-        pending_order_list, history_order_list, total_money = deal_pending_order(pending_order_list, row, position_info, lever, total_money)
+
+        # 处理委托单
+        pending_order_list, history_order_list, total_money = deal_pending_order(
+            pending_order_list, row, position_info, lever, total_money
+        )
         all_history_order_list.extend(history_order_list)
 
-
-        timestamp = row['timestamp']
-        if row['Buy'] == 1:
-            temp_long_order = {}
-            temp_long_order['buy_price'] = row['buy_price']
-            temp_long_order['count'] = row['count']
-            temp_long_order['timestamp'] = timestamp
-            temp_long_order['sell_price'] = row['sell_price']
-            temp_long_order['type'] = 'long'
-            temp_long_order['lever'] = lever
-            temp_long_order['side'] = 'kai'
-            pending_order_list.append(temp_long_order)
-        elif row['Sell'] == 1:
-            temp_short_order = {}
-            temp_short_order['buy_price'] = row['buy_price']
-            temp_short_order['count'] = row['count']
-            temp_short_order['timestamp'] = timestamp
-            temp_short_order['sell_price'] = row['sell_price']
-            temp_short_order['type'] = 'short'
-            temp_short_order['lever'] = lever
-            temp_short_order['side'] = 'kai'
-            pending_order_list.append(temp_short_order)
-    # 将position_info_list转换为DataFrame
+        # 根据信号生成新订单
+        if row.Buy == 1:
+            pending_order_list.append(create_order('long', row, lever))
+        elif row.Sell == 1:
+            pending_order_list.append(create_order('short', row, lever))
+    # print(f"process_signals cost time: {time.time() - start_time}")
+    # 计算最终结果
     position_info_df = pd.DataFrame(position_info_list)
+    all_history_order_df = pd.DataFrame(all_history_order_list)
     final_total_money_if_close = position_info_df['final_total_money_if_close'].iloc[-1]
-    # 找到 close_available_funds 最小值
-    min_close_available_funds = position_info_df['close_available_funds'].min()
-    # 找到 high_available_funds 最小值
-    min_high_available_funds = position_info_df['high_available_funds'].min()
-    # 找到 low_available_funds 最小值
-    min_low_available_funds = position_info_df['low_available_funds'].min()
-    # 找到最小值
-    min_available_funds = min(min_close_available_funds, min_high_available_funds, min_low_available_funds)
+    min_available_funds = min(
+        position_info_df['close_available_funds'].min(),
+        position_info_df['high_available_funds'].min(),
+        position_info_df['low_available_funds'].min()
+    )
     max_cost_money = init_money - min_available_funds
-    final_profit = final_total_money_if_close - max_cost_money
-    return 0
+    final_profit = final_total_money_if_close - init_money
+    profit_ratio = final_profit / max_cost_money if max_cost_money > 0 else 0
+
+    # 统计信号数量和占比
+    total_signals = len(signal_df)
+    buy_signals = signal_df['Buy'].sum()
+    sell_signals = signal_df['Sell'].sum()
+    buy_ratio = buy_signals / total_signals if total_signals > 0 else 0
+    sell_ratio = sell_signals / total_signals if total_signals > 0 else 0
+
+    # 统计 'time out' 订单数量
+    if not all_history_order_df.empty:
+        timeout_orders = all_history_order_df[all_history_order_df['message'] == 'time out']
+        timeout_long = len(timeout_orders[timeout_orders['type'] == 'long'])
+        timeout_short = len(timeout_orders[timeout_orders['type'] == 'short'])
+    else:
+        timeout_long = 0
+        timeout_short = 0
+
+    if 'time_cost' not in all_history_order_df.columns:
+        all_history_order_df['time_cost'] = None
+    # 找到time_cost不为nan的行
+    all_history_order_df = all_history_order_df[~all_history_order_df['time_cost'].isna()]
+    # 计算time_cost的平均值
+    time_cost = all_history_order_df['time_cost'].mean()
+
+    last_data = position_info_df.iloc[-1].copy()
+    last_data = last_data.to_dict()
+    last_data.update({
+        'final_total_money_if_close': final_total_money_if_close,
+        'final_profit': final_profit,
+        'max_cost_money': max_cost_money,
+        'profit_ratio': profit_ratio,
+        'total_signals': total_signals,
+        'buy_signals': buy_signals,
+        'sell_signals': sell_signals,
+        'buy_ratio': buy_ratio,
+        'sell_ratio': sell_ratio,
+        'timeout_long': timeout_long,
+        'timeout_short': timeout_short,
+        'hold_time': time_cost
+    })
+    # print(f'cost time: {time.time() - start_time}')
+
+    return last_data
 
 
+def calculate_combination(args):
+    """多进程计算单个组合的回测结果"""
+    profit, period, data_df, lever, init_money = args
+    signal_df = gen_buy_sell_signal(data_df, profit=profit, period=period)
+    last_data = process_signals(signal_df, lever, init_money, init_money)
+    last_data.update({'profit': profit, 'period': period})
+    return last_data
 
-if __name__ == '__main__':
+
+def example():
+    backtest_path = 'backtest_result'
+    file_path = 'kline_data/max_1m_data_eth.csv'
+    base_name = file_path.split('/')[-1].split('.')[0]
+    data_df = pd.read_csv(file_path)[-200000:]  # 只取最近1000条数据
+    data_len = len(data_df)
+    profit_list = [x / 2000 + 0.003 for x in range(1, 20)]
+    period_list = list(range(10, 1000, 10))
+    lever = 100
+    init_money = 10000000
+
+    # # # # debug
+    # last_data = calculate_combination((0.017, 110, data_df, lever, init_money))
+    # print(last_data)
+
+    # 准备参数组合
+    combinations = [(profit, period, data_df, lever, init_money) for profit in profit_list for period in period_list]
+    print(f"共有 {len(combinations)} 个组合，开始计算...")
+
+    # 使用多进程计算
+    with mp.Pool(processes=os.cpu_count()) as pool:
+        results = list(tqdm(pool.imap(calculate_combination, combinations), total=len(combinations)))
+
+    # 保存结果
+    result_df = pd.DataFrame(results)
+    file_out = f'{backtest_path}/result_{data_len}_{len(combinations)}_{base_name}.csv'
+    result_df.to_csv(file_out, index=False)
+    print(f"结果已保存到 {file_out}")
+
+
+if __name__ == "__main__":
+    result_df = pd.read_csv('backtest_result/result_200000_1881_max_1m_data_eth.csv')
+    result_df1 = pd.read_csv('backtest_result/result_200000_1560_max_1m_data_eth.csv')
+    # 将result_df和result_df1按照profit和period这两列合并
+
+    merged_df = pd.merge(result_df, result_df1, on=['profit', 'period'], how='outer', suffixes=('_200000', '_100000'))
+    new_cols_order = merged_df.columns.tolist()
+    new_cols_order = sorted(new_cols_order)
+    merged_df = merged_df.reindex(columns=new_cols_order)
+
+    merged_df['score'] = 10000 * merged_df['profit_ratio_200000'] * merged_df['profit_ratio_100000']
+
+    # result = pd.concat([result_df, result_df1])
+    result_df['score'] = 10000 * result_df['profit_ratio'] / result_df['max_cost_money']
     example()

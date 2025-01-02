@@ -469,7 +469,7 @@ def gen_feature(origin_name):
     # df.tail(100000).to_csv(f'{origin_name[:-4]}_features_tail.csv', index=False)
     return df
 
-def add_target_variables_op(df, max_decoder_length=30):
+def add_target_variables_op(df, step_list=[10,100,1000,10000,10000]):
     """
     添加目标变量，包括未来多个时间步的涨幅和跌幅，针对close、high、low的多阈值计算。
 
@@ -483,15 +483,7 @@ def add_target_variables_op(df, max_decoder_length=30):
 
 
     for col in ["close"]:
-        # 获取下一个时间点的最高价和最低价
-        next_high = df['high'].shift(-1)
-        next_low = df['low'].shift(-1)
-
-        # 计算下一个时间点的最高价和最低价相对于当前时间点的涨跌幅
-        new_columns[f"{col}_next_max_up"] = (next_high - df[col]) / df[col] * 100  # 最高价涨幅
-        new_columns[f"{col}_next_max_down"] = (df[col] - next_low) / df[col] * 100  # 最低价跌幅
-
-        for step in range(10, max_decoder_length + 1, 10):  # 未来 1 到 max_decoder_length 分钟
+        for step in step_list:  # 未来 1 到 max_decoder_length 分钟
             # 获取未来 step 个时间窗口内的最高价和最低价
             future_max_high = df['high'].rolling(window=step, min_periods=1).max().shift(-step)
             future_min_low = df['low'].rolling(window=step, min_periods=1).min().shift(-step)
@@ -499,10 +491,6 @@ def add_target_variables_op(df, max_decoder_length=30):
             # 计算未来 step 个时间窗口内的最大涨幅和跌幅 (修正部分)
             new_columns[f"{col}_max_up_t{step}"] = (future_max_high - df[col]) / df[col] * 100 #最大涨幅用最高价
             new_columns[f"{col}_max_down_t{step}"] = (df[col] - future_min_low) / df[col] * 100 #最大跌幅用最低价
-
-            # 计算未来 step 个时间窗口的涨跌幅
-            future_return = (df['close'].shift(-step) - df['close']) / df['close'] * 100
-            new_columns[f"{col}_max_return_t{step}"] = future_return
     # 使用 pd.concat 一次性将所有新列添加到原数据框
     df = pd.concat([df, pd.DataFrame(new_columns, index=df.index)], axis=1)
 
@@ -617,7 +605,12 @@ def generate_signals(df):
     df = df.copy()  # 避免修改原始 DataFrame
     # df = generate_volume_spike_signals(df)
     # df = generate_price_extremes_reverse_signals(df)
-    df = generate_price_extremes_signals(df)
+    # df = generate_price_extremes_signals(df)
+    # 生成单一 MA 信号
+    df = generate_signals_single_ma(df)
+
+    # 生成双 MA 信号
+    df = generate_signals_double_ma(df)
     # df = generate_body_wick_signals(df)
     # df = generate_consecutive_and_large_candle_signals(df)
     # df = generate_ichimoku_signals(df)
@@ -1122,6 +1115,70 @@ def generate_price_extremes_reverse_signals(df):
         )
 
     # 将信号列添加到原始 DataFrame 中
+    df = df.assign(**signals)
+    return df
+
+def generate_signals_single_ma(df, periods=[10, 20, 30, 50, 100, 200]):
+    """
+    使用单一 MA 生成交易信号。
+
+    Args:
+        df (pd.DataFrame): 包含 'close' 列的 DataFrame。
+        periods (list): 周期列表。
+
+    Returns:
+        pd.DataFrame: 添加了单一 MA 信号列的 DataFrame。
+    """
+    signals = {}
+    for period in periods:
+        ma = calculate_ma(df['close'], period)
+        # 价格上穿 MA
+        signals[f'SingleMA_{period}_Up_Buy'] = np.where((df['close'] > ma) & (df['close'].shift(1) <= ma.shift(1)), 1,
+                                                        0)
+        # 价格下穿 MA
+        signals[f'SingleMA_{period}_Down_Sell'] = np.where((df['close'] < ma) & (df['close'].shift(1) >= ma.shift(1)),
+                                                           1, 0)
+
+        # 基于当前价格与MA值关系判断
+        signals[f'SingleMA_{period}_Above_Buy'] = np.where(df['close'] > ma, 1, 0)
+        signals[f'SingleMA_{period}_Below_Sell'] = np.where(df['close'] < ma, 1, 0)
+
+    df = df.assign(**signals)
+    return df
+
+
+def generate_signals_double_ma(df, short_periods=[10, 20, 30], long_periods=[50, 100, 200]):
+    """
+    使用双 MA 生成交易信号。
+
+    Args:
+        df (pd.DataFrame): 包含 'close' 列的 DataFrame。
+        short_periods (list): 短周期列表。
+        long_periods (list): 长周期列表。
+
+    Returns:
+        pd.DataFrame: 添加了双 MA 信号列的 DataFrame。
+    """
+    signals = {}
+    for short_period in short_periods:
+        for long_period in long_periods:
+            if short_period >= long_period:
+                continue  # 确保短周期小于长周期
+
+            short_ma = calculate_ma(df['close'], short_period)
+            long_ma = calculate_ma(df['close'], long_period)
+
+            # 金叉
+            signals[f'DoubleMA_{short_period}_{long_period}_GoldenCross_Buy'] = np.where(
+                (short_ma > long_ma) & (short_ma.shift(1) <= long_ma.shift(1)), 1, 0)
+            # 死叉
+            signals[f'DoubleMA_{short_period}_{long_period}_DeathCross_Sell'] = np.where(
+                (short_ma < long_ma) & (short_ma.shift(1) >= long_ma.shift(1)), 1, 0)
+
+            # 基于当前快慢均线关系判断
+            signals[f'DoubleMA_{short_period}_{long_period}_Above_Buy'] = np.where(short_ma > long_ma, 1, 0)
+            signals[f'DoubleMA_{short_period}_{long_period}_Below_Sell'] = np.where(short_ma < long_ma, 1, 0)
+
     df = df.assign(**signals)
     return df
 
@@ -1796,25 +1853,25 @@ def download_data():
     backtest_path = 'kline_data'
     base_file_path = 'origin_data.csv'
     is_reload = False
+    inst_id_list = [ 'BTC-USDT-SWAP','ETH-USDT-SWAP','SOL-USDT-SWAP','TON-USDT-SWAP', 'DOGE-USDT-SWAP', 'XRP-USDT-SWAP', 'PEPE-USDT-SWAP']
     if not os.path.exists(backtest_path):
         os.makedirs(backtest_path)
-    bar_list = ['1s', '1m', '5m', '15m', '30m', '1h', '4h']
-    max_candles_list = [1000000]
+    bar_list = ['1m', '1s', '5m', '15m', '30m', '1h', '4h']
+    max_candles_list = [10000000]
     for max_candles in max_candles_list:
         for bar in bar_list:
-            final_file_path = f'{backtest_path}/{base_file_path[:-4]}_{bar}_{max_candles}.csv'
-            if os.path.exists(final_file_path) and not is_reload:
-                data = pd.read_csv(final_file_path)
-                print(f'已经存在该文件，直接读取 {final_file_path}')
-            else:
-                print('不存在该文件，开始获取')
-                data = get_train_data(max_candles=max_candles, bar=bar)
-                data.to_csv(final_file_path, index=False)
+            for inst_id in inst_id_list:
+                final_file_path = f'{backtest_path}/{base_file_path[:-4]}_{bar}_{max_candles}_{inst_id}.csv'
+                # 判断文件是否存在，并且有一定的大小
+                if not is_reload and os.path.exists(final_file_path) and os.path.getsize(final_file_path) > 1024:
+                    print('已经存在该文件，直接读取')
+                else:
+                    print('不存在该文件，开始获取')
+                    data = get_train_data(inst_id=inst_id, bar=bar, max_candles=max_candles)
+                    data.to_csv(final_file_path, index=False)
 
 def example():
-    data = get_kline_data("BTC-USDT-SWAP", max_candles=1000000000000000000)
-    data.to_csv('kline_data/max_1m_data.csv', index=False)
-    # download_data()
+    download_data()
     # run_backtest()
     # analyze_backtest_results()
     # run()
