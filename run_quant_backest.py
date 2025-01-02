@@ -129,7 +129,7 @@ def calculate_time_diff_minutes(time1, time2):
     return time_diff.total_seconds() / 60
 
 
-def deal_pending_order(pending_order_list, row, position_info, lever, total_money, max_time_diff=2*1):
+def deal_pending_order(pending_order_list, row, position_info, lever, total_money, max_time_diff=2 * 1):
     """
     处理委托单
     """
@@ -212,8 +212,6 @@ def deal_pending_order(pending_order_list, row, position_info, lever, total_mone
     history_order_list.extend([order for order in pending_order_list if order['side'] == 'done'])
     pending_order_list = [order for order in pending_order_list if order['side'] != 'done']
     return pending_order_list, history_order_list, total_money
-
-
 
 
 def create_order(order_type, row, lever):
@@ -327,33 +325,47 @@ def example():
     file_path = 'kline_data/max_1m_data.csv'
     gen_signal_method = 'price_extremes'
     base_name = file_path.split('/')[-1].split('.')[0]
-    data_df = pd.read_csv(file_path)[-10000:]  # 只取最近1000条数据
-    data_len = len(data_df)
-    profit_list = [x / 2000 + 0.001 for x in range(1, 40)]
-    period_list = list(range(10, 4000, 100))
+    profit_list = [x / 2000 + 0.001 for x in range(1, 60)]
+    period_list = list(range(10, 10000, 100))
     lever = 100
     init_money = 10000000
-    # 获取data_df的初始时间与结束时间
-    start_time = data_df.iloc[0].timestamp
-    end_time = data_df.iloc[-1].timestamp
-    print(f"开始时间：{start_time}，结束时间：{end_time}")
-    # 生成time_key
-    time_key_str = f"{start_time.strftime('%Y%m%d%H%M%S')}_{end_time.strftime('%Y%m%d%H%M%S')}"
-
-    # 准备参数组合
-    combinations = [(profit, period, data_df, lever, init_money) for profit in profit_list for period in period_list]
-    print(f"共有 {len(combinations)} 个组合，开始计算...")
+    origin_data_df = pd.read_csv(file_path)  # 只取最近1000条数据
+    origin_data_df['timestamp'] = pd.to_datetime(origin_data_df['timestamp'])
 
 
-    # 使用多进程计算
-    with mp.Pool(processes=os.cpu_count() - 3) as pool:
-        results = list(tqdm(pool.imap(calculate_combination, combinations), total=len(combinations)))
+    longest_periods_info = {
+        'longest_up': '2024-09-08_2024-12-16',
+        "longest_down": '2024-04-14_2024-06-15',
+        "longest_sideways": '2024-03-12_2024-10-03'
+    }
+    for key, value in longest_periods_info.items():
+        start_time_str, end_time_str = value.split('_')
+        start_time = pd.to_datetime(start_time_str)
+        end_time = pd.to_datetime(end_time_str)
+        data_df = origin_data_df[(origin_data_df['timestamp'] >= start_time) & (origin_data_df['timestamp'] <= end_time)]
 
-    # 保存结果
-    result_df = pd.DataFrame(results)
-    file_out = f'{backtest_path}/result_{data_len}_{len(combinations)}_{base_name}_{time_key_str}_{gen_signal_method}.csv'
-    result_df.to_csv(file_out, index=False)
-    print(f"结果已保存到 {file_out}")
+        data_len = len(data_df)
+
+        # 获取data_df的初始时间与结束时间
+        start_time = data_df.iloc[0].timestamp
+        end_time = data_df.iloc[-1].timestamp
+        print(f"开始时间：{start_time}，结束时间：{end_time} 长度：{data_len} key = {key}")
+        # 生成time_key
+        time_key_str = f"{start_time.strftime('%Y%m%d%H%M%S')}_{end_time.strftime('%Y%m%d%H%M%S')}"
+
+        # 准备参数组合
+        combinations = [(profit, period, data_df, lever, init_money) for profit in profit_list for period in period_list]
+        print(f"共有 {len(combinations)} 个组合，开始计算...")
+
+        # 使用多进程计算
+        with mp.Pool(processes=os.cpu_count()) as pool:
+            results = list(tqdm(pool.imap(calculate_combination, combinations), total=len(combinations)))
+
+        # 保存结果
+        result_df = pd.DataFrame(results)
+        file_out = f'{backtest_path}/result_{data_len}_{len(combinations)}_{base_name}_{time_key_str}_{gen_signal_method}_{key}.csv'
+        result_df.to_csv(file_out, index=False)
+        print(f"结果已保存到 {file_out}")
 
 
 if __name__ == "__main__":
