@@ -1,6 +1,8 @@
 import os
+import multiprocessing as mp
 import time
-from datetime import datetime
+
+from tqdm import tqdm  # 用于显示进度条
 
 import pandas as pd
 
@@ -36,32 +38,8 @@ def gen_buy_sell_signal(data_df, profit=1 / 100, period=10):
     sell_rows = signal_df['Sell'] == 1
     signal_df.loc[sell_rows, 'buy_price'] = signal_df.loc[sell_rows, 'close']
     signal_df.loc[sell_rows, 'sell_price'] = signal_df.loc[sell_rows, 'close'] * (1 - profit)
-
     # 初始化 count 列
     signal_df['count'] = 0.01
-
-    # # 遍历每一行，计算 count
-    # last_signal = None
-    # count = 0
-    # for index, row in signal_df.iterrows():
-    #     if row['Buy'] == 1:
-    #         current_signal = 'Buy'
-    #     elif row['Sell'] == 1:
-    #         current_signal = 'Sell'
-    #     else:
-    #         current_signal = None
-    #
-    #     if current_signal == last_signal:
-    #         if current_signal is not None:  # 只有在信号为 Buy 或 Sell 时才增加 count
-    #             count += 1
-    #     else:
-    #         count = 1 if current_signal is not None else 0  # 如果信号改变，并且新信号不是 None，则重置 count 为 1，否则为 0
-    #
-    #     if current_signal is not None:
-    #         signal_df.loc[index, 'count'] = count * 0.001
-    #
-    #     last_signal = current_signal
-    # print(f"gen_buy_sell_signal cost time: {datetime.now() - start_time}")
     return signal_df
 
 
@@ -153,7 +131,7 @@ def calculate_time_diff_minutes(time1, time2):
     return time_diff.total_seconds() / 60
 
 
-def deal_pending_order(pending_order_list, row, position_info, lever, total_money, max_time_diff=2*1):
+def deal_pending_order(pending_order_list, row, position_info, lever, total_money, max_time_diff=2 * 1):
     """
     处理委托单
     """
@@ -236,11 +214,6 @@ def deal_pending_order(pending_order_list, row, position_info, lever, total_mone
     history_order_list.extend([order for order in pending_order_list if order['side'] == 'done'])
     pending_order_list = [order for order in pending_order_list if order['side'] != 'done']
     return pending_order_list, history_order_list, total_money
-
-
-import pandas as pd
-import multiprocessing as mp
-from tqdm import tqdm  # 用于显示进度条
 
 
 def create_order(order_type, row, lever):
@@ -348,49 +321,110 @@ def calculate_combination(args):
     last_data.update({'profit': profit, 'period': period})
     return last_data
 
+def generate_list(start, end, count, decimals):
+  """
+  生成一个从起始值到最终值的数字列表，包含指定数量的元素，并保留指定位数的小数。
 
-def example():
-    backtest_path = 'backtest_result'
-    file_path = 'kline_data/max_1m_data_eth.csv'
-    base_name = file_path.split('/')[-1].split('.')[0]
-    data_df = pd.read_csv(file_path)[-200000:]  # 只取最近1000条数据
-    data_len = len(data_df)
-    profit_list = [x / 2000 + 0.003 for x in range(1, 20)]
-    period_list = list(range(10, 1000, 10))
-    lever = 100
-    init_money = 10000000
+  Args:
+    start: 起始值。
+    end: 最终值。
+    count: 列表元素的数量。
+    decimals: 保留的小数位数。
 
-    # # # # debug
-    # last_data = calculate_combination((0.017, 110, data_df, lever, init_money))
-    # print(last_data)
+  Returns:
+    一个包含指定数量元素的数字列表，从起始值线性递增到最终值，并保留指定位数的小数。
+  """
 
-    # 准备参数组合
-    combinations = [(profit, period, data_df, lever, init_money) for profit in profit_list for period in period_list]
-    print(f"共有 {len(combinations)} 个组合，开始计算...")
+  if count <= 0:
+    return []
+  elif count == 1:
+    return [round(start, decimals)]
 
-    # 使用多进程计算
-    with mp.Pool(processes=os.cpu_count()) as pool:
-        results = list(tqdm(pool.imap(calculate_combination, combinations), total=len(combinations)))
-
-    # 保存结果
-    result_df = pd.DataFrame(results)
-    file_out = f'{backtest_path}/result_{data_len}_{len(combinations)}_{base_name}.csv'
-    result_df.to_csv(file_out, index=False)
-    print(f"结果已保存到 {file_out}")
+  step = (end - start) / (count - 1)
+  result = []
+  for i in range(count):
+    value = start + i * step
+    result.append(round(value, decimals))
+  return result
 
 
-if __name__ == "__main__":
-    result_df = pd.read_csv('backtest_result/result_200000_1881_max_1m_data_eth.csv')
-    result_df1 = pd.read_csv('backtest_result/result_200000_1560_max_1m_data_eth.csv')
-    # 将result_df和result_df1按照profit和period这两列合并
+def merge_dataframes(df_list):
+    """
+    将一个包含多个 DataFrame 的列表按照 'profit' 和 'period' 字段进行合并。
 
-    merged_df = pd.merge(result_df, result_df1, on=['profit', 'period'], how='outer', suffixes=('_200000', '_100000'))
+    Args:
+      df_list: 一个列表，每个元素都是一个 pandas DataFrame。
+
+    Returns:
+      一个合并后的 pandas DataFrame，如果列表为空，则返回一个空的 DataFrame。
+    """
+
+    if not df_list:
+        return pd.DataFrame()
+
+    merged_df = df_list[0]
+    for i in range(1, len(df_list)):
+        merged_df = pd.merge(merged_df, df_list[i], on=['profit', 'period'], how='outer')
+
     new_cols_order = merged_df.columns.tolist()
     new_cols_order = sorted(new_cols_order)
     merged_df = merged_df.reindex(columns=new_cols_order)
+    merged_df['score'] = 10000 * merged_df['profit_ratio'] * merged_df['profit_ratio_y']
+    return merged_df
 
-    merged_df['score'] = 10000 * merged_df['profit_ratio_200000'] * merged_df['profit_ratio_100000']
+def example():
+    time.sleep(60 * 60 * 3)
+    backtest_path = 'backtest_result'
+    file_path = 'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv'
+    gen_signal_method = 'price_extremes'
+    base_name = file_path.split('/')[-1].split('.')[0]
+    profit_list = generate_list(0.001, 0.03, 300, 4)
+    period_list = generate_list(10, 5000, 100, 0)
+    # 将period_list变成int
+    period_list = [int(period) for period in period_list]
+    lever = 100
+    init_money = 10000000
+    origin_data_df = pd.read_csv(file_path)  # 只取最近1000条数据
+    origin_data_df['timestamp'] = pd.to_datetime(origin_data_df['timestamp'])
 
-    # result = pd.concat([result_df, result_df1])
-    result_df['score'] = 10000 * result_df['profit_ratio'] / result_df['max_cost_money']
+
+    longest_periods_info = {
+        'longest_up': '2024-01-23_2024-03-18',
+        "longest_down": '2024-07-29_2024-09-07',
+        "longest_sideways": '2024-08-29_2024-10-17'
+    }
+    for key, value in longest_periods_info.items():
+        start_time_str, end_time_str = value.split('_')
+        start_time = pd.to_datetime(start_time_str)
+        end_time = pd.to_datetime(end_time_str)
+        data_df = origin_data_df[(origin_data_df['timestamp'] >= start_time) & (origin_data_df['timestamp'] <= end_time)]
+
+        data_len = len(data_df)
+
+        # 获取data_df的初始时间与结束时间
+        start_time = data_df.iloc[0].timestamp
+        end_time = data_df.iloc[-1].timestamp
+        print(f"开始时间：{start_time}，结束时间：{end_time} 长度：{data_len} key = {key}")
+        # 生成time_key
+        time_key_str = f"{start_time.strftime('%Y%m%d%H%M%S')}_{end_time.strftime('%Y%m%d%H%M%S')}"
+
+        # 准备参数组合
+        combinations = [(profit, period, data_df, lever, init_money) for profit in profit_list for period in period_list]
+        print(f"共有 {len(combinations)} 个组合，开始计算...")
+
+        # 使用多进程计算
+        with mp.Pool(processes=os.cpu_count()) as pool:
+            results = list(tqdm(pool.imap(calculate_combination, combinations), total=len(combinations)))
+
+        # 保存结果
+        result_df = pd.DataFrame(results)
+        file_out = f'{backtest_path}/result_{data_len}_{len(combinations)}_{base_name}_{time_key_str}_{gen_signal_method}_{key}.csv'
+        result_df.to_csv(file_out, index=False)
+        print(f"结果已保存到 {file_out}")
+
+
+if __name__ == "__main__":
+    result_df1 = pd.read_csv('backtest_result/result_50401_10000_origin_data_1m_10000000_ETH-USDT-SWAP_20240205000000_20240311000000_price_extremes_longest_up.csv')
+    result_df2 = pd.read_csv(
+        'backtest_result/result_70561_10000_origin_data_1m_10000000_ETH-USDT-SWAP_20240720000000_20240907000000_price_extremes_longest_down.csv')
     example()

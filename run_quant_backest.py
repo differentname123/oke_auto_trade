@@ -319,14 +319,66 @@ def calculate_combination(args):
     last_data.update({'profit': profit, 'period': period})
     return last_data
 
+def generate_list(start, end, count, decimals):
+  """
+  生成一个从起始值到最终值的数字列表，包含指定数量的元素，并保留指定位数的小数。
+
+  Args:
+    start: 起始值。
+    end: 最终值。
+    count: 列表元素的数量。
+    decimals: 保留的小数位数。
+
+  Returns:
+    一个包含指定数量元素的数字列表，从起始值线性递增到最终值，并保留指定位数的小数。
+  """
+
+  if count <= 0:
+    return []
+  elif count == 1:
+    return [round(start, decimals)]
+
+  step = (end - start) / (count - 1)
+  result = []
+  for i in range(count):
+    value = start + i * step
+    result.append(round(value, decimals))
+  return result
+
+
+def merge_dataframes(df_list):
+    """
+    将一个包含多个 DataFrame 的列表按照 'profit' 和 'period' 字段进行合并。
+
+    Args:
+      df_list: 一个列表，每个元素都是一个 pandas DataFrame。
+
+    Returns:
+      一个合并后的 pandas DataFrame，如果列表为空，则返回一个空的 DataFrame。
+    """
+
+    if not df_list:
+        return pd.DataFrame()
+
+    merged_df = df_list[0]
+    for i in range(1, len(df_list)):
+        merged_df = pd.merge(merged_df, df_list[i], on=['profit', 'period'], how='outer')
+
+    new_cols_order = merged_df.columns.tolist()
+    new_cols_order = sorted(new_cols_order)
+    merged_df = merged_df.reindex(columns=new_cols_order)
+    merged_df['score'] = 10000 * merged_df['profit_ratio'] * merged_df['profit_ratio_y']
+    return merged_df
 
 def example():
     backtest_path = 'backtest_result'
-    file_path = 'kline_data/max_1m_data.csv'
+    file_path = 'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv'
     gen_signal_method = 'price_extremes'
     base_name = file_path.split('/')[-1].split('.')[0]
-    profit_list = [x / 2000 + 0.001 for x in range(1, 60)]
-    period_list = list(range(10, 10000, 100))
+    profit_list = generate_list(0.001, 0.03, 300, 4)
+    period_list = generate_list(10, 5000, 100, 0)
+    # 将period_list变成int
+    period_list = [int(period) for period in period_list]
     lever = 100
     init_money = 10000000
     origin_data_df = pd.read_csv(file_path)  # 只取最近1000条数据
@@ -334,9 +386,9 @@ def example():
 
 
     longest_periods_info = {
-        'longest_up': '2024-09-08_2024-12-16',
-        "longest_down": '2024-04-14_2024-06-15',
-        "longest_sideways": '2024-03-12_2024-10-03'
+        'longest_up': '2024-02-05_2024-03-11',
+        "longest_down": '2024-07-20_2024-09-07',
+        "longest_sideways": '2024-08-07_2024-09-17'
     }
     for key, value in longest_periods_info.items():
         start_time_str, end_time_str = value.split('_')

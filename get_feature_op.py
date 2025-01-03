@@ -604,13 +604,13 @@ def generate_signals(df):
 
     df = df.copy()  # 避免修改原始 DataFrame
     # df = generate_volume_spike_signals(df)
-    # df = generate_price_extremes_reverse_signals(df)
-    # df = generate_price_extremes_signals(df)
-    # 生成单一 MA 信号
-    df = generate_signals_single_ma(df)
-
-    # 生成双 MA 信号
-    df = generate_signals_double_ma(df)
+    # df = generate_price_extremes_reverse_signals(df, [x for x in range(10, 10000, 10)])
+    df = generate_price_extremes_signals(df, [x for x in range(10, 10000, 10)])
+    # # 生成单一 MA 信号
+    # df = generate_signals_single_ma(df)
+    #
+    # # 生成双 MA 信号
+    # df = generate_signals_double_ma(df)
     # df = generate_body_wick_signals(df)
     # df = generate_consecutive_and_large_candle_signals(df)
     # df = generate_ichimoku_signals(df)
@@ -1082,7 +1082,7 @@ def generate_consecutive_and_large_candle_signals(df):
 
     return df
 
-def generate_price_extremes_reverse_signals(df):
+def generate_price_extremes_reverse_signals(df,periods=[20]):
     """
     生成价格极值反转信号：
     如果上一个时间点创造了最高或最低价，并且当前价格反转，则生成信号。
@@ -1093,7 +1093,6 @@ def generate_price_extremes_reverse_signals(df):
     Returns:
         pd.DataFrame: 添加了价格极值信号列的 DataFrame。
     """
-    periods = [10, 20, 40, 80, 100, 160, 200, 260,300,360]  # 可以根据需要调整周期
     signals = {}
     for period in periods:
         # 计算指定周期内的最高价和最低价
@@ -1856,7 +1855,7 @@ def download_data():
     inst_id_list = [ 'BTC-USDT-SWAP','ETH-USDT-SWAP','SOL-USDT-SWAP','TON-USDT-SWAP', 'DOGE-USDT-SWAP', 'XRP-USDT-SWAP', 'PEPE-USDT-SWAP']
     if not os.path.exists(backtest_path):
         os.makedirs(backtest_path)
-    bar_list = ['1m', '1s', '5m', '15m', '30m', '1h', '4h']
+    bar_list = ['1m', '1s', '5m', '15m', '30m', '1H', '4H']
     max_candles_list = [10000000]
     for max_candles in max_candles_list:
         for bar in bar_list:
@@ -1866,43 +1865,157 @@ def download_data():
                 if not is_reload and os.path.exists(final_file_path) and os.path.getsize(final_file_path) > 1024:
                     print('已经存在该文件，直接读取')
                 else:
-                    print('不存在该文件，开始获取')
+                    print(f'不存在该文件，开始获取 {final_file_path}')
                     data = get_train_data(inst_id=inst_id, bar=bar, max_candles=max_candles)
                     data.to_csv(final_file_path, index=False)
 
 def example():
-    download_data()
-    # run_backtest()
+    # download_data()
+    run_backtest()
     # analyze_backtest_results()
     # run()
 
 
+def backtest_strategy_op(signal_data_df):
+    """
+    回测策略，生成适合保存为 CSV 的扁平化结果数据。
+
+    Args:
+        signal_data_df (pd.DataFrame): 包含信号列和目标列的 DataFrame。
+                                        需要包含 '_Buy' 或 '_Sell' 结尾的列作为买入/卖出信号，
+                                        以及包含 'max' 的列作为目标列（未来涨跌幅）。
+
+    Returns:
+        pd.DataFrame: 包含扁平化回测结果的 DataFrame。
+    """
+    start_time = time.time()
+
+    # 提取买入和卖出信号列，以及目标列
+    buy_signals = [col for col in signal_data_df.columns if col.endswith('_Buy')]
+    sell_signals = [col for col in signal_data_df.columns if col.endswith('_Sell')]
+    target_cols = [col for col in signal_data_df.columns if 'max' in col]
+    signals = buy_signals + sell_signals
+
+    if not target_cols:
+        print("警告：未找到包含 'max' 的目标列。")
+        return pd.DataFrame()
+
+    results = []
+    quantiles = [0.01, 0.02, 0.03, 0.04, 0.05]
+    total_samples = len(signal_data_df)
+
+    # -----------------------------
+    # 优化点 1：预先计算并缓存 baseline_quantile_values
+    # -----------------------------
+    # 用于存储 baseline_quantile_values，减少重复计算
+    baseline_quantile_values = {}
+
+    for target_col in target_cols:
+        key_target_col = target_col.replace('close_max_', '')
+
+        # 对于每个目标列，预先计算并缓存不同分位数的值
+        for q in quantiles:
+            # 计算分位数值
+            quantile_value = signal_data_df[target_col].quantile(q)
+            # 缓存结果
+            baseline_quantile_values[(target_col, q)] = quantile_value
+
+            # 将结果添加到 results 列表中
+            results.append({
+                "signal": "Baseline",
+                "target": key_target_col,
+                "quantile": q,
+                "quantile_value": quantile_value,
+                "diff_vs_baseline": 0.0,  # 基准策略与自身的差异为 0
+                "count": total_samples,
+                "ratio": 1.0
+            })
+
+    # -----------------------------
+    # 优化点 2：使用布尔掩码和向量化计算
+    # -----------------------------
+    # 预先计算所有信号的布尔掩码和计数
+    signal_masks = {}
+    signal_counts = {}
+    signal_ratios = {}
+
+    for signal in signals:
+        # 计算信号掩码
+        signal_mask = (signal_data_df[signal] == 1)
+        signal_masks[signal] = signal_mask
+        # 计算信号对应的样本数量和比例
+        signal_count = signal_mask.sum()
+        signal_counts[signal] = signal_count
+        signal_ratio = round(signal_count / total_samples, 4) if total_samples > 0 else 0
+        signal_ratios[signal] = signal_ratio
+
+    # -----------------------------
+    # 优化点 3：减少嵌套循环层次
+    # -----------------------------
+    # 遍历所有信号，目标列和分位数，计算结果
+    for signal in signals:
+        signal_mask = signal_masks[signal]
+        signal_count = signal_counts[signal]
+        signal_ratio = signal_ratios[signal]
+
+        for target_col in target_cols:
+            key_target_col = target_col.replace('close_max_', '')
+            for q in quantiles:
+                baseline_quantile_value = baseline_quantile_values[(target_col, q)]
+
+                if signal_count > 0:
+                    # 使用布尔掩码筛选数据并计算分位数值
+                    quantile_value = signal_data_df.loc[signal_mask, target_col].quantile(q)
+                    # 计算与基准策略的差异
+                    diff_vs_baseline = quantile_value - baseline_quantile_value
+                else:
+                    quantile_value = np.nan
+                    diff_vs_baseline = np.nan
+
+                # 将结果添加到 results 列表中
+                results.append({
+                    "signal": signal,
+                    "target": key_target_col,
+                    "quantile": q,
+                    "quantile_value": quantile_value,
+                    "diff_vs_baseline": diff_vs_baseline,
+                    "count": signal_count,
+                    "ratio": signal_ratio
+                })
+    # 将 results 转化为 DataFrame 格式
+    results_df = pd.DataFrame(results)
+    print(f"回测策略完成，耗时 {time.time() - start_time:.2f} 秒。")
+    return results_df
 
 
 def run_backtest():
     backtest_path = 'kline_data'
     if not os.path.exists(backtest_path):
         os.makedirs(backtest_path)
+    inst_id_list = ['BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'TON-USDT-SWAP', 'DOGE-USDT-SWAP', 'XRP-USDT-SWAP', 'PEPE-USDT-SWAP']
+
     base_file_path = 'origin_data.csv'
     bar_list = ['1m', '1m', '5m', '15m', '30m', '1h', '4h']
-    max_candles_list = [1000000, 1000000]
-    for bar in bar_list:
-        full_final_file_path = f'{backtest_path}/{base_file_path[:-4]}_{bar}_{max_candles_list[-1]}.csv'
-        full_data = pd.read_csv(full_final_file_path)
-        for max_candles in max_candles_list:
-            try:
-                data = full_data[-max_candles:]
-                final_output_file_path = f'{backtest_path}/statistic_{base_file_path[:-4]}_{bar}_{max_candles}.csv'
-                # 去除后60行
-                data = data[:-60]
-                signal_data = generate_signals(data)
-                backtest_df = backtest_strategy(signal_data)
-                backtest_df.to_csv(final_output_file_path, index=False)
-                print(f'已经保存至{final_output_file_path}')
-                return
-            except Exception as e:
-                print(e)
-                continue
+    max_candles_list = [10000000, 1000000]
+
+    for inst_id in inst_id_list:
+        for bar in bar_list:
+            for max_candles in max_candles_list:
+                full_final_file_path = f'{backtest_path}/{base_file_path[:-4]}_{bar}_{max_candles}_{inst_id}.csv'
+                full_data = pd.read_csv(full_final_file_path)
+                try:
+                    final_output_file_path = f'{backtest_path}/statistic_{base_file_path[:-4]}_{bar}_{max_candles}.csv'
+                    # 去除后60行
+                    data = full_data[:-10000]
+                    signal_data = generate_signals(data)
+                    backtest_df = backtest_strategy(signal_data)
+                    backtest_df_op = backtest_strategy_op(signal_data)
+                    backtest_df.to_csv(final_output_file_path, index=False)
+                    print(f'已经保存至{final_output_file_path}')
+                    return
+                except Exception as e:
+                    print(e)
+                    continue
 
 
 if __name__ == '__main__':

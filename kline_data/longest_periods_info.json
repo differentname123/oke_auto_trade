@@ -1,0 +1,5 @@
+    btc_longest_periods_info = {
+        'longest_up': '2024-10-16_2024-12-16',
+        "longest_down": '2023-04-14_2023-06-15',
+        "longest_sideways": '2024-03-28_2024-05-28'
+    }
