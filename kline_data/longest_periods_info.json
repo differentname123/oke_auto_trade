@@ -1,5 +1,22 @@
-    btc_longest_periods_info = {
-        'longest_up': '2024-10-16_2024-12-16',
-        "longest_down": '2023-04-14_2023-06-15',
-        "longest_sideways": '2024-03-28_2024-05-28'
-    }
+{
+  "origin_data_1m_10000000_BTC-USDT-SWAP": {
+    "longest_up": "2024-10-16_2024-12-16",
+    "longest_down": "2023-04-14_2023-06-15",
+    "longest_sideways": "2024-03-28_2024-05-28"
+  },
+  "origin_data_1m_10000000_ETH-USDT-SWAP": {
+    "longest_up": "2024-02-05_2024-03-11",
+    "longest_down": "2024-07-20_2024-09-07",
+    "longest_sideways": "2024-08-07_2024-09-17"
+  },
+  "origin_data_1m_10000000_SOL-USDT-SWAP": {
+    "longest_up": "2024-01-23_2024-03-18",
+    "longest_down": "2024-07-29_2024-09-07",
+    "longest_sideways": "2024-08-29_2024-10-17"
+  },
+  "origin_data_1m_10000000_TON-USDT-SWAP": {
+    "longest_up": "2024-03-10_2024-04-11",
+    "longest_down": "2024-07-03_2024-08-05",
+    "longest_sideways": "2024-10-04_2024-11-10"
+  }
+}

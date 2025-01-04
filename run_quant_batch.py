@@ -369,7 +369,7 @@ def merge_dataframes(df_list):
     new_cols_order = merged_df.columns.tolist()
     new_cols_order = sorted(new_cols_order)
     merged_df = merged_df.reindex(columns=new_cols_order)
-    merged_df['score'] = 10000 * merged_df['profit_ratio'] * merged_df['profit_ratio_y']
+    merged_df['score'] = 10000 * merged_df['profit_ratio'] * merged_df['profit_ratio_y'] * merged_df['profit_ratio_x']
     return merged_df
 
 def example():
@@ -424,7 +424,9 @@ def example():
 
 
 if __name__ == "__main__":
-    result_df1 = pd.read_csv('backtest_result/result_50401_10000_origin_data_1m_10000000_ETH-USDT-SWAP_20240205000000_20240311000000_price_extremes_longest_up.csv')
-    result_df2 = pd.read_csv(
-        'backtest_result/result_70561_10000_origin_data_1m_10000000_ETH-USDT-SWAP_20240720000000_20240907000000_price_extremes_longest_down.csv')
+    result_df1 = pd.read_csv('backtest_result/result_87841_2500_origin_data_1m_10000000_BTC-USDT-SWAP_20241016000000_20241216000000_price_unextremes_longest_up.csv')
+    result_df2 = pd.read_csv('backtest_result/result_89281_2500_origin_data_1m_10000000_BTC-USDT-SWAP_20230414000000_20230615000000_price_unextremes_longest_down.csv')
+    result_df3 = pd.read_csv('backtest_result/result_87841_2500_origin_data_1m_10000000_BTC-USDT-SWAP_20240328000000_20240528000000_price_unextremes_longest_sideways.csv')
+    result_list = [result_df1, result_df2, result_df3]
+    merged_df = merge_dataframes(result_list)
     example()

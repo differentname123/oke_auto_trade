@@ -1,861 +1,465 @@
-import datetime
 import os
+import multiprocessing as mp
 import time
-import logging
 
-import numpy as np
-import okx.Trade as Trade
-import okx.MarketData as Market
-import okx.Account as Account
+from tqdm import tqdm  # 用于显示进度条
+
 import pandas as pd
 
-from common_utils import get_config
-
-"""
-当前策略说明:
-    1.直接以当前价格比较大的偏差买入和卖出，最求高利润，可能交易次数很少。
-
-历史策略记录:
-    1.负偏差价格下单，基本上一下单就会秒成，增加下单的成功率（相应的盈利偏差就增加了 整体盈利差保持在90）
-    2.多空差异大时会减小多的那个方向的买入价格（认为下降空间很大或者不想继续增加这个方向的仓位了）。会增加小的那个方向的止盈利润（未改变买入价 表示还是希望能够买入增加持仓量。同时增加止盈是认为如果继续往反方向变化的话能够盈利多一点 减小损失）
-    3.价格相较于上一次的触发价格相差10才进行新的下单（避免单子都分布在一个价格区间）
-    效果:
-        还是无法应对单边价格变化的问题，如果价格一直上涨或者下跌，会导致持仓比例不断增加，最终导致爆仓。
-"""
-
-# 日志配置
-logging.basicConfig(level=logging.WARNING, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
-
-# 设置代理（如果需要）
-os.environ['HTTP_PROXY'] = 'http://127.0.0.1:7890'
-os.environ['HTTPS_PROXY'] = 'http://127.0.0.1:7890'
-
-# 全局延时配置
-DELAY_SHORT = 1  # 短延时（秒）
-
-total_profit = 100
-OFFSET = 1000
-PROFIT = total_profit - OFFSET
-# 配置区域
-CONFIG = {
-    "INST_ID": "BTC-USDT-SWAP",  # 交易对
-    "ORDER_SIZE": 100,  # 每次固定下单量
-    "PRICE_THRESHOLD": 500,  # 最新价格变化的阈值
-    "OFFSET": OFFSET,  # 下单价格偏移量（基础值）
-    "PROFIT": PROFIT  # 止盈偏移量（基础值）
-}
-
-MAX_POSITION_RATIO = 1  # 最大持仓比例为1
-flag = "1"  # 实盘: 0, 模拟盘: 1
-
-# API 初始化
-if flag == "1":
-    apikey = get_config('api_key')
-    secretkey = get_config('secret_key')
-    passphrase = get_config('passphrase')
-else:
-    apikey = get_config('true_api_key')
-    secretkey = get_config('true_secret_key')
-    passphrase = get_config('true_passphrase')
-
-tradeAPI = Trade.TradeAPI(apikey, secretkey, passphrase, False, flag)
-marketAPI = Market.MarketAPI(apikey, secretkey, passphrase, False, flag)
-accountAPI = Account.AccountAPI(apikey, secretkey, passphrase, False, flag)
+from get_feature_op import generate_price_extremes_signals
 
 
-class LatestDataManager:
-    def __init__(self, capacity):
-        self.capacity = capacity
-        self.max_single_size = 100 # 底层数据最大单次获取数量
-        self.data_df = get_train_data(max_candles=self.capacity)
+def gen_buy_sell_signal(data_df, profit=1 / 100, period=10):
+    """
+    为data生成相应的买卖信号，并生成相应的buy_price, sell_price
+    :param data_df:
+    :param profit:
+    :param period:
+    :return:
+    """
+    # start_time = datetime.now()
+    signal_df = generate_price_extremes_signals(data_df, periods=[period])
+    # 找到包含Buy的列和包含Sell的列名
+    buy_col = [col for col in signal_df.columns if 'Buy' in col]
+    sell_col = [col for col in signal_df.columns if 'Sell' in col]
+    # 将buy_col[0]重命名为Buy
+    signal_df.rename(columns={buy_col[0]: 'Buy'}, inplace=True)
+    signal_df.rename(columns={sell_col[0]: 'Sell'}, inplace=True)
+    # 初始化 buy_price 和 sell_price 列，可以设置为 NaN 或者其他默认值
+    signal_df['buy_price'] = None
+    signal_df['sell_price'] = None
 
-    def get_newest_data(self):
-        recent_data_df = get_train_data(max_candles=self.max_single_size, is_newest=True)
-        # 判断recent_data_df第一个时间戳（timestamp）是否在data_df中
-        if recent_data_df['timestamp'].iloc[0] in self.data_df['timestamp'].values:
-            print('历史数据在最新数据中，更新数据')
-            # 合并两个df
-            self.data_df = pd.concat([recent_data_df, self.data_df], ignore_index=True)
-            # 去重
-            self.data_df.drop_duplicates(subset=['timestamp'], keep='first', inplace=True)
-            # 排序
-            self.data_df.sort_values(by='timestamp', ascending=True, inplace=True)
-            # 保留最新的capacity条数据
-            self.data_df = self.data_df.iloc[-self.capacity:]
-            return self.data_df
+    # 找到 Buy 为 1 的行，设置 buy_price 和 sell_price
+    buy_rows = signal_df['Buy'] == 1
+    signal_df.loc[buy_rows, 'buy_price'] = signal_df.loc[buy_rows, 'close']
+    signal_df.loc[buy_rows, 'sell_price'] = signal_df.loc[buy_rows, 'close'] * (1 + profit)
 
-        else:
-            print('历史数据不在最新数据中，重新获取数据')
-            self.data_df = get_train_data(max_candles=self.capacity)
-            return self.data_df
-
-
-
-
-
-
-
-# 通用工具函数
-def safe_api_call(api_function, *args, **kwargs):
-    """安全调用 API，捕获异常"""
-    try:
-        return api_function(*args, **kwargs)
-    except Exception as e:
-        logger.error(f"调用 {api_function.__name__} 失败：{e}")
-        return None
+    # 找到 Sell 为 1 的行，设置 sell_price 和 buy_price
+    sell_rows = signal_df['Sell'] == 1
+    signal_df.loc[sell_rows, 'buy_price'] = signal_df.loc[sell_rows, 'close']
+    signal_df.loc[sell_rows, 'sell_price'] = signal_df.loc[sell_rows, 'close'] * (1 - profit)
+    # 初始化 count 列
+    signal_df['count'] = 0.01
+    return signal_df
 
 
-def get_open_orders():
-    """获取未完成的订单"""
-    return safe_api_call(tradeAPI.get_order_list, instType="SWAP")
-
-def get_alg_open_orders():
-    """获取未完成的订单"""
-    return safe_api_call(tradeAPI.order_algos_list, ordType="move_order_stop")
-
-
-def cancel_order(inst_id, order_id):
-    """撤销订单"""
-    return safe_api_call(tradeAPI.cancel_order, instId=inst_id, ordId=order_id)
-
-def cancel_alg_order(inst_id, order_id):
-    """撤销订单"""
-    param = [{"instId": inst_id, "algoId": order_id}]
-    return safe_api_call(tradeAPI.cancel_algo_order, param)
-
-
-def get_latest_price(inst_id):
-    """获取最新价格"""
-    ticker = safe_api_call(marketAPI.get_ticker, inst_id)
-    if ticker and 'data' in ticker and len(ticker['data']) > 0:
-        return float(ticker['data'][0]['last'])  # 最新成交价
-    return None
-
-
-def get_positions(inst_id):
-    """获取合约仓位信息"""
-    pos_info = safe_api_call(accountAPI.get_positions, instType="SWAP", instId=inst_id)
-    if pos_info and 'data' in pos_info:
-        return pos_info['data']
-    return []
-
-def get_account_equity():
-    """获取账户净资产（权益）"""
-    account_info = safe_api_call(accountAPI.get_account_balance)
-    if account_info and 'data' in account_info:
-        # 示例：从data中找到总权益（各币种相加或使用USDT权益）
-        # 这里假设所有权益都在 USDT 或统一计价下
-        # 请根据实际返回结构自行修改解析逻辑
-        total_equity = 0.0
-        for item in account_info['data'][0]['details']:
-            if item['ccy'] == 'USDT':
-                total_equity += float(item['eq'])
-        return total_equity
-    return 0.0
-
-def create_take_profit_order(inst_id, pos_side, tp_price, quantity):
-    """根据方向、价格和数量创建止盈单"""
-    if pos_side == 'long':
-        side = 'sell'
-    else:
-        side = 'buy'
-    quantity = round(quantity, 1)
-    result = tradeAPI.place_algo_order(
-        instId=inst_id,
-        tdMode='cross',
-        side=side,
-        posSide=pos_side,
-        ordType='conditional',
-        sz=str(quantity),  # 设置止盈单的数量
-        tpTriggerPx=str(tp_price),
-        tpOrdPx=str(tp_price)
-    )
-    print(f"创建止盈单：{result}")
-
-
-def get_position_ratio(inst_id, latest_price):
-    """计算多头和空头方向的仓位价值比例，并对没有止盈单的仓位设置相应的止盈单"""
-    positions = get_positions(inst_id)
-    total_equity = get_account_equity()
-    total_equity *= 10000  # 账户总权益扩大10000倍
-    if total_equity == 0:
-        return 0, 0, 0, 0
-
-    long_value = 0.0
-    short_value = 0.0
-    avg_long_price = 0.0
-    avg_short_price = 0.0
-    long_position_exists = False
-    short_position_exists = False
+def analysis_position(pending_order_list, row, total_money, leverage=100):
+    """
+    分析持仓情况，得到当前的持仓数量，持仓均价，可使用资金
+    :param pending_order_list: 持仓订单列表
+    :param row: 包含当前市场价格的字典，包含high、low、close
+    :param total_money: 总资金
+    :param leverage: 杠杆倍数，默认100倍
+    :return: 持仓数量、持仓均价、不同价格下的可用资金
+    """
     long_sz = 0
     short_sz = 0
+    long_cost = 0
+    short_cost = 0
+    long_avg_price = 0
+    short_avg_price = 0
 
-    try:
-        # 获取所有当前的止盈单
-        take_profit_orders = tradeAPI.order_algos_list(ordType="conditional", instId=inst_id)
-        if 'data' not in take_profit_orders:
-            raise ValueError("返回的止盈单数据异常，未找到data字段。")
+    # 提取市场价格
+    high = row.high
+    low = row.low
+    close = row.close
 
-        # 获取止盈单列表
-        take_profit_orders_data = take_profit_orders['data']
+    # 计算多空仓位的总大小和成本
+    for order in pending_order_list:
+        if order['side'] == 'ping':
+            if order['type'] == 'long':
+                long_sz += order['count']
+                long_cost += order['count'] * order['buy_price']
+            elif order['type'] == 'short':
+                short_sz += order['count']
+                short_cost += order['count'] * order['buy_price']
 
-        # 存储已有止盈单的仓位信息，方便后续查找
-        existing_long_tp_qty = 0
-        existing_short_tp_qty = 0
-        existing_long_tps = []  # 存储多单止盈单的信息 (sz, algoId, cTime)
-        existing_short_tps = [] # 存储空单止盈单的信息 (sz, algoId, cTime)
+    # 计算多空仓位的平均价格
+    if long_sz > 0:
+        long_avg_price = long_cost / long_sz
+    if short_sz > 0:
+        short_avg_price = short_cost / short_sz
 
-        # 当前时间（毫秒级）
-        current_time = int(time.time() * 1000)
+    # 计算浮动盈亏
+    def calculate_floating_profit(price):
+        long_profit = long_sz * (price - long_avg_price) if long_sz > 0 else 0
+        short_profit = short_sz * (short_avg_price - price) if short_sz > 0 else 0
+        return long_profit + short_profit
 
-        # 遍历止盈单，统计数量并取消超时的止盈单
-        for order in take_profit_orders_data:
-            if order['side'] == 'sell':  # 多单止盈
-                existing_long_tp_qty += float(order['sz']) if order['sz'] != "" else 0
-                existing_long_tps.append({
-                    'sz': float(order['sz']) if order['sz'] != "" else 0,
-                    'algoId': order['algoId'],
-                    'cTime': int(order['cTime'])
-                })
-                # 检查是否超过10小时，超过则取消
-                if current_time - int(order['cTime']) > 10 * 60 * 60 * 1000:
-                    algo_orders = [{"instId": inst_id, "algoId": order['algoId']}]
-                    tradeAPI.cancel_algo_order(algo_orders)
-                    print(f"取消超过10小时的多单止盈单，algoId: {order['algoId']}")
-            elif order['side'] == 'buy':  # 空单止盈
-                existing_short_tp_qty += float(order['sz']) if order['sz'] != "" else 0
-                existing_short_tps.append({
-                    'sz': float(order['sz']) if order['sz'] != "" else 0,
-                    'algoId': order['algoId'],
-                    'cTime': int(order['cTime'])
-                })
-                # 检查是否超过2小时，超过则取消
-                if current_time - int(order['cTime']) > 2 * 60 * 60 * 1000:
-                    algo_orders = [{"instId": inst_id, "algoId": order['algoId']}]
-                    tradeAPI.cancel_algo_order(algo_orders)
-                    print(f"取消超过2小时的空单止盈单，algoId: {order['algoId']}")
+    close_profit = calculate_floating_profit(close)
+    high_profit = calculate_floating_profit(high)
+    low_profit = calculate_floating_profit(low)
 
-        # 计算仓位价值
-        for pos in positions:
-            if pos['posSide'] == 'long':
-                long_sz = float(pos['pos']) if pos['pos'] != "" else 0
-                long_value += long_sz * latest_price
-                avg_long_price = float(pos['avgPx']) if pos['avgPx'] != "" else 0
-                long_position_exists = True
-            elif pos['posSide'] == 'short':
-                short_sz = float(pos['pos']) if pos['pos'] != "" else 0
-                short_value += short_sz * latest_price
-                avg_short_price = float(pos['avgPx']) if pos['avgPx'] != "" else 0
-                short_position_exists = True
+    # 计算保证金占用
+    def calculate_margin():
+        long_margin = (long_sz * long_avg_price) / leverage if long_sz > 0 else 0
+        short_margin = (short_sz * short_avg_price) / leverage if short_sz > 0 else 0
+        net_margin = long_margin + short_margin
+        return net_margin
 
-        long_ratio = long_value / total_equity if total_equity > 0 else 0
-        short_ratio = short_value / total_equity if total_equity > 0 else 0
+    margin = calculate_margin()
 
-        print(f"多头数量: {long_sz}, 空头数量: {short_sz}, 多头占比: {long_ratio}, 空头占比: {short_ratio} 已有多单止盈数量: {existing_long_tp_qty}, 已有空单止盈数量: {existing_short_tp_qty}")
-        diff_long_sz = long_sz - existing_long_tp_qty
-        # 为多单设置止盈单
-        if long_position_exists and diff_long_sz > 0:
-            tp_price_long = avg_long_price + total_profit  # 多单止盈价格
-            tp_price_long = max(tp_price_long, latest_price)  # 限制止盈价格
-            create_take_profit_order(inst_id, 'long', tp_price_long, diff_long_sz)
-            print(f"为多单设置止盈单，止盈价格: {tp_price_long}, 数量: {long_sz}")
-        diff_short_size = short_sz - existing_short_tp_qty
-        # 为空单设置止盈单
-        if short_position_exists and diff_short_size > 0:
-            tp_price_short = avg_short_price - total_profit  # 空单止盈价格
-            tp_price_short = min(tp_price_short, latest_price)  # 限制止盈价格
-            create_take_profit_order(inst_id, 'short', tp_price_short, diff_short_size)
-            print(f"为空单设置止盈单，止盈价格: {tp_price_short}, 数量: {short_sz}")
-        # 计算还可以开多少单
-        return long_sz, short_sz, avg_long_price, avg_short_price
+    # 计算可用资金
+    close_available_funds = total_money + close_profit - margin
+    high_available_funds = total_money + high_profit - margin
+    low_available_funds = total_money + low_profit - margin
+    final_total_money_if_close = total_money + close_profit
 
-    except Exception as e:
-        print(f"发生错误: {e}")
-        return 0, 0, 0, 0
+    # 判断是否有小于0的可用资金
+    if close_available_funds < 0 or high_available_funds < 0 or low_available_funds < 0:
+        print("可用资金不足，无法进行交易！")
+
+    return {
+        'timestamp': row.timestamp,
+        'long_sz': long_sz,
+        'short_sz': short_sz,
+        'long_avg_price': long_avg_price,
+        'short_avg_price': short_avg_price,
+        'close_available_funds': close_available_funds,
+        'high_available_funds': high_available_funds,
+        'low_available_funds': low_available_funds,
+        'final_total_money_if_close': final_total_money_if_close
+
+    }
 
 
-
-def release_alg_old_funds(inst_id, remain_count=1):
-    """每个方向只保留最新的remain_count个订单。"""
-    alg_open_orders = get_alg_open_orders()
-    id_key = 'algoId'
-    time_key = 'createTime'  # 假设你的订单数据中有创建时间
-
-    if not alg_open_orders:
-        logger.warning("当前没有未完成的移动止盈止损订单。")
-        return
-
-    buy_orders = [order for order in alg_open_orders['data'] if order['side'] == 'buy']
-    sell_orders = [order for order in alg_open_orders['data'] if order['side'] == 'sell']
-
-    # 按照创建时间倒序排序，最新的在前面
-    buy_orders.sort(key=lambda order: order.get(time_key, 0), reverse=True)
-    sell_orders.sort(key=lambda order: order.get(time_key, 0), reverse=True)
-
-    # 取消多余的买单
-    if len(buy_orders) > remain_count:
-        orders_to_cancel = buy_orders[remain_count:]
-        for order in orders_to_cancel:
-            order_id = order[id_key]
-            logger.warning(f"取消多余的买单 {order_id}，保留最新的 {remain_count} 个。")
-            cancel_alg_order(inst_id, order_id)
-
-    # 取消多余的卖单
-    if len(sell_orders) > remain_count:
-        orders_to_cancel = sell_orders[remain_count:]
-        for order in orders_to_cancel:
-            order_id = order[id_key]
-            logger.warning(f"取消多余的卖单 {order_id}，保留最新的 {remain_count} 个。")
-            cancel_alg_order(inst_id, order_id)
+def calculate_time_diff_minutes(time1, time2):
+    """
+    计算两个 datetime 对象之间相差的分钟数。
+    """
+    time_diff = time1 - time2
+    return time_diff.total_seconds() / 60
 
 
-def release_near_funds(inst_id):
-    """根据当前价格和订单价格差距，取消指定数量的订单，强制释放同一方向中，委托价格差距小于100的订单。"""
-    open_orders = get_open_orders()
-    if not open_orders:
-        logger.warning("当前没有未完成的订单。")
-        return
+def deal_pending_order(pending_order_list, row, position_info, lever, total_money, max_time_diff=2 * 1):
+    """
+    处理委托单
+    """
+    max_sell_time_diff = 1000000  # 最大卖出时间差
+    high = row.high
+    low = row.low
+    close = row.close
+    close_available_funds = position_info['close_available_funds']
+    timestamp = row.timestamp
+    history_order_list = []
+    fee = 0.0007  # 手续费
 
-    buy_orders = []
-    sell_orders = []
+    for order in pending_order_list:
+        if order['side'] == 'kai':  # 开仓
+            # 计算时间差
+            time_diff = calculate_time_diff_minutes(timestamp, order['timestamp'])
+            if time_diff < max_time_diff:
+                if order['type'] == 'long':  # 开多仓
+                    if order['buy_price'] > low:  # 买入价格高于最低价
+                        # order['count'] += long_sz
+                        # 判断可用资金是否足够开仓
+                        required_margin = order['count'] * order['buy_price'] / lever
+                        if close_available_funds >= required_margin:
+                            order['side'] = 'ping'
+                            order['kai_time'] = timestamp
+                            close_available_funds -= required_margin  # 更新可用资金
+                        else:
+                            order['side'] = 'done'
+                            order['message'] = 'insufficient funds'
+                if order['type'] == 'short':  # 开空仓
+                    if order['buy_price'] < high:
+                        # order['count'] += short_sz
+                        # 判断可用资金是否足够开仓
+                        required_margin = order['count'] * order['buy_price'] / lever
+                        if close_available_funds >= required_margin:
+                            order['side'] = 'ping'
+                            order['kai_time'] = timestamp
+                            close_available_funds -= required_margin  # 更新可用资金
+                        else:
+                            order['side'] = 'done'
+                            order['message'] = 'insufficient funds'
+            else:
+                order['side'] = 'done'
+                order['message'] = 'time out'
 
-    # 分类订单
-    for order in open_orders['data']:
-        if order['side'] == 'buy':
-            buy_orders.append(order)
-        elif order['side'] == 'sell':
-            sell_orders.append(order)
+        elif order['side'] == 'ping':  # 平仓
+            pin_time_diff = calculate_time_diff_minutes(timestamp, order['kai_time'])
+            if order['type'] == 'long':  # 平多仓
+                if order['sell_price'] < high:
+                    order['side'] = 'done'
+                    order['ping_time'] = timestamp
+                    # 计算收益并更新总资金
+                    profit = order['count'] * (order['sell_price'] - order['buy_price'] - fee * order['sell_price'])
+                    order['profit'] = profit
+                    order['time_cost'] = pin_time_diff
+                    total_money += profit
+                else:
+                    # 对超时的调整售出价格
+                    if pin_time_diff > max_sell_time_diff:
+                        order['sell_price'] = close - order['buy_price'] + order['sell_price']
+                        order['kai_time'] = timestamp
+                        order['message'] = 'sell time out'
+            if order['type'] == 'short':  # 平空仓
+                if order['sell_price'] > low:
+                    order['side'] = 'done'
+                    order['ping_time'] = timestamp
+                    # 计算收益并更新总资金
+                    profit = order['count'] * (order['buy_price'] - order['sell_price'] - fee * order['sell_price'])
+                    order['profit'] = profit
+                    order['time_cost'] = pin_time_diff
+                    total_money += profit
+                else:
+                    # 对超时的调整售出价格
+                    if pin_time_diff > max_sell_time_diff:
+                        order['sell_price'] = close - order['buy_price'] + order['sell_price']
+                        order['ping_time'] = timestamp
+                        order['message'] = 'sell time out'
 
-    # 按照价格排序：优先处理价格差距较小的订单
-    buy_orders = sorted(buy_orders, key=lambda order: float(order['px']))
-    sell_orders = sorted(sell_orders, key=lambda order: float(order['px']))
+    # 删除已经完成的订单，移动到history_order_list
+    history_order_list.extend([order for order in pending_order_list if order['side'] == 'done'])
+    pending_order_list = [order for order in pending_order_list if order['side'] != 'done']
+    return pending_order_list, history_order_list, total_money
 
-    max_price_diff = 2 * CONFIG["PRICE_THRESHOLD"]  # 最大价格差距
 
-    # 取消买单方向的订单，检查相邻订单之间的价格差距
-    for i in range(1, len(buy_orders)):
+def create_order(order_type, row, lever):
+    """创建订单信息"""
+    return {
+        'buy_price': row.buy_price,
+        'count': row.count,
+        'timestamp': row.timestamp,
+        'sell_price': row.sell_price,
+        'type': order_type,
+        'lever': lever,
+        'side': 'kai'
+    }
 
-        order1 = buy_orders[i-1]
-        order2 = buy_orders[i]
 
-        price_diff = abs(float(order2['px']) - float(order1['px']))
+def process_signals(signal_df, lever, total_money, init_money):
+    """处理信号生成的订单并计算收益"""
+    pending_order_list = []
+    all_history_order_list = []
+    position_info_list = []
+    # start_time = time.time()
 
-        if price_diff < max_price_diff:
-            order_id = order1['ordId']  # 取消前面一个订单（价格低）
-            logger.warning(
-                f"强制取消买单 {order_id}，价格差距：{price_diff}"
-            )
-            cancel_order(inst_id, order_id)
+    # 确保 timestamp 为 datetime 对象
+    signal_df['timestamp'] = pd.to_datetime(signal_df['timestamp'])
 
-    # 取消卖单方向的订单，检查相邻订单之间的价格差距
-    for i in range(1, len(sell_orders)):
+    for row in signal_df.itertuples():
+        # 分析持仓信息
+        position_info = analysis_position(pending_order_list, row, total_money, lever)
+        position_info_list.append(position_info)
 
-        order1 = sell_orders[i-1]
-        order2 = sell_orders[i]
+        # 处理委托单
+        pending_order_list, history_order_list, total_money = deal_pending_order(
+            pending_order_list, row, position_info, lever, total_money
+        )
+        all_history_order_list.extend(history_order_list)
 
-        price_diff = abs(float(order2['px']) - float(order1['px']))
-
-        # 如果价格差距小于100，取消这两个订单中的一个
-        if price_diff < max_price_diff:
-            order_id = order2['ordId']  # 取消后面一个订单（价格高）
-            logger.warning(
-                f"强制取消卖单 {order_id}，价格差距：{price_diff}"
-            )
-            cancel_order(inst_id, order_id)
-
-def release_funds(inst_id, latest_price, release_len):
-    """根据当前价格和订单价格差距，取消指定数量的订单。"""
-    open_orders = get_open_orders()
-    if not open_orders:
-        logger.warning("当前没有未完成的订单。")
-        return
-
-    sorted_orders = sorted(
-        open_orders['data'],
-        key=lambda order: abs(latest_price - float(order['px'])),
-        reverse=True
+        # 根据信号生成新订单
+        if row.Buy == 1:
+            pending_order_list.append(create_order('long', row, lever))
+        elif row.Sell == 1:
+            pending_order_list.append(create_order('short', row, lever))
+    # print(f"process_signals cost time: {time.time() - start_time}")
+    # 计算最终结果
+    position_info_df = pd.DataFrame(position_info_list)
+    all_history_order_df = pd.DataFrame(all_history_order_list)
+    final_total_money_if_close = position_info_df['final_total_money_if_close'].iloc[-1]
+    min_available_funds = min(
+        position_info_df['close_available_funds'].min(),
+        position_info_df['high_available_funds'].min(),
+        position_info_df['low_available_funds'].min()
     )
+    max_cost_money = init_money - min_available_funds
+    final_profit = final_total_money_if_close - init_money
+    profit_ratio = final_profit / max_cost_money if max_cost_money > 0 else 0
 
-    for order in sorted_orders[:release_len]:
-        order_id = order['ordId']
-        order_price = float(order['px'])
-        price_diff = abs(latest_price - order_price)
-        last_updated = float(order['uTime']) / 1000  # 假设时间戳以毫秒为单位
+    # 统计信号数量和占比
+    total_signals = len(signal_df)
+    buy_signals = signal_df['Buy'].sum()
+    sell_signals = signal_df['Sell'].sum()
+    buy_ratio = buy_signals / total_signals if total_signals > 0 else 0
+    sell_ratio = sell_signals / total_signals if total_signals > 0 else 0
 
-        # 检查价格偏移和时间间隔
-        if price_diff <= 1000 and (time.time() - last_updated) <= 6000:
-            logger.warning(
-                f"保留订单 {order_id}，订单价格：{order['px']}，最新价格：{latest_price}，差距：{price_diff}，时间间隔在1分钟内。"
-            )
-            continue
-
-        logger.warning(
-            f"取消订单 {order_id}，订单价格：{order['px']}，最新价格：{latest_price}，差距：{price_diff}"
-        )
-        cancel_order(inst_id, order_id)
-
-
-
-def place_batch_orders(order_list):
-    """批量下单"""
-    result = safe_api_call(tradeAPI.place_multiple_orders, order_list)
-    return result
-
-
-def create_order(inst_id, side, price, size, pos_side, tp_px):
-    """生成单个订单"""
-    return {
-        "instId": inst_id,
-        "tdMode": "cross",
-        "side": side,
-        "ordType": "limit",
-        "px": str(price),
-        "sz": str(size),
-        "posSide": pos_side,
-        "tpTriggerPx": str(tp_px),
-        "tpOrdPx": str(tp_px)
-    }
-
-def create_trailing_stop_order(inst_id, side, trigger_price, size, pos_side, trail_value=10):
-    """生成一个移动止盈止损订单"""
-    return {
-        "instId": inst_id,               # 交易对
-        "tdMode": "cross",               # 交易模式（全仓）
-        "side": side,                    # 平仓方向（'buy' 或 'sell'）
-        "ordType": "move_order_stop",    # 移动止盈止损类型
-        "sz": str(size),                 # 数量
-        "posSide": pos_side,             # 仓位方向（'long' 或 'short'）
-        "activePx": str(trigger_price),  # 触发止盈止损的价格
-        "callbackSpread": str(10),   # 移动止盈止损的价格波动幅度
-    }
-
-
-def calc_adjustment(x, k=3):
-    """
-    计算曲线 y = 200 * (exp(k * x) - 1) / (exp(k) - 1)
-    :param x: 输入值，可以是一个数或数组，范围为 [0, 1]
-    :param k: 陡峭系数，默认为 5
-    :return: 对应的 y 值
-    """
-    value = 1000 * (np.exp(k * x) - 1) / (np.exp(k) - 1)
-    # 将value向上取整
-    return np.ceil(value)
-
-def prepare_orders(latest_price, base_offset, base_profit, long_ratio, short_ratio):
-    """
-    根据多空比例和价格变化动态调整offset和profit:
-    - 假设：当一方比例更大时，对该方仅调整offset，对另一方仅调整profit。
-    - 当long_ratio > short_ratio时：多头为强势方
-      -> 调整多头offset，调整空头profit
-    - 当short_ratio > long_ratio时：空头为强势方
-      -> 调整空头offset，调整多头profit
-
-    price方向决定增减，一般根据需要可决定只增加:
-    在此示例中，当价格上涨且空头强势：增大空头offset、增大多头profit。
-    当价格下跌且多头强势：增大多头offset、增大空头profit。
-    当价格上涨且多头强势：增大多头offset、增大空头profit。
-    当价格下跌且空头强势：增大空头offset、增大多头profit。
-
-    简化后逻辑：无论价格上涨或下跌，只要有明显强弱侧，就对强侧offset和弱侧profit根据差异放大。
-    """
-    order_list = []
-    move_order_list = []
-    diff = abs(long_ratio - short_ratio)
-
-    if diff <= 0.1:
-        # 无持仓或持仓均衡，不调整
-        adjusted_long_offset = base_offset
-        adjusted_short_profit = base_profit
-        adjusted_long_profit = base_profit
-        adjusted_short_offset = base_offset
+    # 统计 'time out' 订单数量
+    if not all_history_order_df.empty:
+        timeout_orders = all_history_order_df[all_history_order_df['message'] == 'time out']
+        timeout_long = len(timeout_orders[timeout_orders['type'] == 'long'])
+        timeout_short = len(timeout_orders[timeout_orders['type'] == 'short'])
     else:
-        adjustment = calc_adjustment(diff)
-        print(f"多空比例差异：{diff}，调整值：{adjustment}")
-        # 判断哪一边强势
-        if long_ratio > short_ratio:
-            # 多头强势：只调整多头offset、空头profit
-            # 不调整多头profit，也不调整空头offset
-            adjusted_long_offset = base_offset + adjustment
-            adjusted_short_profit = base_profit + adjustment
-            adjusted_long_profit = base_profit
-            adjusted_short_offset = base_offset
-        else:
-            # 空头强势：只调整空头offset、多头profit
-            adjusted_short_offset = base_offset + adjustment
-            adjusted_long_profit = base_profit + adjustment
-            adjusted_long_offset = base_offset
-            adjusted_short_profit = base_profit
+        timeout_long = 0
+        timeout_short = 0
 
-    # 根据价格方向（可选逻辑，可简化）判断使用哪组调整值
-    # 为了简化，这里不区分价格上涨或下跌的正负调整，只是统一增加
-    # 如果需要根据价格方向调节加减，请自行在此添加逻辑
+    if 'time_cost' not in all_history_order_df.columns:
+        all_history_order_df['time_cost'] = None
+    # 找到time_cost不为nan的行
+    all_history_order_df = all_history_order_df[~all_history_order_df['time_cost'].isna()]
+    # 计算time_cost的平均值
+    time_cost = all_history_order_df['time_cost'].mean()
 
-    # 最终决定下单:
-    # 多单条件检查
-    # 多单下单价格：latest_price - adjusted_long_offset
-    # 多单止盈：latest_price + adjusted_long_profit
-    # 如果多头超过比例不再开多
-    if long_ratio < MAX_POSITION_RATIO:
-        order_list.append(
-            create_order(
-                CONFIG["INST_ID"],
-                "buy",
-                latest_price - (adjusted_long_offset if long_ratio > short_ratio else base_offset),
-                CONFIG["ORDER_SIZE"],
-                "long",
-                latest_price + (adjusted_long_profit if short_ratio > long_ratio else base_profit)
-            )
-        )
-        move_order_list.append(
-            create_trailing_stop_order(
-                CONFIG["INST_ID"],
-                "buy",
-                latest_price - 2 * (adjusted_long_offset if long_ratio > short_ratio else base_offset),
-                CONFIG["ORDER_SIZE"],
-                "long"
-            )
-        )
-    else:
-        logger.warning("多头仓位比例过高，暂停开多。")
+    last_data = position_info_df.iloc[-1].copy()
+    last_data = last_data.to_dict()
+    last_data.update({
+        'final_total_money_if_close': final_total_money_if_close,
+        'final_profit': final_profit,
+        'max_cost_money': max_cost_money,
+        'profit_ratio': profit_ratio,
+        'total_signals': total_signals,
+        'buy_signals': buy_signals,
+        'sell_signals': sell_signals,
+        'buy_ratio': buy_ratio,
+        'sell_ratio': sell_ratio,
+        'timeout_long': timeout_long,
+        'timeout_short': timeout_short,
+        'hold_time': time_cost
+    })
+    # print(f'cost time: {time.time() - start_time}')
 
-    # 空单条件检查
-    # 空单下单价格：latest_price + adjusted_short_offset
-    # 空单止盈：latest_price - adjusted_short_profit
-    if short_ratio < MAX_POSITION_RATIO:
-        order_list.append(
-            create_order(
-                CONFIG["INST_ID"],
-                "sell",
-                latest_price + (adjusted_short_offset if short_ratio > long_ratio else base_offset),
-                CONFIG["ORDER_SIZE"],
-                "short",
-                latest_price - (adjusted_short_profit if long_ratio > short_ratio else base_profit)
-            )
-        )
-        move_order_list.append(
-            create_trailing_stop_order(
-                CONFIG["INST_ID"],
-                "sell",
-                latest_price + 2 * (adjusted_short_offset if short_ratio > long_ratio else base_offset),
-                CONFIG["ORDER_SIZE"],
-                "short"
-            )
-        )
-    else:
-        logger.warning("空头仓位比例过高，暂停开空。")
-    # 调整order_list的顺序，如果多头比例大于空头，将空头放在前面
-    if long_ratio > short_ratio:
-        order_list.reverse()
-    return order_list, move_order_list
+    return last_data
 
-def get_take_profit_orders():
-    """获取所有正在委托的止盈单"""
-    tp_orders = safe_api_call(tradeAPI.order_algos_list, ordType="conditional")
-    if tp_orders and 'data' in tp_orders:
-        return tp_orders['data']  # 返回条件单数据
+
+def calculate_combination(args):
+    """多进程计算单个组合的回测结果"""
+    profit, period, data_df, lever, init_money = args
+    signal_df = gen_buy_sell_signal(data_df, profit=profit, period=period)
+    last_data = process_signals(signal_df, lever, init_money, init_money)
+    last_data.update({'profit': profit, 'period': period})
+    return last_data
+
+def generate_list(start, end, count, decimals):
+  """
+  生成一个从起始值到最终值的数字列表，包含指定数量的元素，并保留指定位数的小数。
+
+  Args:
+    start: 起始值。
+    end: 最终值。
+    count: 列表元素的数量。
+    decimals: 保留的小数位数。
+
+  Returns:
+    一个包含指定数量元素的数字列表，从起始值线性递增到最终值，并保留指定位数的小数。
+  """
+
+  if count <= 0:
     return []
+  elif count == 1:
+    return [round(start, decimals)]
 
-def modify_take_profit_orders():
-    """查询并修改所有止盈单"""
-    tp_orders = get_take_profit_orders()
-    if tp_orders:
-        for order in tp_orders:
-            order_id = order['algoId']
-            current_tp_trigger_price = float(order['tpTriggerPx'])
-            current_tp_order_price = float(order['tpOrdPx'])
-
-            # 增加50作为新的止盈触发价和止盈价格
-            new_tp_trigger_price = current_tp_trigger_price + 50
-            new_tp_order_price = current_tp_order_price + 50
-
-            # 修改止盈单
-            result = safe_api_call(
-                tradeAPI.amend_algo_order,
-                instId=CONFIG["INST_ID"],   # 传入交易对
-                algoId=order_id,            # 止盈单的唯一标识
-                newTpTriggerPx=str(new_tp_trigger_price),  # 新的触发价格
-                newTpOrdPx=str(new_tp_order_price)         # 新的止盈价格
-            )
-
-            if result:
-                logger.info(f"止盈单 {order_id} 修改成功，新止盈触发价格为 {new_tp_trigger_price}，新止盈价格为 {new_tp_order_price}")
-            else:
-                logger.error(f"止盈单 {order_id} 修改失败")
-    else:
-        logger.info("没有找到需要修改的止盈单")
+  step = (end - start) / (count - 1)
+  result = []
+  for i in range(count):
+    value = start + i * step
+    result.append(round(value, decimals))
+  return result
 
 
-def get_kline_data_newest(inst_id, bar="1m", limit=100, max_candles=1000):
+import pandas as pd
+
+def merge_dataframes(df_list):
     """
-    从OKX获取历史K线数据，并返回DataFrame。
+    将一个包含多个 DataFrame 的列表按照 'profit' 和 'period' 字段进行合并，并添加源 DataFrame 标识。
 
-    :param inst_id: 产品ID，例如 "BTC-USDT"
-    :param bar: 时间粒度，例如 "1m", "5m", "1H" 等
-    :param limit: 单次请求的最大数据量，默认100，最大100
-    :param max_candles: 请求的最大K线数量，默认1000
-    :return: pandas.DataFrame，包含K线数据
+    Args:
+      df_list: 一个列表，每个元素都是一个 pandas DataFrame。
+
+    Returns:
+      一个合并后的 pandas DataFrame，如果列表为空，则返回一个空的 DataFrame。
     """
-    all_data = []
-    after = ''  # 初始值为None，获取最新数据
-    fetched_candles = 0  # 已获取的K线数量
-    fail_count = 0  # 失败次数
-    max_retries = 3  # 最大重试次数
 
-    while fetched_candles < max_candles:
-        try:
-            # 调用OKX API获取历史K线数据
-            response = marketAPI.get_candlesticks(instId=inst_id, bar=bar, after=after, limit=limit)
-
-            if response.get("code") != "0":
-                print(f"获取K线数据失败，错误代码：{response.get('code')}，错误消息：{response.get('msg')}")
-                time.sleep(1)
-                fail_count += 1
-                if fail_count >= max_retries:
-                    print(f"连续失败 {max_retries} 次，停止获取。")
-                    break
-            else:
-                fail_count = 0
-                # 提取返回数据
-                data = response.get("data", [])
-                if not data:
-                    print("无更多数据，已全部获取。")
-                    break
-
-                # 解析数据并添加到总数据中
-                all_data.extend(data)
-                fetched_candles += len(data)
-
-                # 更新 `after` 参数为当前返回数据的最早时间戳，用于获取更早的数据
-                after = data[-1][0]
-
-                # 如果获取的数据量小于limit，说明数据已获取完毕
-                if len(data) < limit:
-                    break
-
-                # 短暂延迟，避免触发API限频
-                time.sleep(0.2)
-
-        except Exception as e:
-            print(f"获取K线数据时出现异常：{e}")
-            break
-
-    # 将所有数据转换为DataFrame，即使all_data为空也能处理
-    if all_data:
-        df = pd.DataFrame(all_data, columns=["timestamp", "open", "high", "low", "close", "volume", "volCcy", "volCcyQuote",
-                                             "confirm"])
-
-        # 数据类型转换
-        # 将时间戳转换为 datetime 对象，并将其设置为 UTC
-        df["timestamp"] = pd.to_datetime(df["timestamp"].astype(float) / 1000, unit="s", utc=True)
-
-        # 将 UTC 时间转换为北京时间（Asia/Shanghai 时区，UTC+8）
-        df["timestamp"] = df["timestamp"].dt.tz_convert('Asia/Shanghai')
-        df["timestamp"] = df["timestamp"].dt.tz_localize(None)
-
-        df[["open", "high", "low", "close", "volume"]] = df[["open", "high", "low", "close", "volume"]].astype(float)
-
-        # 按时间排序
-        df = df.sort_values("timestamp").reset_index(drop=True)
-        return df
-    else:
-        print("未能获取到任何K线数据。")
-        return pd.DataFrame() # 返回一个空的 DataFrame
-
-def get_kline_data(inst_id, bar="1m", limit=100, max_candles=1000):
-    """
-    从OKX获取历史K线数据，并返回DataFrame。
-
-    :param inst_id: 产品ID，例如 "BTC-USDT"
-    :param bar: 时间粒度，例如 "1m", "5m", "1H" 等
-    :param limit: 单次请求的最大数据量，默认100，最大100
-    :param max_candles: 请求的最大K线数量，默认1000
-    :return: pandas.DataFrame，包含K线数据
-    """
-    all_data = []
-    after = ''  # 初始值为None，获取最新数据
-    fetched_candles = 0  # 已获取的K线数量
-    fail_count = 0  # 失败次数
-    max_retries = 3  # 最大重试次数
-
-    while fetched_candles < max_candles:
-        try:
-            # 调用OKX API获取历史K线数据
-            response = marketAPI.get_history_candlesticks(instId=inst_id, bar=bar, after=after, limit=limit)
-
-            if response.get("code") != "0":
-                print(f"获取K线数据失败，错误代码：{response.get('code')}，错误消息：{response.get('msg')}")
-                time.sleep(1)
-                fail_count += 1
-                if fail_count >= max_retries:
-                    print(f"连续失败 {max_retries} 次，停止获取。")
-                    break
-            else:
-                fail_count = 0
-                # 提取返回数据
-                data = response.get("data", [])
-                if not data:
-                    print("无更多数据，已全部获取。")
-                    break
-
-                # 解析数据并添加到总数据中
-                all_data.extend(data)
-                fetched_candles += len(data)
-
-                # 更新 `after` 参数为当前返回数据的最早时间戳，用于获取更早的数据
-                after = data[-1][0]
-
-                # 如果获取的数据量小于limit，说明数据已获取完毕
-                if len(data) < limit:
-                    break
-
-                # 短暂延迟，避免触发API限频
-                time.sleep(0.2)
-
-        except Exception as e:
-            print(f"获取K线数据时出现异常：{e}")
-            break
-
-    # 将所有数据转换为DataFrame，即使all_data为空也能处理
-    if all_data:
-        df = pd.DataFrame(all_data, columns=["timestamp", "open", "high", "low", "close", "volume", "volCcy", "volCcyQuote",
-                                             "confirm"])
-
-        # 数据类型转换
-        # 将时间戳转换为 datetime 对象，并将其设置为 UTC
-        df["timestamp"] = pd.to_datetime(df["timestamp"].astype(float) / 1000, unit="s", utc=True)
-
-        # 将 UTC 时间转换为北京时间（Asia/Shanghai 时区，UTC+8）
-        df["timestamp"] = df["timestamp"].dt.tz_convert('Asia/Shanghai')
-        df["timestamp"] = df["timestamp"].dt.tz_localize(None)
-
-        df[["open", "high", "low", "close", "volume"]] = df[["open", "high", "low", "close", "volume"]].astype(float)
-
-        # 按时间排序
-        df = df.sort_values("timestamp").reset_index(drop=True)
-        return df
-    else:
-        print("未能获取到任何K线数据。")
-        return pd.DataFrame() # 返回一个空的 DataFrame
-
-def add_target_variables_op(df, max_decoder_length=30):
-    """
-    添加目标变量，包括未来多个时间步的涨幅和跌幅，针对close、high、low的多阈值计算。
-
-    :param df: 数据集
-    :param thresholds: 阈值列表，默认[0.1, 0.2, ..., 1.0]
-    :param max_decoder_length: 预测未来的时间步长，默认5
-    :return: 添加了目标变量的DataFrame
-    """
-    # 创建一个新的字典，用于存储所有新增列
-    new_columns = {}
-
-
-    for col in ["close"]:
-        # 获取下一个时间点的最高价和最低价
-        next_high = df['high'].shift(-1)
-        next_low = df['low'].shift(-1)
-
-        # 计算下一个时间点的最高价和最低价相对于当前时间点的涨跌幅
-        new_columns[f"{col}_next_max_up"] = (next_high - df[col]) / df[col] * 100  # 最高价涨幅
-        new_columns[f"{col}_next_max_down"] = (df[col] - next_low) / df[col] * 100  # 最低价跌幅
-
-        for step in range(10, max_decoder_length + 1, 10):  # 未来 1 到 max_decoder_length 分钟
-            # 获取未来 step 个时间窗口内的最高价和最低价
-            future_max_high = df['high'].rolling(window=step, min_periods=1).max().shift(-step)
-            future_min_low = df['low'].rolling(window=step, min_periods=1).min().shift(-step)
-
-            # 计算未来 step 个时间窗口内的最大涨幅和跌幅 (修正部分)
-            new_columns[f"{col}_max_up_t{step}"] = (future_max_high - df[col]) / df[col] * 100 #最大涨幅用最高价
-            new_columns[f"{col}_max_down_t{step}"] = (df[col] - future_min_low) / df[col] * 100 #最大跌幅用最低价
-
-            # 计算未来 step 个时间窗口的涨跌幅
-            future_return = (df['close'].shift(-step) - df['close']) / df['close'] * 100
-            new_columns[f"{col}_max_return_t{step}"] = future_return
-    # 使用 pd.concat 一次性将所有新列添加到原数据框
-    df = pd.concat([df, pd.DataFrame(new_columns, index=df.index)], axis=1)
-
-    return df
-
-def get_train_data(inst_id="BTC-USDT-SWAP", bar="1m", limit=100, max_candles=1000, is_newest=False):
-    # inst_id = "BTC-USDT-SWAP"
-    # bar = "1m"
-    # limit = 100
-    # max_candles = 60 * 24
-
-    # 获取数据
-    if is_newest:
-        kline_data = get_kline_data_newest(inst_id=inst_id, bar=bar, limit=limit, max_candles=max_candles)
-    else:
-        kline_data = get_kline_data(inst_id=inst_id, bar=bar, limit=limit, max_candles=max_candles)
-
-    if not kline_data.empty:
-        # print("成功获取K线数据，开始处理...")
-
-        # 添加时间特征
-        # kline_data = add_time_features(kline_data)
-
-        # 添加目标变量
-        kline_data = add_target_variables_op(kline_data)
-
-        # 重置索引
-        kline_data.reset_index(drop=True, inplace=True)
-        return kline_data
-    else:
-        print("未能获取到任何K线数据。")
+    if not df_list:
         return pd.DataFrame()
 
+    # 为每个 DataFrame 添加一个唯一的标识符列
+    for i, df in enumerate(df_list):
+        df_list[i] = df.copy()  # Create a copy to avoid modifying the original DataFrame
+        df_list[i]['source_df'] = f'df_{i+1}'
 
-# 主循环
+    merged_df = df_list[0]
+    for i in range(1, len(df_list)):
+        merged_df = pd.merge(merged_df, df_list[i], on=['profit', 'period'], how='outer', suffixes=('', f'_{i+1}'))
+
+    # 重命名和排序
+    def categorize_and_sort_cols(df):
+        # 识别不同类别的列
+        source_df_cols = [col for col in df.columns if 'source_df' in col]
+        profit_ratio_cols = [col for col in df.columns if 'profit_ratio' in col]
+        other_cols = [col for col in df.columns if col not in source_df_cols and col not in profit_ratio_cols and col != 'score' and col != 'score_plus' and col != 'score_mul']
+
+        # 对每种类别的列进行排序
+        source_df_cols.sort()
+        profit_ratio_cols.sort()
+        other_cols.sort()
+
+        # 重组列的顺序
+        new_cols_order = other_cols + source_df_cols + profit_ratio_cols
+        return new_cols_order
+
+    new_cols_order = categorize_and_sort_cols(merged_df)
+    merged_df = merged_df.reindex(columns=new_cols_order)
+
+    #计算分数
+    profit_ratio_cols = [col for col in merged_df.columns if 'profit_ratio' in col and 'source_df' not in col]
+    profit_ratio_cols.sort()
+    if len(profit_ratio_cols) >=3:
+      merged_df['score'] = 10000 * merged_df[profit_ratio_cols[0]] * merged_df[profit_ratio_cols[1]] * merged_df[profit_ratio_cols[2]]
+      merged_df['score_plus'] = merged_df[profit_ratio_cols[0]] + merged_df[profit_ratio_cols[1]] + merged_df[profit_ratio_cols[2]]
+      merged_df['score_mul'] = merged_df['score_plus'] * merged_df['score']
+    elif len(profit_ratio_cols) >=2:
+      merged_df['score'] = 10000 * merged_df[profit_ratio_cols[0]] * merged_df[profit_ratio_cols[1]]
+      merged_df['score_plus'] = merged_df[profit_ratio_cols[0]] + merged_df[profit_ratio_cols[1]]
+      merged_df['score_mul'] = merged_df['score_plus'] * merged_df['score']
+    return merged_df
+
+def example():
+    time.sleep(60 * 60 * 3)
+    backtest_path = 'backtest_result'
+    file_path = 'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv'
+    gen_signal_method = 'price_extremes'
+    base_name = file_path.split('/')[-1].split('.')[0]
+    profit_list = generate_list(0.001, 0.03, 300, 4)
+    period_list = generate_list(10, 5000, 100, 0)
+    # 将period_list变成int
+    period_list = [int(period) for period in period_list]
+    lever = 100
+    init_money = 10000000
+    origin_data_df = pd.read_csv(file_path)  # 只取最近1000条数据
+    origin_data_df['timestamp'] = pd.to_datetime(origin_data_df['timestamp'])
+
+
+    longest_periods_info = {
+        'longest_up': '2024-01-23_2024-03-18',
+        "longest_down": '2024-07-29_2024-09-07',
+        "longest_sideways": '2024-08-29_2024-10-17'
+    }
+    for key, value in longest_periods_info.items():
+        start_time_str, end_time_str = value.split('_')
+        start_time = pd.to_datetime(start_time_str)
+        end_time = pd.to_datetime(end_time_str)
+        data_df = origin_data_df[(origin_data_df['timestamp'] >= start_time) & (origin_data_df['timestamp'] <= end_time)]
+
+        data_len = len(data_df)
+
+        # 获取data_df的初始时间与结束时间
+        start_time = data_df.iloc[0].timestamp
+        end_time = data_df.iloc[-1].timestamp
+        print(f"开始时间：{start_time}，结束时间：{end_time} 长度：{data_len} key = {key}")
+        # 生成time_key
+        time_key_str = f"{start_time.strftime('%Y%m%d%H%M%S')}_{end_time.strftime('%Y%m%d%H%M%S')}"
+
+        # 准备参数组合
+        combinations = [(profit, period, data_df, lever, init_money) for profit in profit_list for period in period_list]
+        print(f"共有 {len(combinations)} 个组合，开始计算...")
+
+        # 使用多进程计算
+        with mp.Pool(processes=os.cpu_count()) as pool:
+            results = list(tqdm(pool.imap(calculate_combination, combinations), total=len(combinations)))
+
+        # 保存结果
+        result_df = pd.DataFrame(results)
+        file_out = f'{backtest_path}/result_{data_len}_{len(combinations)}_{base_name}_{time_key_str}_{gen_signal_method}_{key}.csv'
+        result_df.to_csv(file_out, index=False)
+        print(f"结果已保存到 {file_out}")
+
+
 if __name__ == "__main__":
-    count = 1000000
-    last_price = None
-
-    newest_data = LatestDataManager(1000)
-
-    while count > 0:
-        try:
-            count -= 1
-            period = 60
-            current_time = time.time()
-            current_time = pd.to_datetime(current_time, unit='s')
-            start_time = time.time()
-
-            # 控制每次循环的间隔，避免过于频繁地调用
-            if start_time % 60 < 58:
-                time.sleep(1)
-                continue
-
-            feature_df = newest_data.get_newest_data()
-            latest_price = feature_df['close'].iloc[-1]
-            long_sz, short_sz, avg_long_price, avg_short_price = get_position_ratio("BTC-USDT-SWAP", latest_price)
-
-            # 获取feature_df中最新数据close在period时间内的最大值和最小值
-            max_price = feature_df['close'].iloc[-period:].max()
-            min_price = feature_df['close'].iloc[-period:].min()
-            print(f"max_price: {max_price}, min_price: {min_price} latest_price: {latest_price} long_sz: {long_sz} short_sz: {short_sz}")
-            buy_result = tradeAPI.place_algo_order(
-                instId="BTC-USDT-SWAP",
-                tdMode="cross",
-                side="buy",
-                posSide="long",
-                ordType="move_order_stop",
-                sz=long_sz + CONFIG["ORDER_SIZE"],
-                callbackSpread="10",
-                activePx=min_price,
-            )
-            sell_result = tradeAPI.place_algo_order(
-                instId="BTC-USDT-SWAP",
-                tdMode="cross",
-                side="sell",
-                posSide="short",
-                ordType="move_order_stop",
-                sz=short_sz + CONFIG["ORDER_SIZE"],
-                callbackSpread="10",
-                activePx=max_price,
-            )
-            release_alg_old_funds("BTC-USDT-SWAP")
-            long_sz, short_sz, avg_long_price, avg_short_price = get_position_ratio("BTC-USDT-SWAP", latest_price)
-        except Exception as e:
-            print(f"发生错误: {e}")
-            continue
+    result_df1 = pd.read_csv('backtest_result/result_50401_5000_origin_data_1m_10000000_SOL-USDT-SWAP_20240205000000_20240311000000_price_unextremes_longest_up.csv')
+    result_df2 = pd.read_csv('backtest_result/result_70561_5000_origin_data_1m_10000000_SOL-USDT-SWAP_20240720000000_20240907000000_price_unextremes_longest_down.csv')
+    result_df3 = pd.read_csv('backtest_result/result_59041_5000_origin_data_1m_10000000_SOL-USDT-SWAP_20240807000000_20240917000000_price_unextremes_longest_sideways.csv')
+    result_list = [result_df1, result_df2, result_df3]
+    merged_df = merge_dataframes(result_list)
+    example()

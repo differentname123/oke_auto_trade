@@ -1204,6 +1204,29 @@ def generate_price_extremes_signals(df, periods=[20]):
     df = df.assign(**signals)
     return df
 
+def generate_price_unextremes_signals(df, periods=[20]):
+    """
+    根据指定周期内的最高价和最低价生成买入和卖出信号。
+
+    Args:
+        df (pd.DataFrame): 包含 'close' 列的 DataFrame。
+
+    Returns:
+        pd.DataFrame: 添加了价格极值信号列的 DataFrame。
+    """
+    signals = {}
+    for period in periods:
+        # 检查是否为指定周期内的最高价
+        highest_close = df['close'].rolling(window=period).max()
+        signals[f'Highest_{period}_Buy'] = np.where(df['close'] == highest_close, 1, 0)
+
+        # 检查是否为指定周期内的最低价
+        lowest_close = df['close'].rolling(window=period).min()
+        signals[f'Lowest_{period}_Sell'] = np.where(df['close'] == lowest_close, 1, 0)
+
+    df = df.assign(**signals)
+    return df
+
 def generate_cci_signals(df, cci_periods=[20], buy_threshold=-100, sell_threshold=100):
     """
     生成 CCI 买卖信号。
@@ -1909,9 +1932,12 @@ def backtest_strategy_op(signal_data_df):
     # -----------------------------
     # 用于存储 baseline_quantile_values，减少重复计算
     baseline_quantile_values = {}
+    baseline_avg_values = {}
 
     for target_col in target_cols:
         key_target_col = target_col.replace('close_max_', '')
+        avg_value = signal_data_df[target_col].mean()
+        baseline_avg_values[target_col] = avg_value
 
         # 对于每个目标列，预先计算并缓存不同分位数的值
         for q in quantiles:
@@ -1927,6 +1953,8 @@ def backtest_strategy_op(signal_data_df):
                 "quantile": q,
                 "quantile_value": quantile_value,
                 "diff_vs_baseline": 0.0,  # 基准策略与自身的差异为 0
+                "avg_value": avg_value,
+                "diff_vs_baseline_avg": 0.0,  # 基准策略与自身的差异为 0
                 "count": total_samples,
                 "ratio": 1.0
             })
@@ -1938,6 +1966,7 @@ def backtest_strategy_op(signal_data_df):
     signal_masks = {}
     signal_counts = {}
     signal_ratios = {}
+    signal_avgs = {}
 
     for signal in signals:
         # 计算信号掩码
@@ -1948,6 +1977,8 @@ def backtest_strategy_op(signal_data_df):
         signal_counts[signal] = signal_count
         signal_ratio = round(signal_count / total_samples, 4) if total_samples > 0 else 0
         signal_ratios[signal] = signal_ratio
+        for target_col in target_cols:
+            signal_avgs[(signal,target_col)] = signal_data_df.loc[signal_mask, target_col].mean()
 
     # -----------------------------
     # 优化点 3：减少嵌套循环层次
@@ -1957,9 +1988,11 @@ def backtest_strategy_op(signal_data_df):
         signal_mask = signal_masks[signal]
         signal_count = signal_counts[signal]
         signal_ratio = signal_ratios[signal]
-
         for target_col in target_cols:
+            avg_value = signal_avgs[(signal, target_col)]
+            baseline_avg_value = baseline_avg_values[target_col]
             key_target_col = target_col.replace('close_max_', '')
+            diff_vs_baseline_avg = avg_value - baseline_avg_value
             for q in quantiles:
                 baseline_quantile_value = baseline_quantile_values[(target_col, q)]
 
@@ -1979,6 +2012,8 @@ def backtest_strategy_op(signal_data_df):
                     "quantile": q,
                     "quantile_value": quantile_value,
                     "diff_vs_baseline": diff_vs_baseline,
+                    "avg_value": avg_value,
+                    "diff_vs_baseline_avg": diff_vs_baseline_avg,
                     "count": signal_count,
                     "ratio": signal_ratio
                 })
@@ -2005,12 +2040,14 @@ def run_backtest():
                 full_data = pd.read_csv(full_final_file_path)
                 try:
                     final_output_file_path = f'{backtest_path}/statistic_{base_file_path[:-4]}_{bar}_{max_candles}.csv'
+                    final_op_output_file_path = f'{backtest_path}/statistic_op_{base_file_path[:-4]}_{bar}_{max_candles}.csv'
                     # 去除后60行
                     data = full_data[:-10000]
                     signal_data = generate_signals(data)
                     backtest_df = backtest_strategy(signal_data)
                     backtest_df_op = backtest_strategy_op(signal_data)
                     backtest_df.to_csv(final_output_file_path, index=False)
+                    backtest_df_op.to_csv(final_op_output_file_path, index=False)
                     print(f'已经保存至{final_output_file_path}')
                     return
                 except Exception as e:

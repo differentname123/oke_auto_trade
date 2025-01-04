@@ -1,10 +1,11 @@
+import json
 import os
 import multiprocessing as mp
 from tqdm import tqdm  # 用于显示进度条
 
 import pandas as pd
 
-from get_feature_op import generate_price_extremes_signals
+from get_feature_op import generate_price_extremes_signals, generate_price_unextremes_signals
 
 
 def gen_buy_sell_signal(data_df, profit=1 / 100, period=10):
@@ -348,7 +349,7 @@ def generate_list(start, end, count, decimals):
 
 def merge_dataframes(df_list):
     """
-    将一个包含多个 DataFrame 的列表按照 'profit' 和 'period' 字段进行合并。
+    将一个包含多个 DataFrame 的列表按照 'profit' 和 'period' 字段进行合并，并添加源 DataFrame 标识。
 
     Args:
       df_list: 一个列表，每个元素都是一个 pandas DataFrame。
@@ -360,64 +361,116 @@ def merge_dataframes(df_list):
     if not df_list:
         return pd.DataFrame()
 
+    # 为每个 DataFrame 添加一个唯一的标识符列
+    for i, df in enumerate(df_list):
+        df_list[i] = df.copy()  # Create a copy to avoid modifying the original DataFrame
+        df_list[i]['source_df'] = f'df_{i+1}'
+
     merged_df = df_list[0]
     for i in range(1, len(df_list)):
-        merged_df = pd.merge(merged_df, df_list[i], on=['profit', 'period'], how='outer')
+        merged_df = pd.merge(merged_df, df_list[i], on=['profit', 'period'], how='outer', suffixes=('', f'_{i+1}'))
 
-    new_cols_order = merged_df.columns.tolist()
-    new_cols_order = sorted(new_cols_order)
+    # 重命名和排序
+    def categorize_and_sort_cols(df):
+        # 识别不同类别的列
+        source_df_cols = [col for col in df.columns if 'source_df' in col]
+        profit_ratio_cols = [col for col in df.columns if 'profit_ratio' in col]
+        other_cols = [col for col in df.columns if col not in source_df_cols and col not in profit_ratio_cols and col != 'score' and col != 'score_plus' and col != 'score_mul']
+
+        # 对每种类别的列进行排序
+        source_df_cols.sort()
+        profit_ratio_cols.sort()
+        other_cols.sort()
+
+        # 重组列的顺序
+        new_cols_order = other_cols + source_df_cols + profit_ratio_cols
+        return new_cols_order
+
+    new_cols_order = categorize_and_sort_cols(merged_df)
     merged_df = merged_df.reindex(columns=new_cols_order)
-    merged_df['score'] = 10000 * merged_df['profit_ratio'] * merged_df['profit_ratio_y']
+
+    #计算分数
+    profit_ratio_cols = [col for col in merged_df.columns if 'profit_ratio' in col and 'source_df' not in col]
+    profit_ratio_cols.sort()
+    if len(profit_ratio_cols) >=3:
+      merged_df['score'] = 10000 * merged_df[profit_ratio_cols[0]] * merged_df[profit_ratio_cols[1]] * merged_df[profit_ratio_cols[2]]
+      merged_df['score_plus'] = merged_df[profit_ratio_cols[0]] + merged_df[profit_ratio_cols[1]] + merged_df[profit_ratio_cols[2]]
+      merged_df['score_mul'] = merged_df['score_plus'] * merged_df['score']
+    elif len(profit_ratio_cols) >=2:
+      merged_df['score'] = 10000 * merged_df[profit_ratio_cols[0]] * merged_df[profit_ratio_cols[1]]
+      merged_df['score_plus'] = merged_df[profit_ratio_cols[0]] + merged_df[profit_ratio_cols[1]]
+      merged_df['score_mul'] = merged_df['score_plus'] * merged_df['score']
     return merged_df
+
+def read_json(file_path):
+    """
+    读取 JSON 文件并返回 Python 对象。
+
+    Args:
+      file_path: JSON 文件的路径。
+
+    Returns:
+      一个 Python 对象，表示 JSON 文件的内容。
+    """
+
+    with open(file_path, 'r') as file:
+        return json.load(file)
+
 
 def example():
     backtest_path = 'backtest_result'
-    file_path = 'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv'
+    file_path_list = ['kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv']
     gen_signal_method = 'price_extremes'
-    base_name = file_path.split('/')[-1].split('.')[0]
-    profit_list = generate_list(0.001, 0.03, 300, 4)
-    period_list = generate_list(10, 5000, 100, 0)
+    profit_list = generate_list(0.001, 0.04, 100, 4)
+    period_list = generate_list(10, 10000, 100, 0)
     # 将period_list变成int
     period_list = [int(period) for period in period_list]
     lever = 100
     init_money = 10000000
-    origin_data_df = pd.read_csv(file_path)  # 只取最近1000条数据
-    origin_data_df['timestamp'] = pd.to_datetime(origin_data_df['timestamp'])
+    longest_periods_info_path = 'kline_data/longest_periods_info.json'
+    all_longest_periods_info = read_json(longest_periods_info_path)
 
 
-    longest_periods_info = {
-        'longest_up': '2024-02-05_2024-03-11',
-        "longest_down": '2024-07-20_2024-09-07',
-        "longest_sideways": '2024-08-07_2024-09-17'
-    }
-    for key, value in longest_periods_info.items():
-        start_time_str, end_time_str = value.split('_')
-        start_time = pd.to_datetime(start_time_str)
-        end_time = pd.to_datetime(end_time_str)
-        data_df = origin_data_df[(origin_data_df['timestamp'] >= start_time) & (origin_data_df['timestamp'] <= end_time)]
+    for file_path in file_path_list:
+        base_name = file_path.split('/')[-1].split('.')[0]
+        origin_data_df = pd.read_csv(file_path)  # 只取最近1000条数据
+        origin_data_df['timestamp'] = pd.to_datetime(origin_data_df['timestamp'])
 
-        data_len = len(data_df)
 
-        # 获取data_df的初始时间与结束时间
-        start_time = data_df.iloc[0].timestamp
-        end_time = data_df.iloc[-1].timestamp
-        print(f"开始时间：{start_time}，结束时间：{end_time} 长度：{data_len} key = {key}")
-        # 生成time_key
-        time_key_str = f"{start_time.strftime('%Y%m%d%H%M%S')}_{end_time.strftime('%Y%m%d%H%M%S')}"
+        longest_periods_info = all_longest_periods_info[base_name]
+        for key, value in longest_periods_info.items():
+            start_time_str, end_time_str = value.split('_')
+            start_time = pd.to_datetime(start_time_str)
+            end_time = pd.to_datetime(end_time_str)
+            data_df = origin_data_df[(origin_data_df['timestamp'] >= start_time) & (origin_data_df['timestamp'] <= end_time)]
 
-        # 准备参数组合
-        combinations = [(profit, period, data_df, lever, init_money) for profit in profit_list for period in period_list]
-        print(f"共有 {len(combinations)} 个组合，开始计算...")
+            data_len = len(data_df)
 
-        # 使用多进程计算
-        with mp.Pool(processes=os.cpu_count()) as pool:
-            results = list(tqdm(pool.imap(calculate_combination, combinations), total=len(combinations)))
+            # 获取data_df的初始时间与结束时间
+            start_time = data_df.iloc[0].timestamp
+            end_time = data_df.iloc[-1].timestamp
+            print(f"开始时间：{start_time}，结束时间：{end_time} 长度：{data_len} key = {key}")
+            # 生成time_key
+            time_key_str = f"{start_time.strftime('%Y%m%d%H%M%S')}_{end_time.strftime('%Y%m%d%H%M%S')}"
 
-        # 保存结果
-        result_df = pd.DataFrame(results)
-        file_out = f'{backtest_path}/result_{data_len}_{len(combinations)}_{base_name}_{time_key_str}_{gen_signal_method}_{key}.csv'
-        result_df.to_csv(file_out, index=False)
-        print(f"结果已保存到 {file_out}")
+
+            # 准备参数组合
+            combinations = [(profit, period, data_df, lever, init_money) for profit in profit_list for period in period_list]
+            print(f"共有 {len(combinations)} 个组合，开始计算...")
+
+            file_out = f'{backtest_path}/result_{data_len}_{len(combinations)}_{base_name}_{time_key_str}_{gen_signal_method}_{key}.csv'
+            if os.path.exists(file_out):
+                print(f"结果文件 {file_out} 已存在，跳过计算")
+                continue
+
+            # 使用多进程计算
+            with mp.Pool(processes=os.cpu_count()) as pool:
+                results = list(tqdm(pool.imap(calculate_combination, combinations), total=len(combinations)))
+
+            # 保存结果
+            result_df = pd.DataFrame(results)
+            result_df.to_csv(file_out, index=False)
+            print(f"结果已保存到 {file_out}")
 
 
 if __name__ == "__main__":
