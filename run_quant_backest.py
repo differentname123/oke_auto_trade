@@ -39,6 +39,9 @@ def gen_buy_sell_signal(data_df, profit=1 / 100, period=10):
     signal_df.loc[sell_rows, 'sell_price'] = signal_df.loc[sell_rows, 'close'] * (1 - profit)
     # 初始化 count 列
     signal_df['count'] = 0.01
+    # signal_df['Sell'] = 0
+    signal_df['Buy'] = 0
+
     return signal_df
 
 
@@ -363,6 +366,8 @@ def merge_dataframes(df_list):
 
     # 为每个 DataFrame 添加一个唯一的标识符列
     for i, df in enumerate(df_list):
+        df['hold_time_score'] = 10000 * df['profit_ratio'] / df['hold_time']
+
         df_list[i] = df.copy()  # Create a copy to avoid modifying the original DataFrame
         df_list[i]['source_df'] = f'df_{i+1}'
 
@@ -396,11 +401,14 @@ def merge_dataframes(df_list):
       merged_df['score'] = 10000 * merged_df[profit_ratio_cols[0]] * merged_df[profit_ratio_cols[1]] * merged_df[profit_ratio_cols[2]]
       merged_df['score_plus'] = merged_df[profit_ratio_cols[0]] + merged_df[profit_ratio_cols[1]] + merged_df[profit_ratio_cols[2]]
       merged_df['score_mul'] = merged_df['score_plus'] * merged_df['score']
+      merged_df['hold_time_score_plus'] = merged_df['hold_time_score'] + merged_df['hold_time_score_2'] + merged_df['hold_time_score_3']
     elif len(profit_ratio_cols) >=2:
       merged_df['score'] = 10000 * merged_df[profit_ratio_cols[0]] * merged_df[profit_ratio_cols[1]]
       merged_df['score_plus'] = merged_df[profit_ratio_cols[0]] + merged_df[profit_ratio_cols[1]]
       merged_df['score_mul'] = merged_df['score_plus'] * merged_df['score']
+      merged_df['hold_time_score_plus'] = merged_df['hold_time_score'] + merged_df['hold_time_score_2']
     return merged_df
+
 
 def read_json(file_path):
     """
@@ -420,9 +428,11 @@ def read_json(file_path):
 def example():
     backtest_path = 'backtest_result'
     file_path_list = ['kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv']
-    gen_signal_method = 'price_extremes'
+    gen_signal_method = 'price_extremes_sell'
     profit_list = generate_list(0.001, 0.04, 100, 4)
     period_list = generate_list(10, 10000, 100, 0)
+    period_list = [3240]
+    profit_list = generate_list(0.001, 0.1, 110, 4)
     # 将period_list变成int
     period_list = [int(period) for period in period_list]
     lever = 100
@@ -464,13 +474,14 @@ def example():
                 continue
 
             # 使用多进程计算
-            with mp.Pool(processes=os.cpu_count()) as pool:
+            with mp.Pool(processes=os.cpu_count() - 5) as pool:
                 results = list(tqdm(pool.imap(calculate_combination, combinations), total=len(combinations)))
 
             # 保存结果
             result_df = pd.DataFrame(results)
             result_df.to_csv(file_out, index=False)
             print(f"结果已保存到 {file_out}")
+        break
 
 
 if __name__ == "__main__":

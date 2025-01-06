@@ -350,7 +350,7 @@ def generate_list(start, end, count, decimals):
 
 def merge_dataframes(df_list):
     """
-    将一个包含多个 DataFrame 的列表按照 'profit' 和 'period' 字段进行合并。
+    将一个包含多个 DataFrame 的列表按照 'profit' 和 'period' 字段进行合并，并添加源 DataFrame 标识。
 
     Args:
       df_list: 一个列表，每个元素都是一个 pandas DataFrame。
@@ -362,15 +362,51 @@ def merge_dataframes(df_list):
     if not df_list:
         return pd.DataFrame()
 
+    # 为每个 DataFrame 添加一个唯一的标识符列
+    for i, df in enumerate(df_list):
+        df['hold_time_score'] = 10000 * df['profit_ratio'] / df['hold_time']
+
+        df_list[i] = df.copy()  # Create a copy to avoid modifying the original DataFrame
+        df_list[i]['source_df'] = f'df_{i+1}'
+
     merged_df = df_list[0]
     for i in range(1, len(df_list)):
-        merged_df = pd.merge(merged_df, df_list[i], on=['profit', 'period'], how='outer')
+        merged_df = pd.merge(merged_df, df_list[i], on=['profit', 'period'], how='outer', suffixes=('', f'_{i+1}'))
 
-    new_cols_order = merged_df.columns.tolist()
-    new_cols_order = sorted(new_cols_order)
+    # 重命名和排序
+    def categorize_and_sort_cols(df):
+        # 识别不同类别的列
+        source_df_cols = [col for col in df.columns if 'source_df' in col]
+        profit_ratio_cols = [col for col in df.columns if 'profit_ratio' in col]
+        other_cols = [col for col in df.columns if col not in source_df_cols and col not in profit_ratio_cols and col != 'score' and col != 'score_plus' and col != 'score_mul']
+
+        # 对每种类别的列进行排序
+        source_df_cols.sort()
+        profit_ratio_cols.sort()
+        other_cols.sort()
+
+        # 重组列的顺序
+        new_cols_order = other_cols + source_df_cols + profit_ratio_cols
+        return new_cols_order
+
+    new_cols_order = categorize_and_sort_cols(merged_df)
     merged_df = merged_df.reindex(columns=new_cols_order)
-    merged_df['score'] = 10000 * merged_df['profit_ratio'] * merged_df['profit_ratio_y'] * merged_df['profit_ratio_x']
+
+    #计算分数
+    profit_ratio_cols = [col for col in merged_df.columns if 'profit_ratio' in col and 'source_df' not in col]
+    profit_ratio_cols.sort()
+    if len(profit_ratio_cols) >=3:
+      merged_df['score'] = 10000 * merged_df[profit_ratio_cols[0]] * merged_df[profit_ratio_cols[1]] * merged_df[profit_ratio_cols[2]]
+      merged_df['score_plus'] = merged_df[profit_ratio_cols[0]] + merged_df[profit_ratio_cols[1]] + merged_df[profit_ratio_cols[2]]
+      merged_df['score_mul'] = merged_df['score_plus'] * merged_df['score']
+      merged_df['hold_time_score_plus'] = merged_df['hold_time_score'] + merged_df['hold_time_score_2'] + merged_df['hold_time_score_3']
+    elif len(profit_ratio_cols) >=2:
+      merged_df['score'] = 10000 * merged_df[profit_ratio_cols[0]] * merged_df[profit_ratio_cols[1]]
+      merged_df['score_plus'] = merged_df[profit_ratio_cols[0]] + merged_df[profit_ratio_cols[1]]
+      merged_df['score_mul'] = merged_df['score_plus'] * merged_df['score']
+      merged_df['hold_time_score_plus'] = merged_df['hold_time_score'] + merged_df['hold_time_score_2']
     return merged_df
+
 
 def example():
     time.sleep(60 * 60 * 3)
@@ -424,9 +460,9 @@ def example():
 
 
 if __name__ == "__main__":
-    result_df1 = pd.read_csv('backtest_result/result_87841_2500_origin_data_1m_10000000_BTC-USDT-SWAP_20241016000000_20241216000000_price_unextremes_longest_up.csv')
-    result_df2 = pd.read_csv('backtest_result/result_89281_2500_origin_data_1m_10000000_BTC-USDT-SWAP_20230414000000_20230615000000_price_unextremes_longest_down.csv')
-    result_df3 = pd.read_csv('backtest_result/result_87841_2500_origin_data_1m_10000000_BTC-USDT-SWAP_20240328000000_20240528000000_price_unextremes_longest_sideways.csv')
+    result_df1 = pd.read_csv('backtest_result/result_87841_100_origin_data_1m_10000000_BTC-USDT-SWAP_20241016000000_20241216000000_price_extremes_buy_longest_up.csv')
+    result_df2 = pd.read_csv('backtest_result/result_89281_100_origin_data_1m_10000000_BTC-USDT-SWAP_20230414000000_20230615000000_price_extremes_buy_longest_down.csv')
+    result_df3 = pd.read_csv('backtest_result/result_87841_100_origin_data_1m_10000000_BTC-USDT-SWAP_20240328000000_20240528000000_price_extremes_buy_longest_sideways.csv')
     result_list = [result_df1, result_df2, result_df3]
     merged_df = merge_dataframes(result_list)
     example()

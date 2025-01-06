@@ -605,12 +605,12 @@ def generate_signals(df):
     df = df.copy()  # 避免修改原始 DataFrame
     # df = generate_volume_spike_signals(df)
     # df = generate_price_extremes_reverse_signals(df, [x for x in range(10, 10000, 10)])
-    df = generate_price_extremes_signals(df, [x for x in range(10, 10000, 10)])
-    # # 生成单一 MA 信号
-    # df = generate_signals_single_ma(df)
-    #
-    # # 生成双 MA 信号
-    # df = generate_signals_double_ma(df)
+    df = generate_price_extremes_signals(df, [x for x in range(10, 10000, 100)])
+    # 生成单一 MA 信号
+    df = generate_signals_single_ma(df, [x for x in range(10, 10000, 100)])
+
+    # 生成双 MA 信号
+    df = generate_signals_double_ma(df, [x for x in range(10, 2500, 100)], [x for x in range(10, 2500, 100)])
     # df = generate_body_wick_signals(df)
     # df = generate_consecutive_and_large_candle_signals(df)
     # df = generate_ichimoku_signals(df)
@@ -2046,6 +2046,7 @@ def run_backtest():
                     signal_data = generate_signals(data)
                     backtest_df = backtest_strategy(signal_data)
                     backtest_df_op = backtest_strategy_op(signal_data)
+                    backtest_df_op['quantile_score1'] = backtest_df_op['quantile_value'] / backtest_df_op['quantile'] * backtest_df_op['ratio'] * backtest_df_op['diff_vs_baseline']
                     backtest_df.to_csv(final_output_file_path, index=False)
                     backtest_df_op.to_csv(final_op_output_file_path, index=False)
                     print(f'已经保存至{final_output_file_path}')
