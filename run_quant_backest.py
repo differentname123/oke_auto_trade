@@ -5,7 +5,8 @@ from tqdm import tqdm  # 用于显示进度条
 
 import pandas as pd
 
-from get_feature_op import generate_price_extremes_signals, generate_price_unextremes_signals
+from get_feature_op import generate_price_extremes_signals, generate_price_unextremes_signals, \
+    generate_price_extremes_reverse_signals
 
 
 def gen_buy_sell_signal(data_df, profit=1 / 100, period=10):
@@ -17,7 +18,7 @@ def gen_buy_sell_signal(data_df, profit=1 / 100, period=10):
     :return:
     """
     # start_time = datetime.now()
-    signal_df = generate_price_extremes_signals(data_df, periods=[period])
+    signal_df = generate_price_extremes_reverse_signals(data_df, periods=[period])
     # 找到包含Buy的列和包含Sell的列名
     buy_col = [col for col in signal_df.columns if 'Buy' in col]
     sell_col = [col for col in signal_df.columns if 'Sell' in col]
@@ -40,7 +41,7 @@ def gen_buy_sell_signal(data_df, profit=1 / 100, period=10):
     # 初始化 count 列
     signal_df['count'] = 0.01
     # signal_df['Sell'] = 0
-    signal_df['Buy'] = 0
+    # signal_df['Buy'] = 0
 
     return signal_df
 
@@ -428,11 +429,9 @@ def read_json(file_path):
 def example():
     backtest_path = 'backtest_result'
     file_path_list = ['kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv']
-    gen_signal_method = 'price_extremes_sell'
-    profit_list = generate_list(0.001, 0.04, 100, 4)
+    gen_signal_method = 'price_reverse_extremes_sell'
+    profit_list = generate_list(0.001, 0.1, 100, 4)
     period_list = generate_list(10, 10000, 100, 0)
-    period_list = [3240]
-    profit_list = generate_list(0.001, 0.1, 110, 4)
     # 将period_list变成int
     period_list = [int(period) for period in period_list]
     lever = 100
@@ -481,7 +480,6 @@ def example():
             result_df = pd.DataFrame(results)
             result_df.to_csv(file_out, index=False)
             print(f"结果已保存到 {file_out}")
-        break
 
 
 if __name__ == "__main__":
