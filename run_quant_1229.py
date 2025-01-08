@@ -1,13 +1,100 @@
+import json
 import os
 import multiprocessing as mp
-import time
+from datetime import datetime
+from numba import njit
 
+import numpy as np
 from tqdm import tqdm  # 用于显示进度条
 
 import pandas as pd
 
-from get_feature_op import generate_price_extremes_signals
+from get_feature_op import generate_price_extremes_signals, generate_price_unextremes_signals, \
+    generate_price_extremes_reverse_signals
 
+
+@njit
+def _calculate_time_to_targets_numba(
+        timestamps,
+        closes,
+        highs,
+        lows,
+        increase_targets,
+        decrease_targets
+):
+    n = len(timestamps)
+
+    # 用来存储结果的二维数组：行数量 x (len(increase_targets) + len(decrease_targets))
+    # 由于时间戳是 datetime64[ns] 类型，我们可以先把时间戳列转换成 int64 存储
+    # 等返回时再转换回去或存成字符串。
+    # 如果找不到就存 -1
+    result = np.full((n, len(increase_targets) + len(decrease_targets)), -1, dtype=np.int64)
+
+    for i in range(n - 1):
+        current_close = closes[i]
+
+        # 先处理涨幅目标
+        for inc_idx, inc_target in enumerate(increase_targets):
+            # 注意这里我们把 0.1 也纳入循环了。如果你想跳过它，改成 if inc_target == 0.1: pass
+            target_price = current_close * (1.0 + inc_target)
+            for j in range(i + 1, n):
+                if highs[j] >= target_price:
+                    result[i, inc_idx] = timestamps[j]  # earliest timestamp
+                    break  # 找到第一个就可以 break
+
+        # 再处理跌幅目标
+        for dec_idx, dec_target in enumerate(decrease_targets):
+            target_price = current_close * (1.0 - dec_target)
+            # result 的列索引要加上 len(increase_targets)，以免覆盖
+            out_col = len(increase_targets) + dec_idx
+            for j in range(i + 1, n):
+                if lows[j] <= target_price:
+                    result[i, out_col] = timestamps[j]
+                    break
+
+    return result
+
+
+def calculate_time_to_targets_op(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculates the time it takes for the 'close' price to increase/decrease
+    by specified percentages, and returns the corresponding future timestamp.
+
+    如果找不到满足条件的行，则返回 NaT。
+    """
+    start_time = datetime.now()
+
+    # 目标可根据需要调整
+    increase_targets = [0.01, 0.02, 0.1]
+    decrease_targets = [0.01, 0.02, 0.1]
+
+    # 提取 Numpy 数组
+    timestamps = df['timestamp'].astype('int64').values  # datetime64[ns] -> int64
+    closes = df['close'].values
+    highs = df['high'].values
+    lows = df['low'].values
+
+    # 运行 Numba 函数
+    result_array = _calculate_time_to_targets_numba(
+        timestamps, closes, highs, lows,
+        np.array(increase_targets, dtype=np.float64),
+        np.array(decrease_targets, dtype=np.float64),
+    )
+
+    all_targets = increase_targets + decrease_targets
+    for col_idx, target in enumerate(all_targets):
+        if col_idx < len(increase_targets):
+            col_name = f'time_to_high_target_{target}'
+        else:
+            col_name = f'time_to_low_target_{target}'
+
+        # 将 int64 的时间戳转换回 datetime64[ns]；为 -1 的维持 NaT
+        col_data = result_array[:, col_idx]
+        ts_series = pd.to_datetime(col_data, unit='ns', errors='coerce')
+        df[col_name] = ts_series.where(col_data != -1, pd.NaT)
+
+    print(f"calculate_time_to_targets cost time: {datetime.now() - start_time}")
+    return df
 
 def gen_buy_sell_signal(data_df, profit=1 / 100, period=10):
     """
@@ -18,7 +105,7 @@ def gen_buy_sell_signal(data_df, profit=1 / 100, period=10):
     :return:
     """
     # start_time = datetime.now()
-    signal_df = generate_price_extremes_signals(data_df, periods=[period])
+    signal_df = generate_price_extremes_reverse_signals(data_df, periods=[period])
     # 找到包含Buy的列和包含Sell的列名
     buy_col = [col for col in signal_df.columns if 'Buy' in col]
     sell_col = [col for col in signal_df.columns if 'Sell' in col]
@@ -40,6 +127,9 @@ def gen_buy_sell_signal(data_df, profit=1 / 100, period=10):
     signal_df.loc[sell_rows, 'sell_price'] = signal_df.loc[sell_rows, 'close'] * (1 - profit)
     # 初始化 count 列
     signal_df['count'] = 0.01
+    # signal_df['Sell'] = 0
+    signal_df['Buy'] = 0
+
     return signal_df
 
 
@@ -278,6 +368,8 @@ def process_signals(signal_df, lever, total_money, init_money):
 
     # 统计 'time out' 订单数量
     if not all_history_order_df.empty:
+        if 'message' not in all_history_order_df.columns:
+            all_history_order_df['message'] = None
         timeout_orders = all_history_order_df[all_history_order_df['message'] == 'time out']
         timeout_long = len(timeout_orders[timeout_orders['type'] == 'long'])
         timeout_short = len(timeout_orders[timeout_orders['type'] == 'short'])
@@ -348,8 +440,6 @@ def generate_list(start, end, count, decimals):
   return result
 
 
-import pandas as pd
-
 def merge_dataframes(df_list):
     """
     将一个包含多个 DataFrame 的列表按照 'profit' 和 'period' 字段进行合并，并添加源 DataFrame 标识。
@@ -366,6 +456,8 @@ def merge_dataframes(df_list):
 
     # 为每个 DataFrame 添加一个唯一的标识符列
     for i, df in enumerate(df_list):
+        df['hold_time_score'] = 10000 * df['profit_ratio'] / df['hold_time']
+
         df_list[i] = df.copy()  # Create a copy to avoid modifying the original DataFrame
         df_list[i]['source_df'] = f'df_{i+1}'
 
@@ -399,67 +491,89 @@ def merge_dataframes(df_list):
       merged_df['score'] = 10000 * merged_df[profit_ratio_cols[0]] * merged_df[profit_ratio_cols[1]] * merged_df[profit_ratio_cols[2]]
       merged_df['score_plus'] = merged_df[profit_ratio_cols[0]] + merged_df[profit_ratio_cols[1]] + merged_df[profit_ratio_cols[2]]
       merged_df['score_mul'] = merged_df['score_plus'] * merged_df['score']
+      merged_df['hold_time_score_plus'] = merged_df['hold_time_score'] + merged_df['hold_time_score_2'] + merged_df['hold_time_score_3']
     elif len(profit_ratio_cols) >=2:
       merged_df['score'] = 10000 * merged_df[profit_ratio_cols[0]] * merged_df[profit_ratio_cols[1]]
       merged_df['score_plus'] = merged_df[profit_ratio_cols[0]] + merged_df[profit_ratio_cols[1]]
       merged_df['score_mul'] = merged_df['score_plus'] * merged_df['score']
+      merged_df['hold_time_score_plus'] = merged_df['hold_time_score'] + merged_df['hold_time_score_2']
     return merged_df
 
+
+def read_json(file_path):
+    """
+    读取 JSON 文件并返回 Python 对象。
+
+    Args:
+      file_path: JSON 文件的路径。
+
+    Returns:
+      一个 Python 对象，表示 JSON 文件的内容。
+    """
+
+    with open(file_path, 'r') as file:
+        return json.load(file)
+
+
 def example():
-    time.sleep(60 * 60 * 3)
     backtest_path = 'backtest_result'
-    file_path = 'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv'
-    gen_signal_method = 'price_extremes'
-    base_name = file_path.split('/')[-1].split('.')[0]
-    profit_list = generate_list(0.001, 0.03, 300, 4)
-    period_list = generate_list(10, 5000, 100, 0)
+    file_path_list = ['kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv']
+    gen_signal_method = 'price_reverse_extremes_onlysell'
+    profit_list = generate_list(0.001, 0.1, 100, 4)
+    period_list = generate_list(10, 10000, 100, 0)
     # 将period_list变成int
     period_list = [int(period) for period in period_list]
     lever = 100
     init_money = 10000000
-    origin_data_df = pd.read_csv(file_path)  # 只取最近1000条数据
-    origin_data_df['timestamp'] = pd.to_datetime(origin_data_df['timestamp'])
+    longest_periods_info_path = 'kline_data/longest_periods_info.json'
+    all_longest_periods_info = read_json(longest_periods_info_path)
 
 
-    longest_periods_info = {
-        'longest_up': '2024-01-23_2024-03-18',
-        "longest_down": '2024-07-29_2024-09-07',
-        "longest_sideways": '2024-08-29_2024-10-17'
-    }
-    for key, value in longest_periods_info.items():
-        start_time_str, end_time_str = value.split('_')
-        start_time = pd.to_datetime(start_time_str)
-        end_time = pd.to_datetime(end_time_str)
-        data_df = origin_data_df[(origin_data_df['timestamp'] >= start_time) & (origin_data_df['timestamp'] <= end_time)]
+    for file_path in file_path_list:
+        base_name = file_path.split('/')[-1].split('.')[0]
+        origin_data_df = pd.read_csv(file_path)  # 只取最近1000条数据
+        origin_data_df['timestamp'] = pd.to_datetime(origin_data_df['timestamp'])
+        df1 = calculate_time_to_targets_op(origin_data_df)
+        print()
 
-        data_len = len(data_df)
 
-        # 获取data_df的初始时间与结束时间
-        start_time = data_df.iloc[0].timestamp
-        end_time = data_df.iloc[-1].timestamp
-        print(f"开始时间：{start_time}，结束时间：{end_time} 长度：{data_len} key = {key}")
-        # 生成time_key
-        time_key_str = f"{start_time.strftime('%Y%m%d%H%M%S')}_{end_time.strftime('%Y%m%d%H%M%S')}"
 
-        # 准备参数组合
-        combinations = [(profit, period, data_df, lever, init_money) for profit in profit_list for period in period_list]
-        print(f"共有 {len(combinations)} 个组合，开始计算...")
 
-        # 使用多进程计算
-        with mp.Pool(processes=os.cpu_count()) as pool:
-            results = list(tqdm(pool.imap(calculate_combination, combinations), total=len(combinations)))
-
-        # 保存结果
-        result_df = pd.DataFrame(results)
-        file_out = f'{backtest_path}/result_{data_len}_{len(combinations)}_{base_name}_{time_key_str}_{gen_signal_method}_{key}.csv'
-        result_df.to_csv(file_out, index=False)
-        print(f"结果已保存到 {file_out}")
+        # longest_periods_info = all_longest_periods_info[base_name]
+        # for key, value in longest_periods_info.items():
+        #     start_time_str, end_time_str = value.split('_')
+        #     start_time = pd.to_datetime(start_time_str)
+        #     end_time = pd.to_datetime(end_time_str)
+        #     data_df = origin_data_df[(origin_data_df['timestamp'] >= start_time) & (origin_data_df['timestamp'] <= end_time)]
+        #
+        #     data_len = len(data_df)
+        #
+        #     # 获取data_df的初始时间与结束时间
+        #     start_time = data_df.iloc[0].timestamp
+        #     end_time = data_df.iloc[-1].timestamp
+        #     print(f"开始时间：{start_time}，结束时间：{end_time} 长度：{data_len} key = {key}")
+        #     # 生成time_key
+        #     time_key_str = f"{start_time.strftime('%Y%m%d%H%M%S')}_{end_time.strftime('%Y%m%d%H%M%S')}"
+        #
+        #
+        #     # 准备参数组合
+        #     combinations = [(profit, period, data_df, lever, init_money) for profit in profit_list for period in period_list]
+        #     print(f"共有 {len(combinations)} 个组合，开始计算...")
+        #
+        #     file_out = f'{backtest_path}/result_{data_len}_{len(combinations)}_{base_name}_{time_key_str}_{gen_signal_method}_{key}.csv'
+        #     if os.path.exists(file_out):
+        #         print(f"结果文件 {file_out} 已存在，跳过计算")
+        #         continue
+        #
+        #     # 使用多进程计算
+        #     with mp.Pool(processes=os.cpu_count() - 2) as pool:
+        #         results = list(tqdm(pool.imap(calculate_combination, combinations), total=len(combinations)))
+        #
+        #     # 保存结果
+        #     result_df = pd.DataFrame(results)
+        #     result_df.to_csv(file_out, index=False)
+        #     print(f"结果已保存到 {file_out}")
 
 
 if __name__ == "__main__":
-    result_df1 = pd.read_csv('backtest_result/result_50401_5000_origin_data_1m_10000000_SOL-USDT-SWAP_20240205000000_20240311000000_price_unextremes_longest_up.csv')
-    result_df2 = pd.read_csv('backtest_result/result_70561_5000_origin_data_1m_10000000_SOL-USDT-SWAP_20240720000000_20240907000000_price_unextremes_longest_down.csv')
-    result_df3 = pd.read_csv('backtest_result/result_59041_5000_origin_data_1m_10000000_SOL-USDT-SWAP_20240807000000_20240917000000_price_unextremes_longest_sideways.csv')
-    result_list = [result_df1, result_df2, result_df3]
-    merged_df = merge_dataframes(result_list)
     example()

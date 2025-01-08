@@ -41,7 +41,7 @@ def gen_buy_sell_signal(data_df, profit=1 / 100, period=10):
     # 初始化 count 列
     signal_df['count'] = 0.01
     # signal_df['Sell'] = 0
-    # signal_df['Buy'] = 0
+    signal_df['Buy'] = 0
 
     return signal_df
 
@@ -281,6 +281,8 @@ def process_signals(signal_df, lever, total_money, init_money):
 
     # 统计 'time out' 订单数量
     if not all_history_order_df.empty:
+        if 'message' not in all_history_order_df.columns:
+            all_history_order_df['message'] = None
         timeout_orders = all_history_order_df[all_history_order_df['message'] == 'time out']
         timeout_long = len(timeout_orders[timeout_orders['type'] == 'long'])
         timeout_short = len(timeout_orders[timeout_orders['type'] == 'short'])
@@ -429,7 +431,7 @@ def read_json(file_path):
 def example():
     backtest_path = 'backtest_result'
     file_path_list = ['kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv']
-    gen_signal_method = 'price_reverse_extremes_sell'
+    gen_signal_method = 'price_reverse_extremes_onlysell'
     profit_list = generate_list(0.001, 0.1, 100, 4)
     period_list = generate_list(10, 10000, 100, 0)
     # 将period_list变成int
@@ -473,7 +475,7 @@ def example():
                 continue
 
             # 使用多进程计算
-            with mp.Pool(processes=os.cpu_count() - 5) as pool:
+            with mp.Pool(processes=os.cpu_count() - 2) as pool:
                 results = list(tqdm(pool.imap(calculate_combination, combinations), total=len(combinations)))
 
             # 保存结果

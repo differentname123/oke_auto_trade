@@ -2043,9 +2043,11 @@ def run_backtest():
                     final_op_output_file_path = f'{backtest_path}/statistic_op_{base_file_path[:-4]}_{bar}_{max_candles}.csv'
                     # 去除后60行
                     data = full_data[:-10000]
-                    signal_data = generate_signals(data)
-                    backtest_df = backtest_strategy(signal_data)
-                    backtest_df_op = backtest_strategy_op(signal_data)
+                    # signal_data = generate_signals(data)
+                    # backtest_df = backtest_strategy(signal_data)
+                    # backtest_df_op = backtest_strategy_op(signal_data)
+                    backtest_df = pd.read_csv(final_output_file_path)
+                    backtest_df_op = pd.read_csv(final_op_output_file_path)
                     backtest_df_op['quantile_score1'] = backtest_df_op['quantile_value'] / backtest_df_op['quantile'] * backtest_df_op['ratio'] * backtest_df_op['diff_vs_baseline']
                     backtest_df.to_csv(final_output_file_path, index=False)
                     backtest_df_op.to_csv(final_op_output_file_path, index=False)
