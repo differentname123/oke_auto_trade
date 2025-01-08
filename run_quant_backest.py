@@ -1,6 +1,10 @@
 import json
 import os
 import multiprocessing as mp
+from datetime import datetime
+
+import numpy as np
+from numba import prange, njit
 from tqdm import tqdm  # 用于显示进度条
 
 import pandas as pd
@@ -45,6 +49,90 @@ def gen_buy_sell_signal(data_df, profit=1 / 100, period=10):
 
     return signal_df
 
+
+@njit(parallel=True)
+def _calculate_time_to_targets_numba_parallel(
+    timestamps,
+    closes,
+    highs,
+    lows,
+    increase_targets,
+    decrease_targets,
+    max_search=1000000
+):
+    n = len(timestamps)
+    total_targets = len(increase_targets) + len(decrease_targets)
+    result = np.full((n, total_targets), -1, dtype=np.int64)
+
+    for i in prange(n - 1):  # 使用 prange 并行外层循环
+        current_close = closes[i]
+
+        # 先处理涨幅目标
+        for inc_idx, inc_target in enumerate(increase_targets):
+            target_price = current_close * (1.0 + inc_target)
+            upper_bound = min(n, i + 1 + max_search)
+            for j in range(i + 1, upper_bound):
+                if highs[j] >= target_price:
+                    result[i, inc_idx] = timestamps[j]
+                    break
+
+        # 再处理跌幅目标
+        for dec_idx, dec_target in enumerate(decrease_targets):
+            target_price = current_close * (1.0 - dec_target)
+            out_col = len(increase_targets) + dec_idx
+            upper_bound = min(n, i + 1 + max_search)
+            for j in range(i + 1, upper_bound):
+                if lows[j] <= target_price:
+                    result[i, out_col] = timestamps[j]
+                    break
+
+    return result
+
+
+def calculate_time_to_targets(file_path):
+    """
+    Calculates the time it takes for the 'close' price to increase/decrease
+    by specified percentages, and returns the corresponding future timestamp.
+
+    如果找不到满足条件的行，则返回 NaT。
+    """
+    result_file_path = file_path.replace('.csv', '_time_to_targets.csv')
+    start_time = datetime.now()
+    df = pd.read_csv(file_path)[-1000000:]
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+
+    # 目标可根据需要调整
+    increase_targets = [x / 10000 for x in range(1, 1000)]
+    decrease_targets = [x / 10000 for x in range(1, 1000)]
+
+    # 提取 Numpy 数组
+    timestamps = df['timestamp'].astype('int64').values  # datetime64[ns] -> int64
+    closes = df['close'].values
+    highs = df['high'].values
+    lows = df['low'].values
+
+    # 运行 Numba 函数
+    result_array = _calculate_time_to_targets_numba_parallel(
+        timestamps, closes, highs, lows,
+        np.array(increase_targets, dtype=np.float64),
+        np.array(decrease_targets, dtype=np.float64),
+    )
+
+    all_targets = increase_targets + decrease_targets
+    for col_idx, target in enumerate(all_targets):
+        if col_idx < len(increase_targets):
+            col_name = f'time_to_high_target_{target}'
+        else:
+            col_name = f'time_to_low_target_{target}'
+
+        # 将 int64 的时间戳转换回 datetime64[ns]；为 -1 的维持 NaT
+        col_data = result_array[:, col_idx]
+        ts_series = pd.to_datetime(col_data, unit='ns', errors='coerce')
+        df[col_name] = ts_series.where(col_data != -1, pd.NaT)
+
+    print(f"calculate_time_to_targets cost time: {datetime.now() - start_time}")
+    df.to_csv(result_file_path, index=False)
+    return df
 
 def analysis_position(pending_order_list, row, total_money, leverage=100):
     """
