@@ -1,6 +1,7 @@
 import json
 import os
 import multiprocessing as mp
+import time
 from datetime import datetime
 
 import numpy as np
@@ -22,7 +23,7 @@ def gen_buy_sell_signal(data_df, profit=1 / 100, period=10):
     :return:
     """
     # start_time = datetime.now()
-    signal_df = generate_price_extremes_reverse_signals(data_df, periods=[period])
+    signal_df = generate_price_extremes_signals(data_df, periods=[period])
     # 找到包含Buy的列和包含Sell的列名
     buy_col = [col for col in signal_df.columns if 'Buy' in col]
     sell_col = [col for col in signal_df.columns if 'Sell' in col]
@@ -45,7 +46,7 @@ def gen_buy_sell_signal(data_df, profit=1 / 100, period=10):
     # 初始化 count 列
     signal_df['count'] = 0.01
     # signal_df['Sell'] = 0
-    signal_df['Buy'] = 0
+    # signal_df['Buy'] = 0
 
     return signal_df
 
@@ -501,6 +502,207 @@ def merge_dataframes(df_list):
     return merged_df
 
 
+def compute_diff_statistics_signals_time_ranges_readable(
+    signal_df: pd.DataFrame,
+    time_range_list: list,
+    optimized_parquet_path: str
+) -> pd.DataFrame:
+    """
+    一个更直观（但不一定是最高效）的实现示例：
+    1) 一次性读取并预处理 df_optimized (Parquet 格式)
+    2) 识别所有diff列 & 所有信号列
+    3) 三重循环：对每个 time_range -> 对每个 signal_col -> 对每个 diff_col 单独做统计
+    """
+
+    start_time_all = time.time()
+    print(">>> 开始执行 compute_diff_statistics_signals_time_ranges_readable 函数")
+
+    # ----------------------------------------------------------------------------------------
+    # [Step 1] 读取并加载 Parquet 文件
+    #          此时可以根据时间范围做一个全局过滤——使 df_optimized 里只保留最小~最大时刻的数据
+    # ----------------------------------------------------------------------------------------
+    print(">>> [Step 1] 读取并加载 Parquet 文件")
+    step_start_time = time.time()
+    df_optimized = pd.read_parquet(optimized_parquet_path)
+    df_optimized['timestamp'] = pd.to_datetime(df_optimized['timestamp'], errors='coerce')
+
+    # 计算 global_min、global_max，用于预过滤
+    all_starts = [pd.to_datetime(s) for (s, e) in time_range_list]
+    all_ends = [pd.to_datetime(e) for (s, e) in time_range_list]
+    global_min = min(all_starts)
+    global_max = max(all_ends)
+
+    df_optimized = df_optimized[
+        (df_optimized['timestamp'] >= global_min) &
+        (df_optimized['timestamp'] < global_max)
+    ].copy()
+
+    # 识别所有 _diff 列
+    diff_cols = [c for c in df_optimized.columns if c.endswith('_diff')]
+
+    print(f"    加载后 df_optimized 行数: {len(df_optimized)}")
+    print(f"    diff_cols: {diff_cols}")
+    print(f"    完成, 耗时: {time.time() - step_start_time:.4f}秒")
+
+    # ----------------------------------------------------------------------------------------
+    # [Step 2] 预处理 signal_df：识别所有信号列
+    # ----------------------------------------------------------------------------------------
+    print(">>> [Step 2] 预处理 signal_df")
+    step_start_time = time.time()
+    signal_df['timestamp'] = pd.to_datetime(signal_df['timestamp'], errors='coerce')
+
+    all_cols = signal_df.columns.tolist()
+    signal_cols = [col for col in all_cols if ('buy' in col.lower() or 'sell' in col.lower())]
+
+    print(f"    找到 {len(signal_cols)} 个信号列: {signal_cols}")
+    print(f"    完成, 耗时: {time.time() - step_start_time:.4f}秒")
+
+    # ----------------------------------------------------------------------------------------
+    # [Step 3] 把 time_range_list 先转换成 (pd.Timestamp, pd.Timestamp) 类型，并做一个映射
+    # ----------------------------------------------------------------------------------------
+    print(">>> [Step 3] 整理 time_range_list")
+    step_start_time = time.time()
+
+    time_ranges = [(pd.to_datetime(s), pd.to_datetime(e)) for (s, e) in time_range_list]
+    # 便于最终输出可读
+    def format_range(s, e):
+        return f"{s.strftime('%Y-%m-%d')} ~ {e.strftime('%Y-%m-%d')}"
+
+    print(f"    完成, 耗时: {time.time() - step_start_time:.4f}秒")
+
+    # ----------------------------------------------------------------------------------------
+    # [Step 4] 三重循环：迭代 time_range -> signal_col -> diff_col
+    #          每个组合对应一条最终结果记录
+    # ----------------------------------------------------------------------------------------
+    print(">>> [Step 4] 三重循环统计")
+    step_start_time = time.time()
+
+    results = []  # 用于收集每个 (time_range, signal_col) 的所有 diff_col 统计
+
+    for (start_t, end_t) in time_ranges:
+        # 取当前 time_range 的可读字符串
+        time_range_str = format_range(start_t, end_t)
+
+        # 先对 signal_df 做时间过滤
+        # （若数据量大，可再加上 signal_value=1 的预判；目前为了直观，不做太多花哨手段）
+        df_signal_in_range = signal_df[
+            (signal_df['timestamp'] >= start_t) &
+            (signal_df['timestamp'] < end_t)
+        ].copy()
+
+        # 如果在这个区间里，没有任何 signal_df 的行，那么这个区间对所有 signal_col 统计都为空
+        if df_signal_in_range.empty:
+            # 也可以选择跳过这个 time_range
+            # 这里演示：硬要生成空的统计记录也没太大意义，可以直接continue
+            continue
+
+        for sc in signal_cols:
+            signal_start_time = time.time()
+            # 只保留 sc == 1 的行
+            df_signal_ones = df_signal_in_range[df_signal_in_range[sc] == 1].copy()
+            if df_signal_ones.empty:
+                # 在这个区间，这个signal_col没有任何1
+                continue
+
+            # 拿到这些 timestamp 并在 df_optimized 中匹配
+            timestamps_needed = df_signal_ones['timestamp'].unique()
+            df_opt_for_these_ts = df_optimized[df_optimized['timestamp'].isin(timestamps_needed)].copy()
+            if df_opt_for_these_ts.empty:
+                # 说明 df_optimized 里没有这些 timestamp
+                continue
+
+            # group_size = 此 (time_range, signal_col) 下的总行数(合并后)
+            # 因为每个 timestamp 只出现一次，也可能出现多次——具体看你的数据。
+            # 假设 timestamp 无重复则 group_size=len(df_opt_for_these_ts)。
+            # 若要与 df_signal_ones 一一对应，需要做一次合并（on='timestamp'），确保行匹配。
+            # 这里做个最简单的情况：若timestamp没有重复，就直接取 len(timestamps_needed)
+            # （如果timestamp会有重复，需要做 merge，然后再算 shape[0]）
+            merged_df = pd.merge(
+                df_signal_ones[['timestamp']],
+                df_opt_for_these_ts,
+                on='timestamp',
+                how='inner'
+            )
+            group_size = len(merged_df)
+            if group_size == 0:
+                continue
+
+            # 创建一条统计记录（最终会包含所有 diff_col 的统计）
+            record = {
+                'time_range': time_range_str,
+                'signal_name': sc,
+                'group_size': group_size
+            }
+
+            # 对每个 diff_col 做统计：mean, median, nan_count, nan_ratio
+            for dc in diff_cols:
+                series_dc = merged_df[dc]
+                nan_count = series_dc.isna().sum()
+                nonan_series = series_dc.dropna()
+
+                mean_val = nonan_series.mean() if len(nonan_series) > 0 else None
+                median_val = nonan_series.median() if len(nonan_series) > 0 else None
+
+                record[f"{dc}_mean"] = mean_val
+                record[f"{dc}_median"] = median_val
+                record[f"{dc}_nan_count"] = nan_count
+                record[f"{dc}_nan_ratio"] = nan_count / group_size if group_size else None
+
+            # 把这条完整记录放入 results
+            results.append(record)
+            print(f"    {time_range_str} {sc} 统计完成, 耗时: {time.time() - signal_start_time:.4f}秒")
+
+    print(f"    三重循环结束，合计生成 {len(results)} 条统计记录")
+    print(f"    耗时: {time.time() - step_start_time:.4f}秒")
+
+    # ----------------------------------------------------------------------------------------
+    # [Step 5] 将 results 转为 DataFrame，并整理列顺序
+    # ----------------------------------------------------------------------------------------
+    print(">>> [Step 5] 构造最终结果 DataFrame")
+    step_start_time = time.time()
+
+    if not results:
+        # 如果为空，返回一个空表，列名按约定可声明好
+        # （或直接 return pd.DataFrame() 也可）
+        final_cols = ['time_range', 'signal_name', 'group_size'] + \
+                     [f"{dc}_mean" for dc in diff_cols] + \
+                     [f"{dc}_median" for dc in diff_cols] + \
+                     [f"{dc}_nan_count" for dc in diff_cols] + \
+                     [f"{dc}_nan_ratio" for dc in diff_cols]
+        final_df = pd.DataFrame(columns=final_cols)
+        print("    找不到任何统计数据，返回空 DataFrame")
+    else:
+        final_df = pd.DataFrame(results)
+
+        # 整理列顺序
+        front_cols = ['time_range', 'signal_name', 'group_size']
+        diff_stat_cols = []
+        for dc in diff_cols:
+            diff_stat_cols.extend([
+                f"{dc}_mean",
+                f"{dc}_median",
+                f"{dc}_nan_count",
+                f"{dc}_nan_ratio"
+            ])
+        final_cols = front_cols + diff_stat_cols
+
+        # 若有些列在某些情况下未出现，可先补齐
+        for c in final_cols:
+            if c not in final_df.columns:
+                final_df[c] = None
+
+        final_df = final_df[final_cols]
+
+    print(f"    最终结果行数: {len(final_df)}")
+    print(f"    耗时: {time.time() - step_start_time:.4f}秒")
+
+    # ----------------------------------------------------------------------------------------
+    total_time = time.time() - start_time_all
+    print(f">>> 函数 compute_diff_statistics_signals_time_ranges_readable 执行完毕, 总耗时: {total_time:.4f}秒")
+
+    return final_df
+
+
 def read_json(file_path):
     """
     读取 JSON 文件并返回 Python 对象。
@@ -516,10 +718,58 @@ def read_json(file_path):
         return json.load(file)
 
 
-def example():
+def statistic_data(file_path_list):
+    """
+    加速后的处理数据的代码
+    :return:
+    """
+    for file_path in file_path_list:
+        origin_df = pd.read_csv(file_path)
+        # 获取file_path的目录
+        file_dir = os.path.dirname(file_path)
+        base_name = file_path.split('/')[-1].split('.')[0]
+        key_word = "price_extremes"
+        start_period = 10
+        end_period = 10000
+        step_period = 10
+        file_path_output_dir = file_dir + f"/{key_word}/{base_name}"
+        # 如果file_path_output_dir不存在，则创建
+        if not os.path.exists(file_path_output_dir):
+            os.makedirs(file_path_output_dir)
+        file_path_output = file_path_output_dir + f"/start_period_{start_period}_end_period_{end_period}_step_period_{step_period}.csv"
+        result_file_path = file_path.replace('.csv', f'_time_to_targets_optimized.csv')
+        optimized_parquet_path = result_file_path.replace('.csv', f'.parquet')
+        if os.path.exists(file_path_output):
+            print(f"结果文件 {file_path_output} 已存在，跳过计算")
+            continue
+        signal_df = generate_price_extremes_reverse_signals(origin_df, periods=[x for x in range(start_period, end_period, step_period)])
+
+        result_df = compute_diff_statistics_signals_time_ranges_readable(signal_df, [("2022-10-16", "2025-12-16")],
+                                                                optimized_parquet_path)
+        result_df.to_csv(file_path_output, index=False)
+
+        # for i in range(1, 11):
+        #     file_path_output = file_path.replace('.csv', f'_statistic_{i}.csv')
+        #     result_file_path = file_path.replace('.csv', f'_time_to_targets_optimized_{i}.csv')
+        #     optimized_parquet_path = result_file_path.replace('.csv', f'.parquet')
+        #     # convert_csv_to_parquet(result_file_path, result_file_path.replace('.csv', f'.parquet'))
+        #     # if os.path.exists(file_path_output):
+        #     #     print(f"结果文件 {file_path_output} 已存在，跳过计算")
+        #     #     continue
+        #     result_df = compute_diff_statistics_signals_time_ranges_readable(signal_df, [("2022-10-16", "2025-12-16"),("2023-10-16", "2025-12-16")], optimized_parquet_path)
+        #
+        #
+        #     result_df.to_csv(file_path_output, index=False)
+
+
+def truly_backtest():
+    """
+    之前一一组合生成回测数据的代码
+    :return:
+    """
     backtest_path = 'backtest_result'
     file_path_list = ['kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv']
-    gen_signal_method = 'price_reverse_extremes_onlysell'
+    gen_signal_method = 'price_extremes'
     profit_list = generate_list(0.001, 0.1, 100, 4)
     period_list = generate_list(10, 10000, 100, 0)
     # 将period_list变成int
@@ -571,6 +821,20 @@ def example():
             result_df.to_csv(file_out, index=False)
             print(f"结果已保存到 {file_out}")
 
+def example():
+    file_path_list = ['kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv',
+     'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv']
+
+    # 示例一:传统的一一获取不同信号在三种指定时间段上面的表现结果
+    # truly_backtest(file_path_list)
+
+    # 示例二:使用预处理后的数据初略获取回测效果数据
+    statistic_data(file_path_list)
+
+
+    # #示例三: 对原始数据进行预处理
+    # for file_path in file_path_list:
+    #     calculate_time_to_targets(file_path)
 
 if __name__ == "__main__":
     example()

@@ -1,10 +1,13 @@
 import json
+import math
 import os
 import multiprocessing as mp
+import time
 from datetime import datetime
-from numba import njit
+import pyarrow.parquet as pq
 
 import numpy as np
+from numba import njit, prange
 from tqdm import tqdm  # 用于显示进度条
 
 import pandas as pd
@@ -12,89 +15,6 @@ import pandas as pd
 from get_feature_op import generate_price_extremes_signals, generate_price_unextremes_signals, \
     generate_price_extremes_reverse_signals
 
-
-@njit
-def _calculate_time_to_targets_numba(
-        timestamps,
-        closes,
-        highs,
-        lows,
-        increase_targets,
-        decrease_targets
-):
-    n = len(timestamps)
-
-    # 用来存储结果的二维数组：行数量 x (len(increase_targets) + len(decrease_targets))
-    # 由于时间戳是 datetime64[ns] 类型，我们可以先把时间戳列转换成 int64 存储
-    # 等返回时再转换回去或存成字符串。
-    # 如果找不到就存 -1
-    result = np.full((n, len(increase_targets) + len(decrease_targets)), -1, dtype=np.int64)
-
-    for i in range(n - 1):
-        current_close = closes[i]
-
-        # 先处理涨幅目标
-        for inc_idx, inc_target in enumerate(increase_targets):
-            # 注意这里我们把 0.1 也纳入循环了。如果你想跳过它，改成 if inc_target == 0.1: pass
-            target_price = current_close * (1.0 + inc_target)
-            for j in range(i + 1, n):
-                if highs[j] >= target_price:
-                    result[i, inc_idx] = timestamps[j]  # earliest timestamp
-                    break  # 找到第一个就可以 break
-
-        # 再处理跌幅目标
-        for dec_idx, dec_target in enumerate(decrease_targets):
-            target_price = current_close * (1.0 - dec_target)
-            # result 的列索引要加上 len(increase_targets)，以免覆盖
-            out_col = len(increase_targets) + dec_idx
-            for j in range(i + 1, n):
-                if lows[j] <= target_price:
-                    result[i, out_col] = timestamps[j]
-                    break
-
-    return result
-
-
-def calculate_time_to_targets_op(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Calculates the time it takes for the 'close' price to increase/decrease
-    by specified percentages, and returns the corresponding future timestamp.
-
-    如果找不到满足条件的行，则返回 NaT。
-    """
-    start_time = datetime.now()
-
-    # 目标可根据需要调整
-    increase_targets = [0.01, 0.02, 0.1]
-    decrease_targets = [0.01, 0.02, 0.1]
-
-    # 提取 Numpy 数组
-    timestamps = df['timestamp'].astype('int64').values  # datetime64[ns] -> int64
-    closes = df['close'].values
-    highs = df['high'].values
-    lows = df['low'].values
-
-    # 运行 Numba 函数
-    result_array = _calculate_time_to_targets_numba(
-        timestamps, closes, highs, lows,
-        np.array(increase_targets, dtype=np.float64),
-        np.array(decrease_targets, dtype=np.float64),
-    )
-
-    all_targets = increase_targets + decrease_targets
-    for col_idx, target in enumerate(all_targets):
-        if col_idx < len(increase_targets):
-            col_name = f'time_to_high_target_{target}'
-        else:
-            col_name = f'time_to_low_target_{target}'
-
-        # 将 int64 的时间戳转换回 datetime64[ns]；为 -1 的维持 NaT
-        col_data = result_array[:, col_idx]
-        ts_series = pd.to_datetime(col_data, unit='ns', errors='coerce')
-        df[col_name] = ts_series.where(col_data != -1, pd.NaT)
-
-    print(f"calculate_time_to_targets cost time: {datetime.now() - start_time}")
-    return df
 
 def gen_buy_sell_signal(data_df, profit=1 / 100, period=10):
     """
@@ -515,9 +435,426 @@ def read_json(file_path):
         return json.load(file)
 
 
+@njit(parallel=True)
+def _calculate_time_to_targets_numba_parallel(
+    timestamps,
+    closes,
+    highs,
+    lows,
+    increase_targets,
+    decrease_targets,
+    max_search=1000000
+):
+    n = len(timestamps)
+    total_targets = len(increase_targets) + len(decrease_targets)
+    result = np.full((n, total_targets), -1, dtype=np.int64)
+
+    for i in prange(n - 1):  # 使用 prange 并行外层循环
+        current_close = closes[i]
+
+        # 先处理涨幅目标
+        for inc_idx, inc_target in enumerate(increase_targets):
+            target_price = current_close * (1.0 + inc_target)
+            upper_bound = min(n, i + 1 + max_search)
+            for j in range(i + 1, upper_bound):
+                if highs[j] >= target_price:
+                    result[i, inc_idx] = timestamps[j]
+                    break
+
+        # 再处理跌幅目标
+        for dec_idx, dec_target in enumerate(decrease_targets):
+            target_price = current_close * (1.0 - dec_target)
+            out_col = len(increase_targets) + dec_idx
+            upper_bound = min(n, i + 1 + max_search)
+            for j in range(i + 1, upper_bound):
+                if lows[j] <= target_price:
+                    result[i, out_col] = timestamps[j]
+                    break
+
+    return result
+
+
+def calculate_time_to_targets(file_path):
+    """
+    Calculates the time it takes for the 'close' price to increase/decrease
+    by specified percentages, and returns the corresponding future timestamp.
+
+    如果找不到满足条件的行，则返回 NaT。
+    """
+    result_file_path = file_path.replace('.csv', '_time_to_targets.csv')
+    start_time = datetime.now()
+    df = pd.read_csv(file_path)[-1000000:]
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+
+    # 目标可根据需要调整
+    increase_targets = [x / 10000 for x in range(1, 1000)]
+    decrease_targets = [x / 10000 for x in range(1, 1000)]
+
+    # 提取 Numpy 数组
+    timestamps = df['timestamp'].astype('int64').values  # datetime64[ns] -> int64
+    closes = df['close'].values
+    highs = df['high'].values
+    lows = df['low'].values
+
+    # 运行 Numba 函数
+    result_array = _calculate_time_to_targets_numba_parallel(
+        timestamps, closes, highs, lows,
+        np.array(increase_targets, dtype=np.float64),
+        np.array(decrease_targets, dtype=np.float64),
+    )
+
+    all_targets = increase_targets + decrease_targets
+    for col_idx, target in enumerate(all_targets):
+        if col_idx < len(increase_targets):
+            col_name = f'time_to_high_target_{target}'
+        else:
+            col_name = f'time_to_low_target_{target}'
+
+        # 将 int64 的时间戳转换回 datetime64[ns]；为 -1 的维持 NaT
+        col_data = result_array[:, col_idx]
+        ts_series = pd.to_datetime(col_data, unit='ns', errors='coerce')
+        df[col_name] = ts_series.where(col_data != -1, pd.NaT)
+
+    print(f"calculate_time_to_targets cost time: {datetime.now() - start_time}")
+    df.to_csv(result_file_path, index=False)
+    return df
+
+
+def load_and_optimize_time_to_targets(
+        input_csv_path: str,
+        output_parquet_path: str = None,
+        downcast_prices: bool = True,
+        floor_timestamp_to_minute: bool = True
+):
+    """
+    加载已生成的 CSV 文件，只保留 'timestamp', 'close', 'high', 'low'
+    以及所有包含 'time_to' 的列；并针对具体需求进行优化。
+
+    参数：
+    ----------
+    input_csv_path : str
+        已经生成的大 CSV 文件路径。
+    output_parquet_path : str, optional
+        优化后输出的 Parquet 文件路径。若不提供，则自动以 '_optimized.parquet' 结尾。
+    downcast_prices : bool, default True
+        是否将 close, high, low 列转为 float32 以减小内存。适合 0~200000 范围。
+    floor_timestamp_to_minute : bool, default True
+        是否将所有时间列 (包括 'timestamp' 和包含 'time_to' 的列) 保留到分钟精度。
+
+    返回：
+    ----------
+    优化后的 DataFrame
+    """
+
+    # 0) 如果没有指定输出文件，则默认拼一个 '_optimized.parquet'
+    if output_parquet_path is None:
+        output_parquet_path = input_csv_path.rsplit('.', 1)[0] + '_optimized.parquet'
+
+    # 1) 先读入一行，获取所有列名，以便筛选需要的列
+    print("Reading CSV header to identify columns...")
+    sample_df = pd.read_csv(input_csv_path, nrows=1)
+    all_cols = sample_df.columns.tolist()
+
+    # 2) 构造列筛选：需要 'timestamp', 'close', 'high', 'low' 以及包含 "time_to" 的列
+    needed_cols = {'timestamp', 'close', 'high', 'low'}
+    time_to_cols = {col for col in all_cols if 'time_to' in col}
+    usecols = list(needed_cols.union(time_to_cols))
+
+    print(f"Columns to be read: {usecols}")
+
+    # 3) 再次读取 CSV 时，仅加载需要的列
+    print(f"Loading CSV data with only required columns...")
+    df = pd.read_csv(input_csv_path, usecols=usecols)
+
+    # 4) 处理时间列：将 'timestamp' 和所有 'time_to' 列统一解析为 datetime
+    #    若 floor_timestamp_to_minute=True，则只保留到分钟精度
+    time_cols = ['timestamp'] + list(time_to_cols)
+    for tcol in time_cols:
+        if tcol in df.columns:
+            df[tcol] = pd.to_datetime(df[tcol], errors='coerce')  # 先转为 datetime
+            if floor_timestamp_to_minute:
+                df[tcol] = df[tcol].dt.floor('T')  # 向下取整到分钟
+
+    # 5) 将价格列 downcast 到 float32
+    if downcast_prices:
+        price_cols = ['close', 'high', 'low']
+        for pcol in price_cols:
+            if pcol in df.columns:
+                df[pcol] = pd.to_numeric(df[pcol], errors='coerce', downcast='float')
+                # downcast='float' 会自动转为 float32（范围足够 0~200000）
+
+    print("Data types after conversion:")
+    print(df.dtypes)
+
+    # 6) 写入 Parquet 格式
+    print(f"Saving optimized Parquet to: {output_parquet_path}")
+    df.to_parquet(output_parquet_path, index=False)
+
+    return df
+
+
+def split_csv_by_columns(csv_path, num_splits):
+    """
+    将 CSV 文件按照列进行分割。
+
+    Args:
+        csv_path (str): CSV 文件的路径。
+        num_splits (int): 分割的份数。
+    """
+    base_filename = os.path.splitext(os.path.basename(csv_path))[0]
+
+    try:
+        df = pd.read_csv(csv_path)
+    except FileNotFoundError:
+        print(f"错误：找不到文件 {csv_path}")
+        return
+    except Exception as e:
+        print(f"读取 CSV 文件时发生错误：{e}")
+        return
+
+    # 获取所有列名
+    all_columns = df.columns.tolist()
+
+    # 分离包含 "diff" 和不包含 "diff" 的列名
+    diff_columns = [col for col in all_columns if 'diff' in col]
+    non_diff_columns = [col for col in all_columns if 'diff' not in col]
+
+    # 如果没有包含 "diff" 的列，则直接将不包含 "diff" 的列保存为一个文件并返回
+    if not diff_columns:
+        output_filename = os.path.splitext(os.path.basename(csv_path))[0] + "_non_diff.csv"
+        df[non_diff_columns].to_csv(output_filename, index=False)
+        print(f"已保存文件：{output_filename} (只包含非 diff 列)")
+        return
+
+    # 计算每个分割应该包含的 "diff" 列的数量
+    n = len(diff_columns)
+    split_size = math.ceil(n / num_splits)
+
+    # 分割 "diff" 列
+    diff_column_chunks = [diff_columns[i:i + split_size] for i in range(0, n, split_size)]
+
+    # 组合列并保存文件
+    for i, diff_chunk in enumerate(diff_column_chunks):
+        # 组合列名
+        combined_columns = non_diff_columns + diff_chunk
+
+        # 提取相应的列
+        split_df = df[combined_columns]
+
+        # 生成输出文件名
+
+        output_filename = csv_path.replace('.csv', f"_{i+1}.csv")
+
+        # 保存为新的 CSV 文件
+        try:
+            split_df.to_csv(output_filename, index=False)
+            print(f"已保存文件：{output_filename}")
+        except Exception as e:
+            print(f"保存文件 {output_filename} 时发生错误：{e}")
+
+
+def compute_diff_statistics_signals_time_ranges(
+        signal_df: pd.DataFrame,
+        time_range_list: list,
+        optimized_csv_path: str
+) -> pd.DataFrame:
+    """
+    针对一个带有多个信号列的 signal_df（列名包含 'buy'/'sell' 或其它你自定义的关键字），
+    以不同时间范围内（time_range_list）信号值为 1 的行，分别对每个 diff 列去除 NaN 并计算
+    mean、median，以及 NaN 数量与占比。
+
+    参数
+    ----------
+    signal_df : pd.DataFrame
+        包含 'timestamp' 以及多个信号列（列名包含 'buy'/'sell' 等）。
+        其中 signal_df[col] == 1 表示该时间戳下，该信号生效。
+    time_range_list : list
+        每个元素是 (start_time, end_time)，表示一个时间区间。例如:
+        [
+          ("2023-01-01", "2023-01-05"),
+          ("2023-01-05", "2023-01-10"),
+          ...
+        ]
+        start_time, end_time 可以是字符串或可被 pd.to_datetime 解析的格式。
+    optimized_csv_path : str
+        优化后的 CSV 文件路径（包含 'timestamp' 和若干 '..._diff' 列）。
+
+    返回
+    ----------
+    pd.DataFrame
+        统计结果的 DataFrame，包含以下结构：
+        [
+            time_range,
+            signal_name,
+            每个 diff_col 的 (mean, median, nan_count, nan_ratio), ...
+        ]
+    """
+    start_time_all = time.time()
+    print(">>> 开始执行 compute_diff_statistics_signals_time_ranges 函数")
+
+    # ----------------------------------------------------------------------------------------
+    print(">>> [Step 1] 读取并加载CSV文件")
+    step_start_time = time.time()
+    df_optimized = pd.read_csv(optimized_csv_path) # 根据需要自行调整
+    df_optimized['timestamp'] = pd.to_datetime(df_optimized['timestamp'], errors='coerce')
+    print(f"    完成, 耗时: {time.time() - step_start_time:.4f}秒")
+
+    # ----------------------------------------------------------------------------------------
+    print(">>> [Step 2] 转换 signal_df['timestamp'] 为 datetime")
+    step_start_time = time.time()
+    signal_df['timestamp'] = pd.to_datetime(signal_df['timestamp'], errors='coerce')
+    print(f"    完成, 耗时: {time.time() - step_start_time:.4f}秒")
+
+    # ----------------------------------------------------------------------------------------
+    print(">>> [Step 3] 识别所有信号列（包含 'buy' 或 'sell'）")
+    step_start_time = time.time()
+    all_cols = signal_df.columns.tolist()
+    signal_cols = [col for col in all_cols if ('buy' in col.lower() or 'sell' in col.lower())]
+    print(f"    找到 {len(signal_cols)} 个信号列: {signal_cols}")
+    print(f"    完成, 耗时: {time.time() - step_start_time:.4f}秒")
+
+    # ----------------------------------------------------------------------------------------
+    print(">>> [Step 4] 将 signal_df 中的信号列熔化(melt)")
+    step_start_time = time.time()
+    melted_signals = signal_df.melt(
+        id_vars='timestamp',
+        value_vars=signal_cols,
+        var_name='signal_name',
+        value_name='signal_value'
+    )
+    print(f"    完成, 耗时: {time.time() - step_start_time:.4f}秒")
+
+    # ----------------------------------------------------------------------------------------
+    print(">>> [Step 5] 与 df_optimized 合并(merge)")
+    step_start_time = time.time()
+    merged_df = pd.merge(melted_signals, df_optimized, on='timestamp', how='inner')
+    print(f"    merged_df 行数: {len(merged_df)}")
+    print(f"    完成, 耗时: {time.time() - step_start_time:.4f}秒")
+
+    # ----------------------------------------------------------------------------------------
+    print(">>> [Step 6] 标注 time_range_id 并过滤不在区间内的行")
+    step_start_time = time.time()
+    merged_df['time_range_id'] = -1
+    time_ranges = [(pd.to_datetime(s), pd.to_datetime(e)) for (s, e) in time_range_list]
+    for i, (start_time_val, end_time_val) in enumerate(time_ranges):
+        mask = (merged_df['timestamp'] >= start_time_val) & (merged_df['timestamp'] < end_time_val)
+        merged_df.loc[mask, 'time_range_id'] = i
+    # 过滤不在这些区间内的行
+    merged_df = merged_df[merged_df['time_range_id'] != -1].copy()
+    print(f"    merged_df 行数(过滤后): {len(merged_df)}")
+    print(f"    完成, 耗时: {time.time() - step_start_time:.4f}秒")
+
+    # ----------------------------------------------------------------------------------------
+    print(">>> [Step 7] 只保留 signal_value == 1 的行")
+    step_start_time = time.time()
+    merged_df = merged_df[merged_df['signal_value'] == 1].copy()
+    print(f"    merged_df 行数(只保留 signal_value=1): {len(merged_df)}")
+    print(f"    完成, 耗时: {time.time() - step_start_time:.4f}秒")
+
+    # ----------------------------------------------------------------------------------------
+    print(">>> [Step 8] 找到所有 _diff 结尾的列")
+    step_start_time = time.time()
+    diff_cols = [col for col in merged_df.columns if col.endswith('_diff')]
+    print(f"    找到 {len(diff_cols)} 个 diff 列: {diff_cols}")
+    print(f"    完成, 耗时: {time.time() - step_start_time:.4f}秒")
+
+    # ----------------------------------------------------------------------------------------
+    print(">>> [Step 9] 为后续统计准备一个基础表 base_df (含 time_range_id, signal_name)")
+    step_start_time = time.time()
+    # 先拿到 (time_range_id, signal_name) 的全部组合
+    base_df = merged_df[['time_range_id', 'signal_name']].drop_duplicates().copy()
+    # 同时计算 group_size (每个分组的总行数)
+    group_size_series = merged_df.groupby(['time_range_id', 'signal_name']).size().rename('group_size')
+    group_size_df = group_size_series.reset_index()
+    base_df = base_df.merge(group_size_df, on=['time_range_id', 'signal_name'], how='left')
+    # base_df 中现在有: [time_range_id, signal_name, group_size]
+    print(f"    base_df 行数: {len(base_df)}")
+    print(f"    完成, 耗时: {time.time() - step_start_time:.4f}秒")
+
+    # ----------------------------------------------------------------------------------------
+    print(">>> [Step 10] 分别对每个 diff 列单独去除 NaN 并统计 mean, median, nan_count, nan_ratio")
+    step_start_time = time.time()
+
+    # 我们将所有 diff 列的统计结果 merge 回 base_df
+    result_df = base_df.copy()
+
+    for diff_col in diff_cols:
+        # print(f"    - 正在处理 {diff_col}")
+        # 0) 计算该 diff_col 的 nan_count
+        #    注意，这里只统计 NaN 行数，而没有过滤掉它们(先计算完再说)
+        nan_count_series = (
+            merged_df[merged_df[diff_col].isna()]
+            .groupby(['time_range_id', 'signal_name'])
+            .size()
+            .rename(f"{diff_col}_nan_count")
+        )
+        # 合并到临时 DataFrame
+        nan_count_df = nan_count_series.reset_index()
+
+        # 1) 对该列非 NaN 的行，进行 mean 和 median 统计
+        df_nonan = merged_df[~merged_df[diff_col].isna()].copy()
+        grouped = df_nonan.groupby(['time_range_id', 'signal_name'])[diff_col]
+        means = grouped.mean().rename(f"{diff_col}_mean").reset_index()
+        medians = grouped.median().rename(f"{diff_col}_median").reset_index()
+
+        # 2) 合并 mean, median, nan_count 三者
+        tmp_stat_df = pd.merge(means, medians, on=['time_range_id', 'signal_name'], how='outer')
+        tmp_stat_df = pd.merge(tmp_stat_df, nan_count_df, on=['time_range_id', 'signal_name'], how='outer')
+
+        # 3) 计算 nan_ratio = diff_col_nan_count / group_size
+        #    group_size 已经在 base_df 里了，先 merge tmp_stat_df 和 group_size
+        tmp_stat_df = pd.merge(tmp_stat_df, base_df[['time_range_id', 'signal_name', 'group_size']],
+                               on=['time_range_id', 'signal_name'], how='left')
+
+        # 4) 有可能某些分组对这个 diff_col 完全没有任何数据，则 nan_count会是NaN -> 填0
+        tmp_stat_df[f"{diff_col}_nan_count"] = tmp_stat_df[f"{diff_col}_nan_count"].fillna(0)
+        tmp_stat_df[f"{diff_col}_nan_ratio"] = (
+                tmp_stat_df[f"{diff_col}_nan_count"] / tmp_stat_df['group_size']
+        )
+
+        # 5) 将该列统计结果与 result_df 合并
+        #    保留 [f"{diff_col}_mean", f"{diff_col}_median", f"{diff_col}_nan_count", f"{diff_col}_nan_ratio"]
+        #    以及 time_range_id, signal_name（用于 on= ）
+        keep_cols = [
+            'time_range_id',
+            'signal_name',
+            f"{diff_col}_mean",
+            f"{diff_col}_median",
+            f"{diff_col}_nan_count",
+            f"{diff_col}_nan_ratio"
+        ]
+        tmp_stat_df = tmp_stat_df[keep_cols]
+        result_df = pd.merge(result_df, tmp_stat_df, on=['time_range_id', 'signal_name'], how='left')
+
+    print(f"    完成所有 diff 列统计, 耗时: {time.time() - step_start_time:.4f}秒")
+
+    # ----------------------------------------------------------------------------------------
+    print(">>> [Step 11] 将 time_range_id 映射可读字符串, 并整理列顺序")
+    step_start_time = time.time()
+    time_range_mapping = {}
+    for i, (start_time_val, end_time_val) in enumerate(time_ranges):
+        time_range_mapping[i] = f"{start_time_val.strftime('%Y-%m-%d')} ~ {end_time_val.strftime('%Y-%m-%d')}"
+
+    result_df['time_range'] = result_df['time_range_id'].map(time_range_mapping)
+
+    # 将 time_range, signal_name 放到前面，其余列的顺序完全取决于上面合并进来的顺序
+    front_cols = ['time_range', 'signal_name', 'group_size']
+    other_cols = [c for c in result_df.columns if c not in ('time_range', 'signal_name', 'time_range_id', 'group_size')]
+    final_cols = front_cols + other_cols
+    result_df = result_df[final_cols]
+
+    print(f"    完成, 耗时: {time.time() - step_start_time:.4f}秒")
+
+    # ----------------------------------------------------------------------------------------
+    total_time = time.time() - start_time_all
+    print(f">>> 函数 compute_diff_statistics_signals_time_ranges 执行完毕, 总耗时: {total_time:.4f}秒")
+
+    return result_df
+
+
 def example():
     backtest_path = 'backtest_result'
-    file_path_list = ['kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv']
+    file_path_list = [ 'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv']
     gen_signal_method = 'price_reverse_extremes_onlysell'
     profit_list = generate_list(0.001, 0.1, 100, 4)
     period_list = generate_list(10, 10000, 100, 0)
@@ -530,15 +867,26 @@ def example():
 
 
     for file_path in file_path_list:
-        base_name = file_path.split('/')[-1].split('.')[0]
-        origin_data_df = pd.read_csv(file_path)  # 只取最近1000条数据
-        origin_data_df['timestamp'] = pd.to_datetime(origin_data_df['timestamp'])
-        df1 = calculate_time_to_targets_op(origin_data_df)
-        print()
+        df = pd.read_csv('kline_data/origin_data_1m_10000000_BTC-USDT-SWAP_statistic_1.csv')
+        file_path_output = file_path.replace('.csv', '_time_to_targets_optimized.csv')
+
+        split_csv_by_columns(file_path_output, 10)
+        # file_path_output = file_path.replace('.csv', '_statistic.csv')
+        # origin_df = pd.read_csv(file_path)
+        # signal_df = generate_price_extremes_reverse_signals(origin_df, periods=[x for x in range(10, 10000, 10)])
+        # result_file_path = file_path.replace('.csv', '_time_to_targets_optimized.csv')
+        # result_df = compute_diff_statistics_signals_time_ranges(signal_df, [("2022-10-16", "2025-12-16")], result_file_path)
+        # result_df.to_csv(file_path_output, index=False)
 
 
 
-
+        # df = calculate_time_to_targets(file_path)
+        # print()
+        # base_name = file_path.split('/')[-1].split('.')[0]
+        # origin_data_df = pd.read_csv(file_path)  # 只取最近1000条数据
+        # origin_data_df['timestamp'] = pd.to_datetime(origin_data_df['timestamp'])
+        #
+        #
         # longest_periods_info = all_longest_periods_info[base_name]
         # for key, value in longest_periods_info.items():
         #     start_time_str, end_time_str = value.split('_')
