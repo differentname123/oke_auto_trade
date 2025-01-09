@@ -519,7 +519,6 @@ def compute_diff_statistics_signals_time_ranges_readable(
 
     # ----------------------------------------------------------------------------------------
     # [Step 1] 读取并加载 Parquet 文件
-    #          此时可以根据时间范围做一个全局过滤——使 df_optimized 里只保留最小~最大时刻的数据
     # ----------------------------------------------------------------------------------------
     print(">>> [Step 1] 读取并加载 Parquet 文件")
     step_start_time = time.time()
@@ -535,9 +534,9 @@ def compute_diff_statistics_signals_time_ranges_readable(
     df_optimized = df_optimized[
         (df_optimized['timestamp'] >= global_min) &
         (df_optimized['timestamp'] < global_max)
-    ].copy()
+        ].copy()
 
-    # 识别所有 _diff 列
+    # 识别所有 _diff 列（如有其他命名规则，请自行调整）
     diff_cols = [c for c in df_optimized.columns if c.endswith('_diff')]
 
     print(f"    加载后 df_optimized 行数: {len(df_optimized)}")
@@ -564,6 +563,7 @@ def compute_diff_statistics_signals_time_ranges_readable(
     step_start_time = time.time()
 
     time_ranges = [(pd.to_datetime(s), pd.to_datetime(e)) for (s, e) in time_range_list]
+
     # 便于最终输出可读
     def format_range(s, e):
         return f"{s.strftime('%Y-%m-%d')} ~ {e.strftime('%Y-%m-%d')}"
@@ -571,52 +571,74 @@ def compute_diff_statistics_signals_time_ranges_readable(
     print(f"    完成, 耗时: {time.time() - step_start_time:.4f}秒")
 
     # ----------------------------------------------------------------------------------------
-    # [Step 4] 三重循环：迭代 time_range -> signal_col -> diff_col
-    #          每个组合对应一条最终结果记录
+    # [Step 4] 多重循环：迭代 time_range -> (baseline + 每个 signal_col) -> diff_col
     # ----------------------------------------------------------------------------------------
-    print(">>> [Step 4] 三重循环统计")
+    print(">>> [Step 4] 多重循环统计（含 baseline ）")
     step_start_time = time.time()
 
-    results = []  # 用于收集每个 (time_range, signal_col) 的所有 diff_col 统计
+    results = []
 
     for (start_t, end_t) in time_ranges:
-        # 取当前 time_range 的可读字符串
         time_range_str = format_range(start_t, end_t)
 
-        # 先对 signal_df 做时间过滤
-        # （若数据量大，可再加上 signal_value=1 的预判；目前为了直观，不做太多花哨手段）
+        # 在 df_optimized 中做时间过滤
+        df_opt_in_range = df_optimized[
+            (df_optimized['timestamp'] >= start_t) &
+            (df_optimized['timestamp'] < end_t)
+            ].copy()
+        if df_opt_in_range.empty:
+            continue
+
+        # baseline 统计
+        baseline_record = {
+            'time_range': time_range_str,
+            'signal_name': 'baseline'
+        }
+        baseline_group_size = len(df_opt_in_range)
+        baseline_record['group_size'] = baseline_group_size
+
+        for dc in diff_cols:
+            series_dc = df_opt_in_range[dc]
+            nan_count = series_dc.isna().sum()
+            nonan_series = series_dc.dropna()
+
+            mean_val = nonan_series.mean() if len(nonan_series) > 0 else None
+            median_val = nonan_series.median() if len(nonan_series) > 0 else None
+            std_val = nonan_series.std() if len(nonan_series) > 1 else None
+
+            baseline_record[f"{dc}_mean"] = mean_val
+            baseline_record[f"{dc}_median"] = median_val
+            baseline_record[f"{dc}_std"] = std_val
+            baseline_record[f"{dc}_nan_count"] = nan_count
+            baseline_record[f"{dc}_nan_ratio"] = nan_count / baseline_group_size if baseline_group_size else None
+
+        results.append(baseline_record)
+
+        # 缓存 baseline 的均值和中位数，以便后续计算差值
+        baseline_means = {dc: baseline_record[f"{dc}_mean"] for dc in diff_cols}
+        baseline_medians = {dc: baseline_record[f"{dc}_median"] for dc in diff_cols}
+
+        # signal 统计
         df_signal_in_range = signal_df[
             (signal_df['timestamp'] >= start_t) &
             (signal_df['timestamp'] < end_t)
-        ].copy()
-
-        # 如果在这个区间里，没有任何 signal_df 的行，那么这个区间对所有 signal_col 统计都为空
+            ].copy()
         if df_signal_in_range.empty:
-            # 也可以选择跳过这个 time_range
-            # 这里演示：硬要生成空的统计记录也没太大意义，可以直接continue
             continue
 
         for sc in signal_cols:
             signal_start_time = time.time()
-            # 只保留 sc == 1 的行
+
             df_signal_ones = df_signal_in_range[df_signal_in_range[sc] == 1].copy()
             if df_signal_ones.empty:
-                # 在这个区间，这个signal_col没有任何1
                 continue
 
-            # 拿到这些 timestamp 并在 df_optimized 中匹配
+            # 拿到这些 timestamp 去 df_opt_in_range 匹配
             timestamps_needed = df_signal_ones['timestamp'].unique()
-            df_opt_for_these_ts = df_optimized[df_optimized['timestamp'].isin(timestamps_needed)].copy()
+            df_opt_for_these_ts = df_opt_in_range[df_opt_in_range['timestamp'].isin(timestamps_needed)].copy()
             if df_opt_for_these_ts.empty:
-                # 说明 df_optimized 里没有这些 timestamp
                 continue
 
-            # group_size = 此 (time_range, signal_col) 下的总行数(合并后)
-            # 因为每个 timestamp 只出现一次，也可能出现多次——具体看你的数据。
-            # 假设 timestamp 无重复则 group_size=len(df_opt_for_these_ts)。
-            # 若要与 df_signal_ones 一一对应，需要做一次合并（on='timestamp'），确保行匹配。
-            # 这里做个最简单的情况：若timestamp没有重复，就直接取 len(timestamps_needed)
-            # （如果timestamp会有重复，需要做 merge，然后再算 shape[0]）
             merged_df = pd.merge(
                 df_signal_ones[['timestamp']],
                 df_opt_for_these_ts,
@@ -627,14 +649,12 @@ def compute_diff_statistics_signals_time_ranges_readable(
             if group_size == 0:
                 continue
 
-            # 创建一条统计记录（最终会包含所有 diff_col 的统计）
             record = {
                 'time_range': time_range_str,
                 'signal_name': sc,
                 'group_size': group_size
             }
 
-            # 对每个 diff_col 做统计：mean, median, nan_count, nan_ratio
             for dc in diff_cols:
                 series_dc = merged_df[dc]
                 nan_count = series_dc.isna().sum()
@@ -642,17 +662,33 @@ def compute_diff_statistics_signals_time_ranges_readable(
 
                 mean_val = nonan_series.mean() if len(nonan_series) > 0 else None
                 median_val = nonan_series.median() if len(nonan_series) > 0 else None
+                std_val = nonan_series.std() if len(nonan_series) > 1 else None
 
                 record[f"{dc}_mean"] = mean_val
                 record[f"{dc}_median"] = median_val
+                record[f"{dc}_std"] = std_val
                 record[f"{dc}_nan_count"] = nan_count
                 record[f"{dc}_nan_ratio"] = nan_count / group_size if group_size else None
 
-            # 把这条完整记录放入 results
+                # 与 baseline 的 mean 差值
+                base_m = baseline_means.get(dc, None)
+                if (mean_val is not None) and (base_m is not None):
+                    record[f"{dc}_mean_vs_baseline"] = mean_val - base_m
+                else:
+                    record[f"{dc}_mean_vs_baseline"] = None
+
+                # [新增] 与 baseline 的 median 差值
+                base_med = baseline_medians.get(dc, None)
+                if (median_val is not None) and (base_med is not None):
+                    record[f"{dc}_median_vs_baseline"] = median_val - base_med
+                else:
+                    record[f"{dc}_median_vs_baseline"] = None
+
             results.append(record)
+
             print(f"    {time_range_str} {sc} 统计完成, 耗时: {time.time() - signal_start_time:.4f}秒")
 
-    print(f"    三重循环结束，合计生成 {len(results)} 条统计记录")
+    print(f"    多重循环结束，合计生成 {len(results)} 条统计记录")
     print(f"    耗时: {time.time() - step_start_time:.4f}秒")
 
     # ----------------------------------------------------------------------------------------
@@ -662,36 +698,56 @@ def compute_diff_statistics_signals_time_ranges_readable(
     step_start_time = time.time()
 
     if not results:
-        # 如果为空，返回一个空表，列名按约定可声明好
-        # （或直接 return pd.DataFrame() 也可）
-        final_cols = ['time_range', 'signal_name', 'group_size'] + \
-                     [f"{dc}_mean" for dc in diff_cols] + \
-                     [f"{dc}_median" for dc in diff_cols] + \
-                     [f"{dc}_nan_count" for dc in diff_cols] + \
-                     [f"{dc}_nan_ratio" for dc in diff_cols]
+        # 如果为空，返回一个空表
+        final_cols = (
+                ['time_range', 'signal_name', 'group_size'] +
+                [f"{dc}_mean" for dc in diff_cols] +
+                [f"{dc}_median" for dc in diff_cols] +
+                [f"{dc}_std" for dc in diff_cols] +
+                [f"{dc}_nan_count" for dc in diff_cols] +
+                [f"{dc}_nan_ratio" for dc in diff_cols] +
+                [f"{dc}_mean_vs_baseline" for dc in diff_cols] +
+                [f"{dc}_median_vs_baseline" for dc in diff_cols]
+        )
         final_df = pd.DataFrame(columns=final_cols)
         print("    找不到任何统计数据，返回空 DataFrame")
     else:
         final_df = pd.DataFrame(results)
 
-        # 整理列顺序
+        # 组装列顺序
         front_cols = ['time_range', 'signal_name', 'group_size']
         diff_stat_cols = []
         for dc in diff_cols:
             diff_stat_cols.extend([
                 f"{dc}_mean",
                 f"{dc}_median",
+                f"{dc}_std",
                 f"{dc}_nan_count",
-                f"{dc}_nan_ratio"
+                f"{dc}_nan_ratio",
+                f"{dc}_mean_vs_baseline",
+                f"{dc}_median_vs_baseline"
             ])
+
         final_cols = front_cols + diff_stat_cols
 
-        # 若有些列在某些情况下未出现，可先补齐
+        # 补齐缺失列
         for c in final_cols:
             if c not in final_df.columns:
                 final_df[c] = None
 
+        # 排列出最终列顺序
         final_df = final_df[final_cols]
+
+    # [新增] 最后一步：移除列名中的 "time_to" 前缀（如果有）
+    # -----------------------------------------------------------------
+    def remove_time_to_prefix(col_name: str) -> str:
+        prefix = "time_to"
+        if col_name.startswith(prefix):
+            return col_name[len(prefix):]
+        else:
+            return col_name
+
+    final_df.rename(columns=lambda c: remove_time_to_prefix(c), inplace=True)
 
     print(f"    最终结果行数: {len(final_df)}")
     print(f"    耗时: {time.time() - step_start_time:.4f}秒")
@@ -728,25 +784,29 @@ def statistic_data(file_path_list):
         # 获取file_path的目录
         file_dir = os.path.dirname(file_path)
         base_name = file_path.split('/')[-1].split('.')[0]
-        key_word = "price_extremes"
+        key_word_list = ["price_extremes", "price_reverse_extremes"]
         start_period = 10
         end_period = 10000
         step_period = 10
-        file_path_output_dir = file_dir + f"/{key_word}/{base_name}"
-        # 如果file_path_output_dir不存在，则创建
-        if not os.path.exists(file_path_output_dir):
-            os.makedirs(file_path_output_dir)
-        file_path_output = file_path_output_dir + f"/start_period_{start_period}_end_period_{end_period}_step_period_{step_period}.csv"
-        result_file_path = file_path.replace('.csv', f'_time_to_targets_optimized.csv')
-        optimized_parquet_path = result_file_path.replace('.csv', f'.parquet')
-        if os.path.exists(file_path_output):
-            print(f"结果文件 {file_path_output} 已存在，跳过计算")
-            continue
-        signal_df = generate_price_extremes_reverse_signals(origin_df, periods=[x for x in range(start_period, end_period, step_period)])
+        for key_word in key_word_list:
+            file_path_output_dir = file_dir + f"/{key_word}/{base_name}"
+            # 如果file_path_output_dir不存在，则创建
+            if not os.path.exists(file_path_output_dir):
+                os.makedirs(file_path_output_dir)
+            file_path_output = file_path_output_dir + f"/start_period_{start_period}_end_period_{end_period}_step_period_{step_period}.csv"
+            result_file_path = file_path.replace('.csv', f'_time_to_targets_optimized.csv')
+            optimized_parquet_path = result_file_path.replace('.csv', f'.parquet')
+            if os.path.exists(file_path_output):
+                print(f"结果文件 {file_path_output} 已存在，跳过计算")
+                continue
+            if key_word == "price_extremes":
+                signal_df = generate_price_extremes_signals(origin_df, periods=[x for x in range(start_period, end_period, step_period)])
+            else:
+                signal_df = generate_price_extremes_reverse_signals(origin_df, periods=[x for x in range(start_period, end_period, step_period)])
 
-        result_df = compute_diff_statistics_signals_time_ranges_readable(signal_df, [("2022-10-16", "2025-12-16")],
-                                                                optimized_parquet_path)
-        result_df.to_csv(file_path_output, index=False)
+            result_df = compute_diff_statistics_signals_time_ranges_readable(signal_df, [("2022-10-16", "2025-12-16")],
+                                                                    optimized_parquet_path)
+            result_df.to_csv(file_path_output, index=False)
 
         # for i in range(1, 11):
         #     file_path_output = file_path.replace('.csv', f'_statistic_{i}.csv')
