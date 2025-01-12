@@ -617,6 +617,7 @@ def compute_diff_statistics_signals_time_ranges_readable(
         # 缓存 baseline 的均值和中位数，以便后续计算差值
         baseline_means = {dc: baseline_record[f"{dc}_mean"] for dc in diff_cols}
         baseline_medians = {dc: baseline_record[f"{dc}_median"] for dc in diff_cols}
+        baseline_nan_ratios = {dc: baseline_record[f"{dc}_nan_ratio"] for dc in diff_cols}
 
         # signal 统计
         df_signal_in_range = signal_df[
@@ -684,9 +685,15 @@ def compute_diff_statistics_signals_time_ranges_readable(
                 else:
                     record[f"{dc}_median_vs_baseline"] = None
 
+                base_nan_ratio = baseline_nan_ratios.get(dc, None)
+                if (nan_count is not None) and (base_nan_ratio is not None):
+                    record[f"{dc}_nan_ratio_vs_baseline"] = record[f"{dc}_nan_ratio"] - base_nan_ratio
+                else:
+                    record[f"{dc}_nan_ratio_vs_baseline"] = None
+
             results.append(record)
 
-            print(f"    {time_range_str} {sc} 统计完成, 耗时: {time.time() - signal_start_time:.4f}秒")
+            # print(f"    {time_range_str} {sc} 统计完成, 耗时: {time.time() - signal_start_time:.4f}秒")
 
     print(f"    多重循环结束，合计生成 {len(results)} 条统计记录")
     print(f"    耗时: {time.time() - step_start_time:.4f}秒")
@@ -707,7 +714,8 @@ def compute_diff_statistics_signals_time_ranges_readable(
                 [f"{dc}_nan_count" for dc in diff_cols] +
                 [f"{dc}_nan_ratio" for dc in diff_cols] +
                 [f"{dc}_mean_vs_baseline" for dc in diff_cols] +
-                [f"{dc}_median_vs_baseline" for dc in diff_cols]
+                [f"{dc}_median_vs_baseline" for dc in diff_cols] +
+                [f"{dc}_nan_ratio_vs_baseline" for dc in diff_cols]
         )
         final_df = pd.DataFrame(columns=final_cols)
         print("    找不到任何统计数据，返回空 DataFrame")
@@ -725,7 +733,8 @@ def compute_diff_statistics_signals_time_ranges_readable(
                 f"{dc}_nan_count",
                 f"{dc}_nan_ratio",
                 f"{dc}_mean_vs_baseline",
-                f"{dc}_median_vs_baseline"
+                f"{dc}_median_vs_baseline",
+                f"{dc}_nan_ratio_vs_baseline"
             ])
 
         final_cols = front_cols + diff_stat_cols
@@ -741,7 +750,7 @@ def compute_diff_statistics_signals_time_ranges_readable(
     # [新增] 最后一步：移除列名中的 "time_to" 前缀（如果有）
     # -----------------------------------------------------------------
     def remove_time_to_prefix(col_name: str) -> str:
-        prefix = "time_to"
+        prefix = "time_to_"
         if col_name.startswith(prefix):
             return col_name[len(prefix):]
         else:
@@ -773,6 +782,33 @@ def read_json(file_path):
     with open(file_path, 'r') as file:
         return json.load(file)
 
+def generate_time_segments(origin_df, time_len=20):
+    """
+    Generates a list of 10 evenly spaced time segments based on the timestamp
+    range found in a CSV file.
+
+    Args:
+        file_path (str): The path to the CSV file containing a 'timestamp' column.
+
+    Returns:
+        list: A list of tuples, where each tuple represents a time segment
+              in the format ("YYYY-MM-DD", "YYYY-MM-DD").
+    """
+    start_timestamp = pd.to_datetime(origin_df.iloc[0].timestamp)
+    end_timestamp = pd.to_datetime(origin_df.iloc[-1].timestamp)
+
+    time_difference = end_timestamp - start_timestamp
+    segment_duration = time_difference / time_len
+
+    time_segments = []
+    current_start = start_timestamp
+    for _ in range(time_len):
+        current_end = current_start + segment_duration
+        time_segments.append((current_start.strftime("%Y-%m-%d"), current_end.strftime("%Y-%m-%d")))
+        current_start = current_end
+
+    return time_segments
+
 
 def statistic_data(file_path_list):
     """
@@ -781,6 +817,9 @@ def statistic_data(file_path_list):
     """
     for file_path in file_path_list:
         origin_df = pd.read_csv(file_path)
+        time_range_list = generate_time_segments(origin_df)
+        # 取time_range_list的后10个
+        time_range_list = time_range_list[-10:]
         # 获取file_path的目录
         file_dir = os.path.dirname(file_path)
         base_name = file_path.split('/')[-1].split('.')[0]
@@ -793,9 +832,17 @@ def statistic_data(file_path_list):
             # 如果file_path_output_dir不存在，则创建
             if not os.path.exists(file_path_output_dir):
                 os.makedirs(file_path_output_dir)
-            file_path_output = file_path_output_dir + f"/start_period_{start_period}_end_period_{end_period}_step_period_{step_period}.csv"
             result_file_path = file_path.replace('.csv', f'_time_to_targets_optimized.csv')
             optimized_parquet_path = result_file_path.replace('.csv', f'.parquet')
+            all_starts = [pd.to_datetime(s) for (s, e) in time_range_list]
+            all_ends = [pd.to_datetime(e) for (s, e) in time_range_list]
+            global_min = min(all_starts)
+            global_max = max(all_ends)
+            # time_range_list = [(global_min.strftime('%Y-%m-%d'), global_max.strftime('%Y-%m-%d'))]
+            time_len = len(time_range_list)
+            file_path_output = file_path_output_dir + f"/start_period_{start_period}_end_period_{end_period}_step_period_{step_period}_min_{global_min.strftime('%Y%m%d')}_max_{global_max.strftime('%Y%m%d')}_time_len_{time_len}.csv"
+
+
             if os.path.exists(file_path_output):
                 print(f"结果文件 {file_path_output} 已存在，跳过计算")
                 continue
@@ -804,7 +851,9 @@ def statistic_data(file_path_list):
             else:
                 signal_df = generate_price_extremes_reverse_signals(origin_df, periods=[x for x in range(start_period, end_period, step_period)])
 
-            result_df = compute_diff_statistics_signals_time_ranges_readable(signal_df, [("2022-10-16", "2025-12-16")],
+
+            print(f"开始计算 {file_path_output}")
+            result_df = compute_diff_statistics_signals_time_ranges_readable(signal_df, time_range_list,
                                                                     optimized_parquet_path)
             result_df.to_csv(file_path_output, index=False)
 
@@ -881,6 +930,125 @@ def truly_backtest():
             result_df.to_csv(file_out, index=False)
             print(f"结果已保存到 {file_out}")
 
+def covert_df(df):
+    target = 'target'
+    target_columns = [col for col in df.columns if target in col]
+    non_target_columns = [col for col in df.columns if target not in col]
+
+    if not target_columns:
+        return df.copy()  # 如果没有目标列，则直接返回副本
+
+    melted_df = pd.melt(
+        df,
+        id_vars=non_target_columns,  # 保留的标识列
+        value_vars=target_columns,  # 需要融合的列
+        var_name='target_name',  # 存储原始列名的列名
+        value_name='target_value'  # 存储值的列名
+    )
+    return melted_df
+
+
+def analyze_data(file_path):
+    """
+    对回测数据进行分析，并将结果输出为 CSV 文件。
+
+    此函数会：
+    1. 读取原始 CSV 文件。
+    2. 去除包含 'std' 和 'median' 的列，只保留需要的列。
+    3. 将所有包含 'diff' 的列按前 3 个下划线分割的元素分组（例如 key = '_'.join(col.split('_')[:3])）。
+    4. 在每个分组中，使用分组后生成的 mean 列与 nan_ratio 列计算 3 个不同的评分 (score1, score2, score3)。
+    5. 针对每个评分，按分数从大到小排序，取前 5 行进行处理（covert_df 函数）。
+    6. 将所有处理后的结果按行合并为一个 DataFrame 并写回新的 CSV 文件。
+
+    Returns:
+        pd.DataFrame: 包含所有分析结果的 DataFrame。
+    """
+    start_time = time.time()
+    output_path = file_path.replace(".csv", "_analyze.csv")
+    if os.path.exists(output_path):
+        print(f"结果文件 {output_path} 已存在，跳过计算")
+        return pd.read_csv(output_path)
+
+    # 读取数据
+    df = pd.read_csv(file_path)
+
+    # 只保留不包含 'std' 或 'median' 的列
+    need_columns = [col for col in df.columns if "std" not in col and "median" not in col]
+    df = df[need_columns]
+
+    # 找到所有包含 'diff' 的列，以及所有不包含 'diff' 的列
+    diff_columns = [col for col in df.columns if "diff" in col]
+    no_diff_columns = [col for col in df.columns if "diff" not in col]
+
+    # 按“以下划线分割列名的前 3 个元素”进行分组
+    diff_columns_group = {}
+    for col in diff_columns:
+        key = "_".join(col.split("_")[:3])
+        diff_columns_group.setdefault(key, []).append(col)
+
+    result_df_list = []
+
+    # 对每个分组进行计算及处理
+    for key, columns in diff_columns_group.items():
+        # 这里假设分组后会有两个列：mean 和 nan_ratio
+        # 比如：..._diff_mean，以及 ..._diff_nan_ratio
+        mean_col = f"{key}_diff_mean"
+        nan_ratio_col = f"{key}_diff_nan_ratio"
+
+        # 从 key 中提取 side 和 profit 等信息（若只用 profit，则 side 可以省略）
+        # 例如：key = 'long_XXX_0.03'，则 side = 'long'，profit = '0.03'
+        side = key.split("_")[0]  # 可能没用到
+        profit = key.split("_")[2]
+
+        # 选取计算所需的列
+        temp_columns = no_diff_columns + [mean_col, nan_ratio_col]
+        temp_df = df[temp_columns].copy()
+
+        # 定义新的列名
+        profit_key = f"{key}_profit"
+        score1_col = f"{key}_score1"
+        score2_col = f"{key}_score2"
+        score3_col = f"{key}_score3"
+        score4_col = f"{key}_score4"
+        score_columns = [score1_col, score2_col, score3_col, score4_col]
+
+        # 计算 profit（示例中写死扣除了 0.0007）
+        temp_df[profit_key] = float(profit) - 0.0007
+
+        # 计算 3 种评分
+        # 注意：若 mean_col 或 nan_ratio_col 存在 NaN 或 0，需要事先处理或加异常判断
+        temp_df[score1_col] = (
+                (temp_df[profit_key] * 10 - temp_df[nan_ratio_col])
+                / temp_df[mean_col] * 10000
+                / temp_df[mean_col] * 10000
+        )
+        temp_df[score2_col] = (
+                (temp_df[profit_key] - temp_df[nan_ratio_col])
+                / temp_df[mean_col] * 10000
+                / temp_df[mean_col] * 10000
+        )
+        temp_df[score3_col] = (
+                (temp_df[profit_key] * 10 - temp_df[nan_ratio_col])
+                / temp_df[mean_col] * 10000
+        )
+        temp_df[score4_col] = (
+                (temp_df[profit_key] - temp_df[nan_ratio_col])
+                / temp_df[mean_col] * 10000
+        )
+
+        # 分别针对 3 个评分列，排序取前 5 行，并调用 covert_df 函数做处理
+        for sc in score_columns:
+            sorted_df = temp_df.sort_values(by=sc, ascending=False)
+            top5_df = sorted_df.head(1)
+            melt_df = covert_df(top5_df)  # covert_df 为自定义函数，假设用户已有实现
+            result_df_list.append(melt_df)
+
+    # 合并所有结果并输出到 CSV
+    result_df = pd.concat(result_df_list, ignore_index=True)
+    result_df.to_csv(output_path, index=False)
+    print(f"结果已保存到 {output_path} (耗时: {time.time() - start_time:.4f}秒)")
+    return result_df
+
 def example():
     file_path_list = ['kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv',
      'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv']
@@ -889,12 +1057,32 @@ def example():
     # truly_backtest(file_path_list)
 
     # 示例二:使用预处理后的数据初略获取回测效果数据
-    statistic_data(file_path_list)
+    # statistic_data(file_path_list)
 
 
     # #示例三: 对原始数据进行预处理
     # for file_path in file_path_list:
     #     calculate_time_to_targets(file_path)
+
+    # 示例四：分析初略的回测结果数据
+    file_path_list = [
+        "kline_data/price_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+        "kline_data/price_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+        "kline_data/price_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+        "kline_data/price_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+        "kline_data/price_reverse_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+        "kline_data/price_reverse_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+        "kline_data/price_reverse_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+        "kline_data/price_reverse_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv", ]
+    analyze_df_list = []
+    for file_path in file_path_list:
+        analyze_df = analyze_data(file_path)
+        file_path_split = file_path.split('_')
+        key_name = f'{file_path_split[2]}_{file_path_split[6]}_{file_path_split[7]}'
+        analyze_df['key_name'] = key_name
+        analyze_df_list.append(analyze_df)
+    analyze_df = pd.concat(analyze_df_list, ignore_index=True)
+    analyze_df.to_csv('backtest_result/analyze_data.csv', index=False)
 
 if __name__ == "__main__":
     example()
