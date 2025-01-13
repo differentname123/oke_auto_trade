@@ -951,17 +951,6 @@ def covert_df(df):
 def analyze_data(file_path):
     """
     对回测数据进行分析，并将结果输出为 CSV 文件。
-
-    此函数会：
-    1. 读取原始 CSV 文件。
-    2. 去除包含 'std' 和 'median' 的列，只保留需要的列。
-    3. 将所有包含 'diff' 的列按前 3 个下划线分割的元素分组（例如 key = '_'.join(col.split('_')[:3])）。
-    4. 在每个分组中，使用分组后生成的 mean 列与 nan_ratio 列计算 3 个不同的评分 (score1, score2, score3)。
-    5. 针对每个评分，按分数从大到小排序，取前 5 行进行处理（covert_df 函数）。
-    6. 将所有处理后的结果按行合并为一个 DataFrame 并写回新的 CSV 文件。
-
-    Returns:
-        pd.DataFrame: 包含所有分析结果的 DataFrame。
     """
     start_time = time.time()
     output_path = file_path.replace(".csv", "_analyze.csv")
@@ -991,18 +980,17 @@ def analyze_data(file_path):
     # 对每个分组进行计算及处理
     for key, columns in diff_columns_group.items():
         # 这里假设分组后会有两个列：mean 和 nan_ratio
-        # 比如：..._diff_mean，以及 ..._diff_nan_ratio
         mean_col = f"{key}_diff_mean"
         nan_ratio_col = f"{key}_diff_nan_ratio"
 
-        # 从 key 中提取 side 和 profit 等信息（若只用 profit，则 side 可以省略）
-        # 例如：key = 'long_XXX_0.03'，则 side = 'long'，profit = '0.03'
-        side = key.split("_")[0]  # 可能没用到
+
+        # 从 key 中提取 profit（示例：key = 'long_XXX_0.03'，则 profit = '0.03'）
+        # 如果不需要 side，可省略解析
         profit = key.split("_")[2]
 
-        # 选取计算所需的列
-        temp_columns = no_diff_columns + [mean_col, nan_ratio_col]
-        temp_df = df[temp_columns].copy()
+        # 选取计算所需的列（避免不必要的大范围复制）
+        required_cols = no_diff_columns + [mean_col, nan_ratio_col]
+        temp_df = df[required_cols].copy()
 
         # 定义新的列名
         profit_key = f"{key}_profit"
@@ -1015,39 +1003,71 @@ def analyze_data(file_path):
         # 计算 profit（示例中写死扣除了 0.0007）
         temp_df[profit_key] = float(profit) - 0.0007
 
-        # 计算 3 种评分
-        # 注意：若 mean_col 或 nan_ratio_col 存在 NaN 或 0，需要事先处理或加异常判断
+        # 计算 4 种评分 (score1～4)
+        # 注意要先排除 mean_col 和 nan_ratio_col 可能的 NaN 或 0，这里假设数据完整
         temp_df[score1_col] = (
-                (temp_df[profit_key] * 10 - temp_df[nan_ratio_col])
-                / temp_df[mean_col] * 10000
-                / temp_df[mean_col] * 10000
+            (temp_df[profit_key] * 10 - temp_df[nan_ratio_col])
+            / temp_df[mean_col] * 10000
+            / temp_df[mean_col] * 10000
         )
         temp_df[score2_col] = (
-                (temp_df[profit_key] - temp_df[nan_ratio_col])
-                / temp_df[mean_col] * 10000
-                / temp_df[mean_col] * 10000
+            (temp_df[profit_key] - temp_df[nan_ratio_col])
+            / temp_df[mean_col] * 10000
+            / temp_df[mean_col] * 10000
         )
         temp_df[score3_col] = (
-                (temp_df[profit_key] * 10 - temp_df[nan_ratio_col])
-                / temp_df[mean_col] * 10000
+            (temp_df[profit_key] * 10 - temp_df[nan_ratio_col])
+            / temp_df[mean_col] * 10000
         )
         temp_df[score4_col] = (
-                (temp_df[profit_key] - temp_df[nan_ratio_col])
-                / temp_df[mean_col] * 10000
+            (temp_df[profit_key] - temp_df[nan_ratio_col])
+            / temp_df[mean_col] * 10000
         )
 
-        # 分别针对 3 个评分列，排序取前 5 行，并调用 covert_df 函数做处理
+        # ——————————————————————————————
+        #   使用分组聚合一次性拿到结果
+        # ——————————————————————————————
+        # 1) 对于原先 group.iloc[0] 的信息，这里用 'first' 保留分组中的首行信息
+        # 2) mean_col, nan_ratio_col 要保留所有值（用 list），以便后续赋值给 mean_list, nan_ratio_list
+        # 3) score_columns 做和逻辑保持一致——原代码里的 if ... else ... 都是 sum，所以直接 sum
+
+        agg_dict = {c: 'first' for c in no_diff_columns}  # 保留不含 diff 列的首行
+        agg_dict[mean_col] = lambda x: x.tolist()
+        agg_dict[nan_ratio_col] = lambda x: x.tolist()
         for sc in score_columns:
-            sorted_df = temp_df.sort_values(by=sc, ascending=False)
-            top5_df = sorted_df.head(1)
-            melt_df = covert_df(top5_df)  # covert_df 为自定义函数，假设用户已有实现
-            result_df_list.append(melt_df)
+            agg_dict[sc] = 'sum'
+        agg_dict['group_size'] = 'sum'
+
+        grouped_df = temp_df.groupby('signal_name', as_index=False).agg(agg_dict)
+        # 添加辅助列
+        grouped_df['time_range'] = 'all'
+        grouped_df['mean_list'] = grouped_df[mean_col]
+        grouped_df['nan_ratio_list'] = grouped_df[nan_ratio_col]
+
+        # 删除多余的临时列
+        grouped_df.drop(columns=[mean_col, nan_ratio_col], inplace=True)
+
+        # 分别针对 4 个评分列，排序取前 1 行（原代码 head(1)）
+        # 如果真的要 Top5，把 1 改为 5 即可
+        all_top_rows = []
+        for sc in score_columns:
+            # 如果实际要取 Top5，可改为 nlargest(5, sc)
+            top_sc = grouped_df.nlargest(1, sc)
+            all_top_rows.append(top_sc)
+
+        # 合并并去重，从而避免出现“同一个分组的同一行”在多个评分列里都重复入选的情况,signal_name相同则视为重复
+        merged_top_df = pd.concat(all_top_rows, ignore_index=True).drop_duplicates(subset='signal_name')
+
+        # 最后一次性调用 covert_df()，把这个分组的 top 数据处理完
+        melt_df = covert_df(merged_top_df)
+        result_df_list.append(melt_df)
 
     # 合并所有结果并输出到 CSV
     result_df = pd.concat(result_df_list, ignore_index=True)
     result_df.to_csv(output_path, index=False)
     print(f"结果已保存到 {output_path} (耗时: {time.time() - start_time:.4f}秒)")
     return result_df
+
 
 def example():
     file_path_list = ['kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv',
@@ -1066,6 +1086,15 @@ def example():
 
     # 示例四：分析初略的回测结果数据
     file_path_list = [
+        # "temp/temp.csv",
+        "kline_data/price_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+        "kline_data/price_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+        "kline_data/price_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+        "kline_data/price_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+        "kline_data/price_reverse_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+        "kline_data/price_reverse_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+        "kline_data/price_reverse_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+        "kline_data/price_reverse_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
         "kline_data/price_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
         "kline_data/price_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
         "kline_data/price_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
@@ -1073,7 +1102,8 @@ def example():
         "kline_data/price_reverse_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
         "kline_data/price_reverse_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
         "kline_data/price_reverse_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
-        "kline_data/price_reverse_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv", ]
+        "kline_data/price_reverse_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv"
+    ]
     analyze_df_list = []
     for file_path in file_path_list:
         analyze_df = analyze_data(file_path)
