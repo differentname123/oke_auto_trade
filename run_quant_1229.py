@@ -947,22 +947,67 @@ def covert_df(df):
     )
     return melted_df
 
+def select_top_rows_by_group_size(grouped_df, score_columns, group_step=1000):
+    """
+    根据 group_size 区间选择 sc 和 sc_median 列最大值的行。
 
-def analyze_data(file_path):
+    Args:
+        grouped_df: 包含数据的 Pandas DataFrame。
+        score_columns: 包含需要比较的评分列名的列表。
+        group_step: group_size 区间的大小。
+
+    Returns:
+        包含每个区间选择出的最大值行的 DataFrame。
+    """
+    all_top_rows = []
+    max_group_size = grouped_df['group_size'].max()
+    num_intervals = (max_group_size // group_step) + 1
+
+    for i in range(num_intervals):
+        lower_bound = i * group_step
+        upper_bound = (i + 1) * group_step
+        interval_df = grouped_df[(grouped_df['group_size'] >= lower_bound) & (grouped_df['group_size'] < upper_bound)]
+
+        if not interval_df.empty:
+            for sc in score_columns:
+                # 检查 sc 列是否全部为负数
+                if sc in interval_df.columns and not (interval_df[sc] >= 0).any():
+                    continue  # 如果全部为负数，则跳过
+                elif sc in interval_df.columns:
+                    top_sc = interval_df.nlargest(1, sc)
+                    all_top_rows.append(top_sc)
+
+                median_col = f"{sc}_median"
+                # 检查 median_col 列是否全部为负数
+                if median_col in interval_df.columns and not (interval_df[median_col] >= 0).any():
+                    continue  # 如果全部为负数，则跳过
+                elif median_col in interval_df.columns:
+                    top_median = interval_df.nlargest(1, median_col)
+                    all_top_rows.append(top_median)
+
+    if all_top_rows:
+        return pd.concat(all_top_rows)
+    else:
+        print(f"没有找到任何行 {score_columns}")
+        return pd.DataFrame()
+
+
+def analyze_data(file_path, score_key='median'):
     """
     对回测数据进行分析，并将结果输出为 CSV 文件。
     """
     start_time = time.time()
-    output_path = file_path.replace(".csv", "_analyze.csv")
-    if os.path.exists(output_path):
-        print(f"结果文件 {output_path} 已存在，跳过计算")
-        return pd.read_csv(output_path)
+
+    output_path = file_path.replace(".csv", f"_analyze_{score_key}.csv")
+    # if os.path.exists(output_path):
+    #     print(f"结果文件 {output_path} 已存在，跳过计算")
+    #     return pd.read_csv(output_path)
 
     # 读取数据
     df = pd.read_csv(file_path)
 
     # 只保留不包含 'std' 或 'median' 的列
-    need_columns = [col for col in df.columns if "std" not in col and "median" not in col]
+    need_columns = [col for col in df.columns if "std" not in col]
     df = df[need_columns]
 
     # 找到所有包含 'diff' 的列，以及所有不包含 'diff' 的列
@@ -979,10 +1024,10 @@ def analyze_data(file_path):
 
     # 对每个分组进行计算及处理
     for key, columns in diff_columns_group.items():
-        # 这里假设分组后会有两个列：mean 和 nan_ratio
-        mean_col = f"{key}_diff_mean"
+        # 这里假设分组后会有两个列：median 和 nan_ratio
+        # 第 3 项需求：改为 median
+        mean_col = f"{key}_diff_{score_key}"
         nan_ratio_col = f"{key}_diff_nan_ratio"
-
 
         # 从 key 中提取 profit（示例：key = 'long_XXX_0.03'，则 profit = '0.03'）
         # 如果不需要 side，可省略解析
@@ -1006,7 +1051,7 @@ def analyze_data(file_path):
         # 计算 4 种评分 (score1～4)
         # 注意要先排除 mean_col 和 nan_ratio_col 可能的 NaN 或 0，这里假设数据完整
         temp_df[score1_col] = (
-            (temp_df[profit_key] * 10 - temp_df[nan_ratio_col])
+            (temp_df[profit_key] - temp_df[nan_ratio_col]) / (0.11 - temp_df[profit_key])
             / temp_df[mean_col] * 10000
             / temp_df[mean_col] * 10000
         )
@@ -1016,7 +1061,7 @@ def analyze_data(file_path):
             / temp_df[mean_col] * 10000
         )
         temp_df[score3_col] = (
-            (temp_df[profit_key] * 10 - temp_df[nan_ratio_col])
+            (temp_df[profit_key] - temp_df[nan_ratio_col]) / (0.11 - temp_df[profit_key])
             / temp_df[mean_col] * 10000
         )
         temp_df[score4_col] = (
@@ -1024,41 +1069,61 @@ def analyze_data(file_path):
             / temp_df[mean_col] * 10000
         )
 
-        # ——————————————————————————————
-        #   使用分组聚合一次性拿到结果
-        # ——————————————————————————————
-        # 1) 对于原先 group.iloc[0] 的信息，这里用 'first' 保留分组中的首行信息
-        # 2) mean_col, nan_ratio_col 要保留所有值（用 list），以便后续赋值给 mean_list, nan_ratio_list
-        # 3) score_columns 做和逻辑保持一致——原代码里的 if ... else ... 都是 sum，所以直接 sum
+        # 在原数据中必须有 time_range 这一列，否则需根据业务需求自行处理
+        # 这里为确保 groupby 时能聚合到 time_range
+        if "time_range" not in temp_df.columns:
+            temp_df["time_range"] = "unknown"
 
-        agg_dict = {c: 'first' for c in no_diff_columns}  # 保留不含 diff 列的首行
+        # -------------------------------------------------------------------
+        # Step 1: groupby 求 sum，保留部分字段
+        # -------------------------------------------------------------------
+        agg_dict = {c: "first" for c in no_diff_columns if c not in ["time_range"]}
+        # 让 time_range 聚合成列表，满足第 2 项需求
+        # 如果您想要它是个 set，可以改为 x.unique().tolist() 或 set(...)
+        agg_dict["time_range"] = lambda x: x.unique().tolist()
+
+        # 保留 diff 列的原信息
         agg_dict[mean_col] = lambda x: x.tolist()
         agg_dict[nan_ratio_col] = lambda x: x.tolist()
+
+        # score列使用 sum
         for sc in score_columns:
-            agg_dict[sc] = 'sum'
-        agg_dict['group_size'] = 'sum'
+            agg_dict[sc] = "sum"
 
-        grouped_df = temp_df.groupby('signal_name', as_index=False).agg(agg_dict)
-        # 添加辅助列
-        grouped_df['time_range'] = 'all'
-        grouped_df['mean_list'] = grouped_df[mean_col]
-        grouped_df['nan_ratio_list'] = grouped_df[nan_ratio_col]
+        agg_dict["group_size"] = "sum"
 
-        # 删除多余的临时列
-        grouped_df.drop(columns=[mean_col, nan_ratio_col], inplace=True)
+        grouped_df_sum = temp_df.groupby("signal_name", as_index=False).agg(agg_dict)
 
-        # 分别针对 4 个评分列，排序取前 1 行（原代码 head(1)）
-        # 如果真的要 Top5，把 1 改为 5 即可
-        all_top_rows = []
-        for sc in score_columns:
-            # 如果实际要取 Top5，可改为 nlargest(5, sc)
-            top_sc = grouped_df.nlargest(1, sc)
-            all_top_rows.append(top_sc)
+        # 新增字段：median_list、nan_ratio_list
+        # 第 1 项需求：仅保留小数点后 4 位
+        grouped_df_sum[f"{score_key}_list"] = grouped_df_sum[mean_col].apply(
+            lambda lst: [round(v, 4) for v in lst]
+        )
+        grouped_df_sum["nan_ratio_list"] = grouped_df_sum[nan_ratio_col].apply(
+            lambda lst: [round(v, 4) for v in lst]
+        )
 
-        # 合并并去重，从而避免出现“同一个分组的同一行”在多个评分列里都重复入选的情况,signal_name相同则视为重复
-        merged_top_df = pd.concat(all_top_rows, ignore_index=True).drop_duplicates(subset='signal_name')
+        # 删除不再需要的原列
+        grouped_df_sum.drop(columns=[mean_col, nan_ratio_col], inplace=True)
 
-        # 最后一次性调用 covert_df()，把这个分组的 top 数据处理完
+        grouped_df_median = temp_df.groupby("signal_name", as_index=False)[score_columns].median()
+
+        # 为避免和 sum 冲突，这里将中位数列重命名为 “scoreX_col_median”
+        rename_dict = {sc: f"{sc}_median" for sc in score_columns}
+        grouped_df_median.rename(columns=rename_dict, inplace=True)
+
+        grouped_df = pd.merge(grouped_df_sum, grouped_df_median, on="signal_name", how="left")
+
+
+        # -------------------------------------------------------------------
+        # Step 2: 根据 score 列取 top (原逻辑: nlargest(1))
+        # -------------------------------------------------------------------
+        all_top_rows_grouped = select_top_rows_by_group_size(grouped_df, score_columns, group_step=2000)
+
+        # 合并并去重，从而避免出现同一个分组的同一行在多个评分列里都重复入选
+        merged_top_df = all_top_rows_grouped.drop_duplicates(subset="signal_name")
+
+        # 最后一次性调用 convert_df()，把这个分组的 top 数据处理完
         melt_df = covert_df(merged_top_df)
         result_df_list.append(melt_df)
 
@@ -1104,15 +1169,18 @@ def example():
         "kline_data/price_reverse_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
         "kline_data/price_reverse_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv"
     ]
+    # result_df1 = pd.read_csv('backtest_result/analyze_data_mean.csv')
+    # result_df2 = pd.read_csv('backtest_result/analyze_data_median.csv')
     analyze_df_list = []
+    score_key = 'median'
     for file_path in file_path_list:
-        analyze_df = analyze_data(file_path)
+        analyze_df = analyze_data(file_path, score_key)
         file_path_split = file_path.split('_')
         key_name = f'{file_path_split[2]}_{file_path_split[6]}_{file_path_split[7]}'
         analyze_df['key_name'] = key_name
         analyze_df_list.append(analyze_df)
     analyze_df = pd.concat(analyze_df_list, ignore_index=True)
-    analyze_df.to_csv('backtest_result/analyze_data.csv', index=False)
+    analyze_df.to_csv(f'backtest_result/analyze_data_{score_key}.csv', index=False)
 
 if __name__ == "__main__":
     example()
