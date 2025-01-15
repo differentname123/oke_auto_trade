@@ -1044,6 +1044,8 @@ def analyze_data(file_path, score_key='median'):
         score3_col = f"{key}_score3"
         score4_col = f"{key}_score4"
         score_columns = [score1_col, score2_col, score3_col, score4_col]
+        if float(profit) - 0.0007 < 0:
+            continue
 
         # 计算 profit（示例中写死扣除了 0.0007）
         temp_df[profit_key] = float(profit) - 0.0007
@@ -1051,21 +1053,21 @@ def analyze_data(file_path, score_key='median'):
         # 计算 4 种评分 (score1～4)
         # 注意要先排除 mean_col 和 nan_ratio_col 可能的 NaN 或 0，这里假设数据完整
         temp_df[score1_col] = (
-            (temp_df[profit_key] - temp_df[nan_ratio_col]) / (0.11 - temp_df[profit_key])
+            (temp_df[profit_key] - temp_df[nan_ratio_col]) * temp_df[profit_key] * 100
             / temp_df[mean_col] * 10000
             / temp_df[mean_col] * 10000
         )
         temp_df[score2_col] = (
-            (temp_df[profit_key] - temp_df[nan_ratio_col])
+            (temp_df[profit_key] - temp_df[nan_ratio_col]) * 100
             / temp_df[mean_col] * 10000
             / temp_df[mean_col] * 10000
         )
         temp_df[score3_col] = (
-            (temp_df[profit_key] - temp_df[nan_ratio_col]) / (0.11 - temp_df[profit_key])
+            (temp_df[profit_key] - temp_df[nan_ratio_col]) * temp_df[profit_key] * 100
             / temp_df[mean_col] * 10000
         )
         temp_df[score4_col] = (
-            (temp_df[profit_key] - temp_df[nan_ratio_col])
+            (temp_df[profit_key] - temp_df[nan_ratio_col]) * 100
             / temp_df[mean_col] * 10000
         )
 
@@ -1122,6 +1124,12 @@ def analyze_data(file_path, score_key='median'):
 
         # 合并并去重，从而避免出现同一个分组的同一行在多个评分列里都重复入选
         merged_top_df = all_top_rows_grouped.drop_duplicates(subset="signal_name")
+        if merged_top_df.empty:
+            continue
+        for sc in score_columns:
+            merged_top_df[f"{sc}_median"] = merged_top_df[f"{sc}_median"].round(4)
+            # 计算f"{sc}_total"，值为f"{sc}_median"取log10后的和
+            merged_top_df[f"{sc}_total"] = np.log10(merged_top_df[f"{sc}_median"]) + np.log10(merged_top_df[f"{sc}"])
 
         # 最后一次性调用 convert_df()，把这个分组的 top 数据处理完
         melt_df = covert_df(merged_top_df)

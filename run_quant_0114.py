@@ -1,4 +1,5 @@
 import datetime
+import json
 import os
 import time
 import logging
@@ -816,10 +817,28 @@ def place_order(inst_id, side, order_type, size, price=None, tp_price=None):
         print(f"{side.upper()} 订单失败，错误信息：", e)
         return None
 
+def read_json(file_path):
+    """
+    读取 JSON 文件并返回 Python 对象。
+
+    Args:
+      file_path: JSON 文件的路径。
+
+    Returns:
+      一个 Python 对象，表示 JSON 文件的内容。
+    """
+
+    with open(file_path, 'r') as file:
+        return json.load(file)
+
 # 主循环
 if __name__ == "__main__":
     count = 1000000
     last_price = None
+    good_strategy_path = 'backtest_result/good_strategy.json'
+    good_strategy_json = read_json(good_strategy_path)
+    for
+
     INST_ID = "SOL-USDT-SWAP"
     ORDER_SIZE = 0.01
     offset = 0

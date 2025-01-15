@@ -227,7 +227,7 @@ def deal_pending_order(pending_order_list, row, position_info, lever, total_mone
     """
     处理委托单
     """
-    max_sell_time_diff = 1000000  # 最大卖出时间差
+    max_sell_time_diff = 10000  # 最大卖出时间差
     high = row.high
     low = row.low
     close = row.close
@@ -235,6 +235,7 @@ def deal_pending_order(pending_order_list, row, position_info, lever, total_mone
     timestamp = row.timestamp
     history_order_list = []
     fee = 0.0007  # 手续费
+    check_flag = True # 是否真实的按照能否买入来回测
 
     for order in pending_order_list:
         if order['side'] == 'kai':  # 开仓
@@ -242,7 +243,7 @@ def deal_pending_order(pending_order_list, row, position_info, lever, total_mone
             time_diff = calculate_time_diff_minutes(timestamp, order['timestamp'])
             if time_diff < max_time_diff:
                 if order['type'] == 'long':  # 开多仓
-                    if order['buy_price'] > low:  # 买入价格高于最低价
+                    if order['buy_price'] > low or check_flag:  # 买入价格高于最低价
                         # order['count'] += long_sz
                         # 判断可用资金是否足够开仓
                         required_margin = order['count'] * order['buy_price'] / lever
@@ -254,7 +255,7 @@ def deal_pending_order(pending_order_list, row, position_info, lever, total_mone
                             order['side'] = 'done'
                             order['message'] = 'insufficient funds'
                 if order['type'] == 'short':  # 开空仓
-                    if order['buy_price'] < high:
+                    if order['buy_price'] < high or check_flag:  # 买入价格低于最高价
                         # order['count'] += short_sz
                         # 判断可用资金是否足够开仓
                         required_margin = order['count'] * order['buy_price'] / lever
@@ -270,6 +271,7 @@ def deal_pending_order(pending_order_list, row, position_info, lever, total_mone
                 order['message'] = 'time out'
 
         elif order['side'] == 'ping':  # 平仓
+            profit_value = 1 * (order['sell_price'] - order['buy_price'])
             pin_time_diff = calculate_time_diff_minutes(timestamp, order['kai_time'])
             if order['type'] == 'long':  # 平多仓
                 if order['sell_price'] < high:
@@ -278,12 +280,12 @@ def deal_pending_order(pending_order_list, row, position_info, lever, total_mone
                     # 计算收益并更新总资金
                     profit = order['count'] * (order['sell_price'] - order['buy_price'] - fee * order['sell_price'])
                     order['profit'] = profit
-                    order['time_cost'] = pin_time_diff
+                    order['time_cost'] = calculate_time_diff_minutes(timestamp, order['timestamp'])
                     total_money += profit
                 else:
                     # 对超时的调整售出价格
                     if pin_time_diff > max_sell_time_diff:
-                        order['sell_price'] = close - order['buy_price'] + order['sell_price']
+                        order['sell_price'] = close + profit_value
                         order['kai_time'] = timestamp
                         order['message'] = 'sell time out'
             if order['type'] == 'short':  # 平空仓
@@ -293,13 +295,13 @@ def deal_pending_order(pending_order_list, row, position_info, lever, total_mone
                     # 计算收益并更新总资金
                     profit = order['count'] * (order['buy_price'] - order['sell_price'] - fee * order['sell_price'])
                     order['profit'] = profit
-                    order['time_cost'] = pin_time_diff
+                    order['time_cost'] = calculate_time_diff_minutes(timestamp, order['timestamp'])
                     total_money += profit
                 else:
                     # 对超时的调整售出价格
                     if pin_time_diff > max_sell_time_diff:
-                        order['sell_price'] = close - order['buy_price'] + order['sell_price']
-                        order['ping_time'] = timestamp
+                        order['sell_price'] = close + profit_value
+                        order['kai_time'] = timestamp
                         order['message'] = 'sell time out'
 
     # 删除已经完成的订单，移动到history_order_list
@@ -887,7 +889,7 @@ def truly_backtest():
     init_money = 10000000
     longest_periods_info_path = 'kline_data/longest_periods_info.json'
     all_longest_periods_info = read_json(longest_periods_info_path)
-    calculate_combination((0.0741, 9280, pd.read_csv(file_path_list[0]), 100, 10000000))
+    calculate_combination((0.002, 710, pd.read_csv(file_path_list[3]), 100, 10000000))
 
 
     for file_path in file_path_list:
