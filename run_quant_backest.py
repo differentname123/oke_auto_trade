@@ -417,13 +417,13 @@ def process_signals(signal_df, lever, total_money, init_money, max_sell_time_dif
 
 def calculate_combination(args):
     """多进程计算单个组合的回测结果"""
-    start_time = time.time()
+    # start_time = time.time()
     profit, period, data_df, lever, init_money, max_sell_time_diff, power, signal_name, side, signal_func, signal_param = args
     signal_df = gen_buy_sell_signal(data_df, profit, signal_name, side, signal_func, signal_param)
     last_data = process_signals(signal_df, lever, init_money, init_money, max_sell_time_diff=max_sell_time_diff,
                                 power=power)
     last_data.update({'profit': profit, 'period': period, 'max_sell_time_diff': max_sell_time_diff, 'power': power})
-    print(f"profit: {profit}, period: {period}, cost time: {time.time() - start_time}")
+    # print(f"profit: {profit}, period: {period}, cost time: {time.time() - start_time}")
     return last_data
 
 
@@ -916,8 +916,8 @@ def detail_backtest():
     good_strategy_path = 'backtest_result/good_strategy_df.csv'
 
     sell_time_diff_step = 100
-    sell_time_diff_start = 10000
-    sell_time_diff_end = 1000
+    sell_time_diff_start = 100
+    sell_time_diff_end = 10000
     max_sell_time_diff_list = [x for x in range(sell_time_diff_start, sell_time_diff_end, sell_time_diff_step)]
     # 为了覆盖更大范围，追加一个极大的阈值
     max_sell_time_diff_list.append(1000000)
@@ -937,7 +937,7 @@ def detail_backtest():
     # 读取“好策略”列表
     df_good_strategies = pd.read_csv(good_strategy_path)
     # 找到df_good_strategies中result_path为空的行
-    df_good_strategies = df_good_strategies[df_good_strategies['result_path'].isna()]
+    # df_good_strategies = df_good_strategies[df_good_strategies['result_path'].isna()]
 
     # 按照 key_name 分组
     df_group = df_good_strategies.groupby('key_name')
