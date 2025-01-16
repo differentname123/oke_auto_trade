@@ -1,4 +1,5 @@
 import json
+import multiprocessing
 import os
 import multiprocessing as mp
 import time
@@ -223,11 +224,10 @@ def calculate_time_diff_minutes(time1, time2):
     return time_diff.total_seconds() / 60
 
 
-def deal_pending_order(pending_order_list, row, position_info, lever, total_money, max_time_diff=2 * 1):
+def deal_pending_order(pending_order_list, row, position_info, lever, total_money, max_time_diff=2 * 1, max_sell_time_diff=1000000, power=1):
     """
     处理委托单
     """
-    max_sell_time_diff = 10000  # 最大卖出时间差
     high = row.high
     low = row.low
     close = row.close
@@ -271,7 +271,7 @@ def deal_pending_order(pending_order_list, row, position_info, lever, total_mone
                 order['message'] = 'time out'
 
         elif order['side'] == 'ping':  # 平仓
-            profit_value = 1 * (order['sell_price'] - order['buy_price'])
+            profit_value = power * (order['sell_price'] - order['buy_price'])
             pin_time_diff = calculate_time_diff_minutes(timestamp, order['kai_time'])
             if order['type'] == 'long':  # 平多仓
                 if order['sell_price'] < high:
@@ -323,7 +323,7 @@ def create_order(order_type, row, lever):
     }
 
 
-def process_signals(signal_df, lever, total_money, init_money):
+def process_signals(signal_df, lever, total_money, init_money, max_sell_time_diff=1000000, power=1):
     """处理信号生成的订单并计算收益"""
     pending_order_list = []
     all_history_order_list = []
@@ -340,7 +340,7 @@ def process_signals(signal_df, lever, total_money, init_money):
 
         # 处理委托单
         pending_order_list, history_order_list, total_money = deal_pending_order(
-            pending_order_list, row, position_info, lever, total_money
+            pending_order_list, row, position_info, lever, total_money, max_sell_time_diff=max_sell_time_diff, power=power
         )
         all_history_order_list.extend(history_order_list)
 
@@ -411,10 +411,13 @@ def process_signals(signal_df, lever, total_money, init_money):
 
 def calculate_combination(args):
     """多进程计算单个组合的回测结果"""
-    profit, period, data_df, lever, init_money = args
+    profit, period, data_df, lever, init_money,max_sell_time_diff,power = args
     signal_df = gen_buy_sell_signal(data_df, profit=profit, period=period)
-    last_data = process_signals(signal_df, lever, init_money, init_money)
-    last_data.update({'profit': profit, 'period': period})
+    start_time = time.time()
+    last_data = process_signals(signal_df, lever, init_money, init_money, max_sell_time_diff=max_sell_time_diff, power=power)
+    last_data.update({'profit': profit, 'period': period, 'max_sell_time_diff': max_sell_time_diff, 'power': power})
+    print(f"profit: {profit}, period: {period}, max_sell_time_diff: {max_sell_time_diff}, power: {power}, cost time: {time.time() - start_time}")
+
     return last_data
 
 def generate_list(start, end, count, decimals):
@@ -872,66 +875,107 @@ def statistic_data(file_path_list):
         #
         #     result_df.to_csv(file_path_output, index=False)
 
+def detail_backtest():
+    """更加详细的回测，是为已经比较好的策略指定的参数组合生成详细回测数据"""
+    good_strategy = read_json('backtest_result/good_strategy.json')
+    file_path = 'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv'
+    max_sell_time_diff_list = [x for x in range(500, 10000, 500)]
+    power_list = [x for x in range(0, 3, 1)]
+
+    # 准备所有参数组合
+    parameter_list = []
+    df = pd.read_csv(file_path)  # 将 DataFrame 读取移到循环外，避免重复读取
+    fixed_params = (0.0033, 750, df, 100, 10000000)
+
+    for max_sell_time_diff in max_sell_time_diff_list:
+        for power in power_list:
+            params = fixed_params + (max_sell_time_diff, power)
+            parameter_list.append(params)
+
+    # 创建进程池
+    num_processes = os.cpu_count() - 3  # 获取 CPU 核心数
+    with multiprocessing.Pool(processes=num_processes) as pool:
+        # 使用 map 或 starmap 并行执行 calculate_combination
+        result_list = pool.map(calculate_combination, parameter_list)
+
+    result_df = pd.DataFrame(result_list)
+    result_df.to_csv(
+        'backtest_result/result_TON-USDT-SWAP_20211016120000_20251016120000_price_extremes_0.0034_8710.csv',
+        index=False)
 
 def truly_backtest():
     """
     之前一一组合生成回测数据的代码
     :return:
     """
-    backtest_path = 'backtest_result'
-    file_path_list = ['kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv']
-    gen_signal_method = 'price_extremes'
-    profit_list = generate_list(0.001, 0.1, 100, 4)
-    period_list = generate_list(10, 10000, 100, 0)
-    # 将period_list变成int
-    period_list = [int(period) for period in period_list]
-    lever = 100
-    init_money = 10000000
-    longest_periods_info_path = 'kline_data/longest_periods_info.json'
-    all_longest_periods_info = read_json(longest_periods_info_path)
-    calculate_combination((0.002, 710, pd.read_csv(file_path_list[3]), 100, 10000000))
+    df1 = pd.read_csv('backtest_result/result_TON-USDT-SWAP_20211016120000_20251016120000_price_extremes_0.0034_8710.csv')
+    df2 = pd.read_csv('backtest_result/result_10000000_1_TON-USDT-SWAP_20211016120000_20251016120000_price_extremes_0.0034_8710.csv')
+    file_path = 'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv'
+    max_sell_time_diff_list = [x for x in range(500, 10000, 1000)]
+    power_list = [x for x in range(0, 5, 1)]
 
+    # 准备所有参数组合
+    parameter_list = []
+    df = pd.read_csv(file_path)  # 将 DataFrame 读取移到循环外，避免重复读取
+    fixed_params = (0.0034, 8710, df, 100, 10000000)
 
-    for file_path in file_path_list:
-        base_name = file_path.split('/')[-1].split('.')[0]
-        origin_data_df = pd.read_csv(file_path)  # 只取最近1000条数据
-        origin_data_df['timestamp'] = pd.to_datetime(origin_data_df['timestamp'])
+    for max_sell_time_diff in max_sell_time_diff_list:
+        for power in power_list:
+            params = fixed_params + (max_sell_time_diff, power)
+            parameter_list.append(params)
 
+    # 创建进程池
+    num_processes = os.cpu_count() - 3  # 获取 CPU 核心数
+    with multiprocessing.Pool(processes=num_processes) as pool:
+        # 使用 map 或 starmap 并行执行 calculate_combination
+        result_list = pool.map(calculate_combination, parameter_list)
 
-        longest_periods_info = all_longest_periods_info[base_name]
-        for key, value in longest_periods_info.items():
-            start_time_str, end_time_str = value.split('_')
-            start_time = pd.to_datetime(start_time_str)
-            end_time = pd.to_datetime(end_time_str)
-            data_df = origin_data_df[(origin_data_df['timestamp'] >= start_time) & (origin_data_df['timestamp'] <= end_time)]
-
-            data_len = len(data_df)
-
-            # 获取data_df的初始时间与结束时间
-            start_time = data_df.iloc[0].timestamp
-            end_time = data_df.iloc[-1].timestamp
-            print(f"开始时间：{start_time}，结束时间：{end_time} 长度：{data_len} key = {key}")
-            # 生成time_key
-            time_key_str = f"{start_time.strftime('%Y%m%d%H%M%S')}_{end_time.strftime('%Y%m%d%H%M%S')}"
-
-
-            # 准备参数组合
-            combinations = [(profit, period, data_df, lever, init_money) for profit in profit_list for period in period_list]
-            print(f"共有 {len(combinations)} 个组合，开始计算...")
-
-            file_out = f'{backtest_path}/result_{data_len}_{len(combinations)}_{base_name}_{time_key_str}_{gen_signal_method}_{key}.csv'
-            if os.path.exists(file_out):
-                print(f"结果文件 {file_out} 已存在，跳过计算")
-                continue
-
-            # 使用多进程计算
-            with mp.Pool(processes=os.cpu_count() - 2) as pool:
-                results = list(tqdm(pool.imap(calculate_combination, combinations), total=len(combinations)))
-
-            # 保存结果
-            result_df = pd.DataFrame(results)
-            result_df.to_csv(file_out, index=False)
-            print(f"结果已保存到 {file_out}")
+    result_df = pd.DataFrame(result_list)
+    result_df.to_csv(
+        'backtest_result/result_TON-USDT-SWAP_20211016120000_20251016120000_price_extremes_0.0034_8710.csv',
+        index=False)
+    #
+    #
+    # for file_path in file_path_list:
+    #     base_name = file_path.split('/')[-1].split('.')[0]
+    #     origin_data_df = pd.read_csv(file_path)  # 只取最近1000条数据
+    #     origin_data_df['timestamp'] = pd.to_datetime(origin_data_df['timestamp'])
+    #
+    #
+    #     longest_periods_info = all_longest_periods_info[base_name]
+    #     for key, value in longest_periods_info.items():
+    #         start_time_str, end_time_str = value.split('_')
+    #         start_time = pd.to_datetime(start_time_str)
+    #         end_time = pd.to_datetime(end_time_str)
+    #         data_df = origin_data_df[(origin_data_df['timestamp'] >= start_time) & (origin_data_df['timestamp'] <= end_time)]
+    #
+    #         data_len = len(data_df)
+    #
+    #         # 获取data_df的初始时间与结束时间
+    #         start_time = data_df.iloc[0].timestamp
+    #         end_time = data_df.iloc[-1].timestamp
+    #         print(f"开始时间：{start_time}，结束时间：{end_time} 长度：{data_len} key = {key}")
+    #         # 生成time_key
+    #         time_key_str = f"{start_time.strftime('%Y%m%d%H%M%S')}_{end_time.strftime('%Y%m%d%H%M%S')}"
+    #
+    #
+    #         # 准备参数组合
+    #         combinations = [(profit, period, data_df, lever, init_money) for profit in profit_list for period in period_list]
+    #         print(f"共有 {len(combinations)} 个组合，开始计算...")
+    #
+    #         file_out = f'{backtest_path}/result_{data_len}_{len(combinations)}_{base_name}_{time_key_str}_{gen_signal_method}_{key}.csv'
+    #         if os.path.exists(file_out):
+    #             print(f"结果文件 {file_out} 已存在，跳过计算")
+    #             continue
+    #
+    #         # 使用多进程计算
+    #         with mp.Pool(processes=os.cpu_count() - 2) as pool:
+    #             results = list(tqdm(pool.imap(calculate_combination, combinations), total=len(combinations)))
+    #
+    #         # 保存结果
+    #         result_df = pd.DataFrame(results)
+    #         result_df.to_csv(file_out, index=False)
+    #         print(f"结果已保存到 {file_out}")
 
 def covert_df(df):
     target = 'target'
@@ -1101,8 +1145,11 @@ def example():
     file_path_list = ['kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv',
      'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv']
 
+    # 示例0:更加详细的回测考虑超时的处理
+    detail_backtest()
+
     # 示例一:传统的一一获取不同信号在三种指定时间段上面的表现结果
-    truly_backtest()
+    # truly_backtest()
 
     # 示例二:使用预处理后的数据初略获取回测效果数据
     # statistic_data(file_path_list)
@@ -1112,38 +1159,38 @@ def example():
     # for file_path in file_path_list:
     #     calculate_time_to_targets(file_path)
 
-    # 示例四：分析初略的回测结果数据
-    file_path_list = [
-        # "temp/temp.csv",
-        "kline_data/price_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
-        "kline_data/price_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
-        "kline_data/price_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
-        "kline_data/price_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
-        "kline_data/price_reverse_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
-        "kline_data/price_reverse_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
-        "kline_data/price_reverse_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
-        "kline_data/price_reverse_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
-        "kline_data/price_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
-        "kline_data/price_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
-        "kline_data/price_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
-        "kline_data/price_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
-        "kline_data/price_reverse_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
-        "kline_data/price_reverse_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
-        "kline_data/price_reverse_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
-        "kline_data/price_reverse_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv"
-    ]
-    # result_df1 = pd.read_csv('backtest_result/analyze_data_mean.csv')
-    # result_df2 = pd.read_csv('backtest_result/analyze_data_median.csv')
-    analyze_df_list = []
-    score_key = 'median'
-    for file_path in file_path_list:
-        analyze_df = analyze_data(file_path, score_key)
-        file_path_split = file_path.split('_')
-        key_name = f'{file_path_split[2]}_{file_path_split[6]}_{file_path_split[7]}'
-        analyze_df['key_name'] = key_name
-        analyze_df_list.append(analyze_df)
-    analyze_df = pd.concat(analyze_df_list, ignore_index=True)
-    analyze_df.to_csv(f'backtest_result/analyze_data_{score_key}.csv', index=False)
+    # # 示例四：分析初略的回测结果数据
+    # file_path_list = [
+    #     # "temp/temp.csv",
+    #     "kline_data/price_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+    #     "kline_data/price_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+    #     "kline_data/price_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+    #     "kline_data/price_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+    #     "kline_data/price_reverse_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+    #     "kline_data/price_reverse_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+    #     "kline_data/price_reverse_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+    #     "kline_data/price_reverse_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+    #     "kline_data/price_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+    #     "kline_data/price_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+    #     "kline_data/price_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+    #     "kline_data/price_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+    #     "kline_data/price_reverse_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+    #     "kline_data/price_reverse_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+    #     "kline_data/price_reverse_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+    #     "kline_data/price_reverse_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv"
+    # ]
+    # # result_df1 = pd.read_csv('backtest_result/analyze_data_mean.csv')
+    # # result_df2 = pd.read_csv('backtest_result/analyze_data_median.csv')
+    # analyze_df_list = []
+    # score_key = 'median'
+    # for file_path in file_path_list:
+    #     analyze_df = analyze_data(file_path, score_key)
+    #     file_path_split = file_path.split('_')
+    #     key_name = f'{file_path_split[2]}_{file_path_split[6]}_{file_path_split[7]}'
+    #     analyze_df['key_name'] = key_name
+    #     analyze_df_list.append(analyze_df)
+    # analyze_df = pd.concat(analyze_df_list, ignore_index=True)
+    # analyze_df.to_csv(f'backtest_result/analyze_data_{score_key}.csv', index=False)
 
 if __name__ == "__main__":
     example()

@@ -1181,16 +1181,18 @@ def generate_signals_double_ma(df, short_periods=[10, 20, 30], long_periods=[50,
     df = df.assign(**signals)
     return df
 
-def generate_price_extremes_signals(df, periods=[20]):
+def generate_price_extremes_signals(df, param_info={"periods": [20]}):
     """
     根据指定周期内的最高价和最低价生成买入和卖出信号。
 
     Args:
         df (pd.DataFrame): 包含 'close' 列的 DataFrame。
+        **kwargs: 可变关键字参数，用于传递不同的配置选项。
 
     Returns:
         pd.DataFrame: 添加了价格极值信号列的 DataFrame。
     """
+    periods = param_info.get("periods", [20])
     signals = {}
     for period in periods:
         # 检查是否为指定周期内的最高价
@@ -1204,7 +1206,7 @@ def generate_price_extremes_signals(df, periods=[20]):
     df = df.assign(**signals)
     return df
 
-def generate_price_unextremes_signals(df, periods=[20]):
+def generate_price_unextremes_signals(df, param_info={"periods": [20]}):
     """
     根据指定周期内的最高价和最低价生成买入和卖出信号。
 
@@ -1214,6 +1216,7 @@ def generate_price_unextremes_signals(df, periods=[20]):
     Returns:
         pd.DataFrame: 添加了价格极值信号列的 DataFrame。
     """
+    periods = param_info.get("periods", [20])
     signals = {}
     for period in periods:
         # 检查是否为指定周期内的最高价

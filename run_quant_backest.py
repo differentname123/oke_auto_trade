@@ -1,7 +1,9 @@
 import json
+import multiprocessing
 import os
 import multiprocessing as mp
 import time
+import traceback
 from datetime import datetime
 
 import numpy as np
@@ -13,8 +15,13 @@ import pandas as pd
 from get_feature_op import generate_price_extremes_signals, generate_price_unextremes_signals, \
     generate_price_extremes_reverse_signals
 
+function_map = {
+    "price_extremes": generate_price_extremes_signals,
+    "price_reverse_extremes": generate_price_extremes_reverse_signals,
+}
 
-def gen_buy_sell_signal(data_df, profit=1 / 100, period=10):
+
+def gen_buy_sell_signal(data_df, profit, signal_name, side, signal_func, signal_param):
     """
     为data生成相应的买卖信号，并生成相应的buy_price, sell_price
     :param data_df:
@@ -22,44 +29,41 @@ def gen_buy_sell_signal(data_df, profit=1 / 100, period=10):
     :param period:
     :return:
     """
-    # start_time = datetime.now()
-    signal_df = generate_price_extremes_signals(data_df, periods=[period])
-    # 找到包含Buy的列和包含Sell的列名
-    buy_col = [col for col in signal_df.columns if 'Buy' in col]
-    sell_col = [col for col in signal_df.columns if 'Sell' in col]
-    # 将buy_col[0]重命名为Buy
-    signal_df.rename(columns={buy_col[0]: 'Buy'}, inplace=True)
-    signal_df.rename(columns={sell_col[0]: 'Sell'}, inplace=True)
+    signal_df = signal_func(data_df, signal_param)
     # 初始化 buy_price 和 sell_price 列，可以设置为 NaN 或者其他默认值
     signal_df['buy_price'] = None
     signal_df['sell_price'] = None
-
-    # 找到 Buy 为 1 的行，设置 buy_price 和 sell_price
-    buy_rows = signal_df['Buy'] == 1
-    signal_df.loc[buy_rows, 'buy_price'] = signal_df.loc[buy_rows, 'close']
-    signal_df.loc[buy_rows, 'sell_price'] = signal_df.loc[buy_rows, 'close'] * (1 + profit)
-
-    # 找到 Sell 为 1 的行，设置 sell_price 和 buy_price
-    sell_rows = signal_df['Sell'] == 1
-    signal_df.loc[sell_rows, 'buy_price'] = signal_df.loc[sell_rows, 'close']
-    signal_df.loc[sell_rows, 'sell_price'] = signal_df.loc[sell_rows, 'close'] * (1 - profit)
+    # 找到包含Buy的列和包含Sell的列名
+    target_col = [col for col in signal_df.columns if signal_name in col]
+    if side == 'long':
+        signal_df.rename(columns={target_col[0]: 'Buy'}, inplace=True)
+        # 找到 Buy 为 1 的行，设置 buy_price 和 sell_price
+        buy_rows = signal_df['Buy'] == 1
+        signal_df.loc[buy_rows, 'buy_price'] = signal_df.loc[buy_rows, 'close']
+        signal_df.loc[buy_rows, 'sell_price'] = signal_df.loc[buy_rows, 'close'] * (1 + profit)
+        signal_df['Sell'] = 0
+    else:
+        signal_df.rename(columns={target_col[0]: 'Sell'}, inplace=True)
+        # 找到 Sell 为 1 的行，设置 sell_price 和 buy_price
+        sell_rows = signal_df['Sell'] == 1
+        signal_df.loc[sell_rows, 'buy_price'] = signal_df.loc[sell_rows, 'close']
+        signal_df.loc[sell_rows, 'sell_price'] = signal_df.loc[sell_rows, 'close'] * (1 - profit)
+        signal_df['Buy'] = 0
     # 初始化 count 列
     signal_df['count'] = 0.01
-    # signal_df['Sell'] = 0
-    # signal_df['Buy'] = 0
 
     return signal_df
 
 
 @njit(parallel=True)
 def _calculate_time_to_targets_numba_parallel(
-    timestamps,
-    closes,
-    highs,
-    lows,
-    increase_targets,
-    decrease_targets,
-    max_search=1000000
+        timestamps,
+        closes,
+        highs,
+        lows,
+        increase_targets,
+        decrease_targets,
+        max_search=1000000
 ):
     n = len(timestamps)
     total_targets = len(increase_targets) + len(decrease_targets)
@@ -134,6 +138,7 @@ def calculate_time_to_targets(file_path):
     print(f"calculate_time_to_targets cost time: {datetime.now() - start_time}")
     df.to_csv(result_file_path, index=False)
     return df
+
 
 def analysis_position(pending_order_list, row, total_money, leverage=100):
     """
@@ -223,11 +228,11 @@ def calculate_time_diff_minutes(time1, time2):
     return time_diff.total_seconds() / 60
 
 
-def deal_pending_order(pending_order_list, row, position_info, lever, total_money, max_time_diff=2 * 1):
+def deal_pending_order(pending_order_list, row, position_info, lever, total_money, max_time_diff=2 * 1,
+                       max_sell_time_diff=1000000, power=1):
     """
     处理委托单
     """
-    max_sell_time_diff = 10000  # 最大卖出时间差
     high = row.high
     low = row.low
     close = row.close
@@ -235,7 +240,7 @@ def deal_pending_order(pending_order_list, row, position_info, lever, total_mone
     timestamp = row.timestamp
     history_order_list = []
     fee = 0.0007  # 手续费
-    check_flag = True # 是否真实的按照能否买入来回测
+    check_flag = True  # 是否真实的按照能否买入来回测
 
     for order in pending_order_list:
         if order['side'] == 'kai':  # 开仓
@@ -271,7 +276,7 @@ def deal_pending_order(pending_order_list, row, position_info, lever, total_mone
                 order['message'] = 'time out'
 
         elif order['side'] == 'ping':  # 平仓
-            profit_value = 1 * (order['sell_price'] - order['buy_price'])
+            profit_value = power * (order['sell_price'] - order['buy_price'])
             pin_time_diff = calculate_time_diff_minutes(timestamp, order['kai_time'])
             if order['type'] == 'long':  # 平多仓
                 if order['sell_price'] < high:
@@ -323,7 +328,7 @@ def create_order(order_type, row, lever):
     }
 
 
-def process_signals(signal_df, lever, total_money, init_money):
+def process_signals(signal_df, lever, total_money, init_money, max_sell_time_diff=1000000, power=1):
     """处理信号生成的订单并计算收益"""
     pending_order_list = []
     all_history_order_list = []
@@ -340,7 +345,8 @@ def process_signals(signal_df, lever, total_money, init_money):
 
         # 处理委托单
         pending_order_list, history_order_list, total_money = deal_pending_order(
-            pending_order_list, row, position_info, lever, total_money
+            pending_order_list, row, position_info, lever, total_money, max_sell_time_diff=max_sell_time_diff,
+            power=power
         )
         all_history_order_list.extend(history_order_list)
 
@@ -411,37 +417,41 @@ def process_signals(signal_df, lever, total_money, init_money):
 
 def calculate_combination(args):
     """多进程计算单个组合的回测结果"""
-    profit, period, data_df, lever, init_money = args
-    signal_df = gen_buy_sell_signal(data_df, profit=profit, period=period)
-    last_data = process_signals(signal_df, lever, init_money, init_money)
-    last_data.update({'profit': profit, 'period': period})
+    start_time = time.time()
+    profit, period, data_df, lever, init_money, max_sell_time_diff, power, signal_name, side, signal_func, signal_param = args
+    signal_df = gen_buy_sell_signal(data_df, profit, signal_name, side, signal_func, signal_param)
+    last_data = process_signals(signal_df, lever, init_money, init_money, max_sell_time_diff=max_sell_time_diff,
+                                power=power)
+    last_data.update({'profit': profit, 'period': period, 'max_sell_time_diff': max_sell_time_diff, 'power': power})
+    print(f"profit: {profit}, period: {period}, cost time: {time.time() - start_time}")
     return last_data
 
+
 def generate_list(start, end, count, decimals):
-  """
-  生成一个从起始值到最终值的数字列表，包含指定数量的元素，并保留指定位数的小数。
+    """
+    生成一个从起始值到最终值的数字列表，包含指定数量的元素，并保留指定位数的小数。
 
-  Args:
-    start: 起始值。
-    end: 最终值。
-    count: 列表元素的数量。
-    decimals: 保留的小数位数。
+    Args:
+      start: 起始值。
+      end: 最终值。
+      count: 列表元素的数量。
+      decimals: 保留的小数位数。
 
-  Returns:
-    一个包含指定数量元素的数字列表，从起始值线性递增到最终值，并保留指定位数的小数。
-  """
+    Returns:
+      一个包含指定数量元素的数字列表，从起始值线性递增到最终值，并保留指定位数的小数。
+    """
 
-  if count <= 0:
-    return []
-  elif count == 1:
-    return [round(start, decimals)]
+    if count <= 0:
+        return []
+    elif count == 1:
+        return [round(start, decimals)]
 
-  step = (end - start) / (count - 1)
-  result = []
-  for i in range(count):
-    value = start + i * step
-    result.append(round(value, decimals))
-  return result
+    step = (end - start) / (count - 1)
+    result = []
+    for i in range(count):
+        value = start + i * step
+        result.append(round(value, decimals))
+    return result
 
 
 def merge_dataframes(df_list):
@@ -463,18 +473,19 @@ def merge_dataframes(df_list):
         df['hold_time_score'] = 10000 * df['profit_ratio'] / df['hold_time']
 
         df_list[i] = df.copy()  # Create a copy to avoid modifying the original DataFrame
-        df_list[i]['source_df'] = f'df_{i+1}'
+        df_list[i]['source_df'] = f'df_{i + 1}'
 
     merged_df = df_list[0]
     for i in range(1, len(df_list)):
-        merged_df = pd.merge(merged_df, df_list[i], on=['profit', 'period'], how='outer', suffixes=('', f'_{i+1}'))
+        merged_df = pd.merge(merged_df, df_list[i], on=['profit', 'period'], how='outer', suffixes=('', f'_{i + 1}'))
 
     # 重命名和排序
     def categorize_and_sort_cols(df):
         # 识别不同类别的列
         source_df_cols = [col for col in df.columns if 'source_df' in col]
         profit_ratio_cols = [col for col in df.columns if 'profit_ratio' in col]
-        other_cols = [col for col in df.columns if col not in source_df_cols and col not in profit_ratio_cols and col != 'score' and col != 'score_plus' and col != 'score_mul']
+        other_cols = [col for col in df.columns if
+                      col not in source_df_cols and col not in profit_ratio_cols and col != 'score' and col != 'score_plus' and col != 'score_mul']
 
         # 对每种类别的列进行排序
         source_df_cols.sort()
@@ -488,26 +499,29 @@ def merge_dataframes(df_list):
     new_cols_order = categorize_and_sort_cols(merged_df)
     merged_df = merged_df.reindex(columns=new_cols_order)
 
-    #计算分数
+    # 计算分数
     profit_ratio_cols = [col for col in merged_df.columns if 'profit_ratio' in col and 'source_df' not in col]
     profit_ratio_cols.sort()
-    if len(profit_ratio_cols) >=3:
-      merged_df['score'] = 10000 * merged_df[profit_ratio_cols[0]] * merged_df[profit_ratio_cols[1]] * merged_df[profit_ratio_cols[2]]
-      merged_df['score_plus'] = merged_df[profit_ratio_cols[0]] + merged_df[profit_ratio_cols[1]] + merged_df[profit_ratio_cols[2]]
-      merged_df['score_mul'] = merged_df['score_plus'] * merged_df['score']
-      merged_df['hold_time_score_plus'] = merged_df['hold_time_score'] + merged_df['hold_time_score_2'] + merged_df['hold_time_score_3']
-    elif len(profit_ratio_cols) >=2:
-      merged_df['score'] = 10000 * merged_df[profit_ratio_cols[0]] * merged_df[profit_ratio_cols[1]]
-      merged_df['score_plus'] = merged_df[profit_ratio_cols[0]] + merged_df[profit_ratio_cols[1]]
-      merged_df['score_mul'] = merged_df['score_plus'] * merged_df['score']
-      merged_df['hold_time_score_plus'] = merged_df['hold_time_score'] + merged_df['hold_time_score_2']
+    if len(profit_ratio_cols) >= 3:
+        merged_df['score'] = 10000 * merged_df[profit_ratio_cols[0]] * merged_df[profit_ratio_cols[1]] * merged_df[
+            profit_ratio_cols[2]]
+        merged_df['score_plus'] = merged_df[profit_ratio_cols[0]] + merged_df[profit_ratio_cols[1]] + merged_df[
+            profit_ratio_cols[2]]
+        merged_df['score_mul'] = merged_df['score_plus'] * merged_df['score']
+        merged_df['hold_time_score_plus'] = merged_df['hold_time_score'] + merged_df['hold_time_score_2'] + merged_df[
+            'hold_time_score_3']
+    elif len(profit_ratio_cols) >= 2:
+        merged_df['score'] = 10000 * merged_df[profit_ratio_cols[0]] * merged_df[profit_ratio_cols[1]]
+        merged_df['score_plus'] = merged_df[profit_ratio_cols[0]] + merged_df[profit_ratio_cols[1]]
+        merged_df['score_mul'] = merged_df['score_plus'] * merged_df['score']
+        merged_df['hold_time_score_plus'] = merged_df['hold_time_score'] + merged_df['hold_time_score_2']
     return merged_df
 
 
 def compute_diff_statistics_signals_time_ranges_readable(
-    signal_df: pd.DataFrame,
-    time_range_list: list,
-    optimized_parquet_path: str
+        signal_df: pd.DataFrame,
+        time_range_list: list,
+        optimized_parquet_path: str
 ) -> pd.DataFrame:
     """
     一个更直观（但不一定是最高效）的实现示例：
@@ -784,6 +798,7 @@ def read_json(file_path):
     with open(file_path, 'r') as file:
         return json.load(file)
 
+
 def generate_time_segments(origin_df, time_len=20):
     """
     Generates a list of 10 evenly spaced time segments based on the timestamp
@@ -844,19 +859,21 @@ def statistic_data(file_path_list):
             time_len = len(time_range_list)
             file_path_output = file_path_output_dir + f"/start_period_{start_period}_end_period_{end_period}_step_period_{step_period}_min_{global_min.strftime('%Y%m%d')}_max_{global_max.strftime('%Y%m%d')}_time_len_{time_len}.csv"
 
-
             if os.path.exists(file_path_output):
                 print(f"结果文件 {file_path_output} 已存在，跳过计算")
                 continue
             if key_word == "price_extremes":
-                signal_df = generate_price_extremes_signals(origin_df, periods=[x for x in range(start_period, end_period, step_period)])
+                signal_df = generate_price_extremes_signals(origin_df, periods=[x for x in
+                                                                                range(start_period, end_period,
+                                                                                      step_period)])
             else:
-                signal_df = generate_price_extremes_reverse_signals(origin_df, periods=[x for x in range(start_period, end_period, step_period)])
-
+                signal_df = generate_price_extremes_reverse_signals(origin_df, periods=[x for x in
+                                                                                        range(start_period, end_period,
+                                                                                              step_period)])
 
             print(f"开始计算 {file_path_output}")
             result_df = compute_diff_statistics_signals_time_ranges_readable(signal_df, time_range_list,
-                                                                    optimized_parquet_path)
+                                                                             optimized_parquet_path)
             result_df.to_csv(file_path_output, index=False)
 
         # for i in range(1, 11):
@@ -873,13 +890,174 @@ def statistic_data(file_path_list):
         #     result_df.to_csv(file_path_output, index=False)
 
 
+def safe_calculate_combination(params):
+    """
+    包装原先的 calculate_combination 函数，捕获异常，以免某一次计算失败导致整个进程中断。
+    返回值中增加 'error' 字段，用于记录异常信息。
+    """
+    try:
+        result = calculate_combination(params)
+        # 为了更好地区分成功与失败，这里也可加入一个标志
+        result["error"] = None
+        return result
+    except Exception as e:
+        return {
+            "error": str(e),
+            # 如果需要保留部分上下文信息，可一并返回
+            "params": params
+        }
+
+
+def detail_backtest():
+    """
+    更加详细的回测，是为已经比较好的策略指定的参数组合生成详细回测数据。
+    """
+
+    good_strategy_path = 'backtest_result/good_strategy_df.csv'
+
+    sell_time_diff_step = 100
+    sell_time_diff_start = 10000
+    sell_time_diff_end = 1000
+    max_sell_time_diff_list = [x for x in range(sell_time_diff_start, sell_time_diff_end, sell_time_diff_step)]
+    # 为了覆盖更大范围，追加一个极大的阈值
+    max_sell_time_diff_list.append(1000000)
+
+    power_step = 1
+    power_start = 0
+    power_end = 5
+    power_list = [x for x in range(power_start, power_end, power_step)]
+
+    file_path_list = [
+        'kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv',
+        'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv',
+        'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv',
+        'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv'
+    ]
+
+    # 读取“好策略”列表
+    df_good_strategies = pd.read_csv(good_strategy_path)
+    # 找到df_good_strategies中result_path为空的行
+    df_good_strategies = df_good_strategies[df_good_strategies['result_path'].isna()]
+
+    # 按照 key_name 分组
+    df_group = df_good_strategies.groupby('key_name')
+
+    # 遍历每个分组
+    for key_name_group, value_df in df_group:
+        # 根据 key_name 判断信号类型
+        if 'reverse' in key_name_group:
+            signal_type = 'price_reverse_extremes'
+        else:
+            signal_type = 'price_extremes'
+
+        # 提取真正的币种标识，下面在 file_path_list 中匹配
+        coin_name = key_name_group.split('-')[0].split('_')[-1]
+
+        # 找到对应的文件路径
+        matched_file_path = None
+        for fpath in file_path_list:
+            if coin_name in fpath:
+                matched_file_path = fpath
+                break
+
+        if not matched_file_path:
+            print(f"未找到 {coin_name} 对应的 K线文件路径，跳过该分组。")
+            continue
+
+        # 读取 K 线文件
+        df_kline = pd.read_csv(matched_file_path)
+
+        start_time = time.time()
+
+        # 遍历该分组下每一行
+        for index, row in value_df.iterrows():
+            try:
+                signal_name = row['signal_name']
+                period = int(signal_name.split('_')[1])
+
+                target_name = row['target_name']
+                profit = float(target_name.split('_')[2])
+
+                # 根据 target_name 判断多空
+                if "high" in target_name:
+                    side = 'long'
+                else:
+                    side = 'short'
+
+                # 组装 signal_param
+                signal_param = {
+                    "periods": [period]
+                }
+
+                # 构建参数列表
+                parameter_list = []
+                # 这里的 100 和 10000000 是原先固定传入的参数
+                fixed_params = (profit, period, df_kline, 100, 10000000)
+
+                for max_sell_time_diff in max_sell_time_diff_list:
+                    for power in power_list:
+                        params = (
+                                fixed_params
+                                + (max_sell_time_diff, power)
+                                + (signal_name, side, function_map[signal_type], signal_param)
+                        )
+                        parameter_list.append(params)
+
+                # 生成输出文件路径
+                output_path = (
+                    f"backtest_result/detail_{coin_name}"
+                    f"_signal_name_{signal_name}_period_{period}_profit_{profit}_side_{side}"
+                    f"_len_{len(parameter_list)}_{sell_time_diff_step}_{sell_time_diff_start}"
+                    f"_{sell_time_diff_end}_{power_step}_{power_start}_{power_end}.csv"
+                )
+
+                # 如果结果文件已存在，跳过计算
+                if os.path.exists(output_path):
+                    print(f"结果文件 {output_path} 已存在，跳过计算")
+                    # 如果想在原 DataFrame 中记录 result_path，需要用 loc
+                    df_good_strategies.loc[index, 'result_path'] = output_path
+                    # 将df_good_strategies保存到文件
+                    df_good_strategies.to_csv(good_strategy_path, index=False)
+                    continue
+
+                print(f"开始计算: {output_path}")
+
+                # 进程池大小
+                num_processes = max(1, (os.cpu_count() or 1))  # 避免出现负数
+
+                # 使用进程池并行计算
+                results = []
+                with multiprocessing.Pool(processes=num_processes) as pool:
+                    # 使用 imap_unordered 解决长尾问题，tasks 完成一个就返回一个
+                    # chunksize=1 避免单个耗时任务阻塞其他任务
+                    for res in pool.imap_unordered(safe_calculate_combination, parameter_list, chunksize=1):
+                        results.append(res)
+
+                # 将计算结果转换为 DataFrame
+                result_df = pd.DataFrame(results)
+                result_df.to_csv(output_path, index=False)
+
+                print(f"结果已保存到 {output_path} 耗时：{time.time() - start_time:.2f} 秒")
+
+                # 如果想在原 DataFrame 中记录 result_path，需要用 loc
+                df_good_strategies.loc[index, 'result_path'] = output_path
+                # 将df_good_strategies保存到文件
+                df_good_strategies.to_csv(good_strategy_path, index=False)
+            except Exception as e:
+                traceback.print_exc()
+                print(f"计算 {output_path} 时出现异常：{e}")
+
+
 def truly_backtest():
     """
     之前一一组合生成回测数据的代码
     :return:
     """
     backtest_path = 'backtest_result'
-    file_path_list = ['kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv']
+    file_path_list = ['kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv',
+                      'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv',
+                      'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv',
+                      'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv']
     gen_signal_method = 'price_extremes'
     profit_list = generate_list(0.001, 0.1, 100, 4)
     period_list = generate_list(10, 10000, 100, 0)
@@ -890,19 +1068,18 @@ def truly_backtest():
     longest_periods_info_path = 'kline_data/longest_periods_info.json'
     all_longest_periods_info = read_json(longest_periods_info_path)
 
-
     for file_path in file_path_list:
         base_name = file_path.split('/')[-1].split('.')[0]
         origin_data_df = pd.read_csv(file_path)  # 只取最近1000条数据
         origin_data_df['timestamp'] = pd.to_datetime(origin_data_df['timestamp'])
-
 
         longest_periods_info = all_longest_periods_info[base_name]
         for key, value in longest_periods_info.items():
             start_time_str, end_time_str = value.split('_')
             start_time = pd.to_datetime(start_time_str)
             end_time = pd.to_datetime(end_time_str)
-            data_df = origin_data_df[(origin_data_df['timestamp'] >= start_time) & (origin_data_df['timestamp'] <= end_time)]
+            data_df = origin_data_df[
+                (origin_data_df['timestamp'] >= start_time) & (origin_data_df['timestamp'] <= end_time)]
 
             data_len = len(data_df)
 
@@ -913,9 +1090,9 @@ def truly_backtest():
             # 生成time_key
             time_key_str = f"{start_time.strftime('%Y%m%d%H%M%S')}_{end_time.strftime('%Y%m%d%H%M%S')}"
 
-
             # 准备参数组合
-            combinations = [(profit, period, data_df, lever, init_money) for profit in profit_list for period in period_list]
+            combinations = [(profit, period, data_df, lever, init_money) for profit in profit_list for period in
+                            period_list]
             print(f"共有 {len(combinations)} 个组合，开始计算...")
 
             file_out = f'{backtest_path}/result_{data_len}_{len(combinations)}_{base_name}_{time_key_str}_{gen_signal_method}_{key}.csv'
@@ -931,6 +1108,7 @@ def truly_backtest():
             result_df = pd.DataFrame(results)
             result_df.to_csv(file_out, index=False)
             print(f"结果已保存到 {file_out}")
+
 
 def covert_df(df):
     target = 'target'
@@ -950,21 +1128,67 @@ def covert_df(df):
     return melted_df
 
 
-def analyze_data(file_path):
+def select_top_rows_by_group_size(grouped_df, score_columns, group_step=1000):
+    """
+    根据 group_size 区间选择 sc 和 sc_median 列最大值的行。
+
+    Args:
+        grouped_df: 包含数据的 Pandas DataFrame。
+        score_columns: 包含需要比较的评分列名的列表。
+        group_step: group_size 区间的大小。
+
+    Returns:
+        包含每个区间选择出的最大值行的 DataFrame。
+    """
+    all_top_rows = []
+    max_group_size = grouped_df['group_size'].max()
+    num_intervals = (max_group_size // group_step) + 1
+
+    for i in range(num_intervals):
+        lower_bound = i * group_step
+        upper_bound = (i + 1) * group_step
+        interval_df = grouped_df[(grouped_df['group_size'] >= lower_bound) & (grouped_df['group_size'] < upper_bound)]
+
+        if not interval_df.empty:
+            for sc in score_columns:
+                # 检查 sc 列是否全部为负数
+                if sc in interval_df.columns and not (interval_df[sc] >= 0).any():
+                    continue  # 如果全部为负数，则跳过
+                elif sc in interval_df.columns:
+                    top_sc = interval_df.nlargest(1, sc)
+                    all_top_rows.append(top_sc)
+
+                median_col = f"{sc}_median"
+                # 检查 median_col 列是否全部为负数
+                if median_col in interval_df.columns and not (interval_df[median_col] >= 0).any():
+                    continue  # 如果全部为负数，则跳过
+                elif median_col in interval_df.columns:
+                    top_median = interval_df.nlargest(1, median_col)
+                    all_top_rows.append(top_median)
+
+    if all_top_rows:
+        return pd.concat(all_top_rows)
+    else:
+        print(f"没有找到任何行 {score_columns}")
+        return pd.DataFrame()
+
+
+def analyze_data(file_path, score_key='median'):
     """
     对回测数据进行分析，并将结果输出为 CSV 文件。
     """
     start_time = time.time()
-    output_path = file_path.replace(".csv", "_analyze.csv")
-    if os.path.exists(output_path):
-        print(f"结果文件 {output_path} 已存在，跳过计算")
-        return pd.read_csv(output_path)
+
+    output_path = file_path.replace(".csv", f"_analyze_{score_key}.csv")
+    # if os.path.exists(output_path):
+    #     print(f"结果文件 {output_path} 已存在，跳过计算")
+    #     return pd.read_csv(output_path)
 
     # 读取数据
     df = pd.read_csv(file_path)
 
     # 只保留不包含 'std' 或 'median' 的列
-    need_columns = [col for col in df.columns if "std" not in col and "median" not in col]
+    need_columns = [col for col in df.columns if "std" not in col]
     df = df[need_columns]
 
     # 找到所有包含 'diff' 的列，以及所有不包含 'diff' 的列
@@ -981,10 +1205,10 @@ def analyze_data(file_path):
 
     # 对每个分组进行计算及处理
     for key, columns in diff_columns_group.items():
-        # 这里假设分组后会有两个列：mean 和 nan_ratio
-        mean_col = f"{key}_diff_mean"
+        # 这里假设分组后会有两个列：median 和 nan_ratio
+        # 第 3 项需求：改为 median
+        mean_col = f"{key}_diff_{score_key}"
         nan_ratio_col = f"{key}_diff_nan_ratio"
-
 
         # 从 key 中提取 profit（示例：key = 'long_XXX_0.03'，则 profit = '0.03'）
         # 如果不需要 side，可省略解析
@@ -1001,6 +1225,8 @@ def analyze_data(file_path):
         score3_col = f"{key}_score3"
         score4_col = f"{key}_score4"
         score_columns = [score1_col, score2_col, score3_col, score4_col]
+        if float(profit) - 0.0007 < 0:
+            continue
 
         # 计算 profit（示例中写死扣除了 0.0007）
         temp_df[profit_key] = float(profit) - 0.0007
@@ -1008,59 +1234,84 @@ def analyze_data(file_path):
         # 计算 4 种评分 (score1～4)
         # 注意要先排除 mean_col 和 nan_ratio_col 可能的 NaN 或 0，这里假设数据完整
         temp_df[score1_col] = (
-            (temp_df[profit_key] * 10 - temp_df[nan_ratio_col])
-            / temp_df[mean_col] * 10000
-            / temp_df[mean_col] * 10000
+                (temp_df[profit_key] - temp_df[nan_ratio_col]) * temp_df[profit_key] * 100
+                / temp_df[mean_col] * 10000
+                / temp_df[mean_col] * 10000
         )
         temp_df[score2_col] = (
-            (temp_df[profit_key] - temp_df[nan_ratio_col])
-            / temp_df[mean_col] * 10000
-            / temp_df[mean_col] * 10000
+                (temp_df[profit_key] - temp_df[nan_ratio_col]) * 100
+                / temp_df[mean_col] * 10000
+                / temp_df[mean_col] * 10000
         )
         temp_df[score3_col] = (
-            (temp_df[profit_key] * 10 - temp_df[nan_ratio_col])
-            / temp_df[mean_col] * 10000
+                (temp_df[profit_key] - temp_df[nan_ratio_col]) * temp_df[profit_key] * 100
+                / temp_df[mean_col] * 10000
         )
         temp_df[score4_col] = (
-            (temp_df[profit_key] - temp_df[nan_ratio_col])
-            / temp_df[mean_col] * 10000
+                (temp_df[profit_key] - temp_df[nan_ratio_col]) * 100
+                / temp_df[mean_col] * 10000
         )
 
-        # ——————————————————————————————
-        #   使用分组聚合一次性拿到结果
-        # ——————————————————————————————
-        # 1) 对于原先 group.iloc[0] 的信息，这里用 'first' 保留分组中的首行信息
-        # 2) mean_col, nan_ratio_col 要保留所有值（用 list），以便后续赋值给 mean_list, nan_ratio_list
-        # 3) score_columns 做和逻辑保持一致——原代码里的 if ... else ... 都是 sum，所以直接 sum
+        # 在原数据中必须有 time_range 这一列，否则需根据业务需求自行处理
+        # 这里为确保 groupby 时能聚合到 time_range
+        if "time_range" not in temp_df.columns:
+            temp_df["time_range"] = "unknown"
 
-        agg_dict = {c: 'first' for c in no_diff_columns}  # 保留不含 diff 列的首行
+        # -------------------------------------------------------------------
+        # Step 1: groupby 求 sum，保留部分字段
+        # -------------------------------------------------------------------
+        agg_dict = {c: "first" for c in no_diff_columns if c not in ["time_range"]}
+        # 让 time_range 聚合成列表，满足第 2 项需求
+        # 如果您想要它是个 set，可以改为 x.unique().tolist() 或 set(...)
+        agg_dict["time_range"] = lambda x: x.unique().tolist()
+
+        # 保留 diff 列的原信息
         agg_dict[mean_col] = lambda x: x.tolist()
         agg_dict[nan_ratio_col] = lambda x: x.tolist()
+
+        # score列使用 sum
         for sc in score_columns:
-            agg_dict[sc] = 'sum'
-        agg_dict['group_size'] = 'sum'
+            agg_dict[sc] = "sum"
 
-        grouped_df = temp_df.groupby('signal_name', as_index=False).agg(agg_dict)
-        # 添加辅助列
-        grouped_df['time_range'] = 'all'
-        grouped_df['mean_list'] = grouped_df[mean_col]
-        grouped_df['nan_ratio_list'] = grouped_df[nan_ratio_col]
+        agg_dict["group_size"] = "sum"
 
-        # 删除多余的临时列
-        grouped_df.drop(columns=[mean_col, nan_ratio_col], inplace=True)
+        grouped_df_sum = temp_df.groupby("signal_name", as_index=False).agg(agg_dict)
 
-        # 分别针对 4 个评分列，排序取前 1 行（原代码 head(1)）
-        # 如果真的要 Top5，把 1 改为 5 即可
-        all_top_rows = []
+        # 新增字段：median_list、nan_ratio_list
+        # 第 1 项需求：仅保留小数点后 4 位
+        grouped_df_sum[f"{score_key}_list"] = grouped_df_sum[mean_col].apply(
+            lambda lst: [round(v, 4) for v in lst]
+        )
+        grouped_df_sum["nan_ratio_list"] = grouped_df_sum[nan_ratio_col].apply(
+            lambda lst: [round(v, 4) for v in lst]
+        )
+
+        # 删除不再需要的原列
+        grouped_df_sum.drop(columns=[mean_col, nan_ratio_col], inplace=True)
+
+        grouped_df_median = temp_df.groupby("signal_name", as_index=False)[score_columns].median()
+
+        # 为避免和 sum 冲突，这里将中位数列重命名为 “scoreX_col_median”
+        rename_dict = {sc: f"{sc}_median" for sc in score_columns}
+        grouped_df_median.rename(columns=rename_dict, inplace=True)
+
+        grouped_df = pd.merge(grouped_df_sum, grouped_df_median, on="signal_name", how="left")
+
+        # -------------------------------------------------------------------
+        # Step 2: 根据 score 列取 top (原逻辑: nlargest(1))
+        # -------------------------------------------------------------------
+        all_top_rows_grouped = select_top_rows_by_group_size(grouped_df, score_columns, group_step=2000)
+
+        # 合并并去重，从而避免出现同一个分组的同一行在多个评分列里都重复入选
+        merged_top_df = all_top_rows_grouped.drop_duplicates(subset="signal_name")
+        if merged_top_df.empty:
+            continue
         for sc in score_columns:
-            # 如果实际要取 Top5，可改为 nlargest(5, sc)
-            top_sc = grouped_df.nlargest(1, sc)
-            all_top_rows.append(top_sc)
+            merged_top_df[f"{sc}_median"] = merged_top_df[f"{sc}_median"].round(4)
+            # 计算f"{sc}_total"，值为f"{sc}_median"取log10后的和
+            merged_top_df[f"{sc}_total"] = np.log10(merged_top_df[f"{sc}_median"]) + np.log10(merged_top_df[f"{sc}"])
 
-        # 合并并去重，从而避免出现“同一个分组的同一行”在多个评分列里都重复入选的情况,signal_name相同则视为重复
-        merged_top_df = pd.concat(all_top_rows, ignore_index=True).drop_duplicates(subset='signal_name')
-
-        # 最后一次性调用 covert_df()，把这个分组的 top 数据处理完
+        # 最后一次性调用 convert_df()，把这个分组的 top 数据处理完
         melt_df = covert_df(merged_top_df)
         result_df_list.append(melt_df)
 
@@ -1071,9 +1322,80 @@ def analyze_data(file_path):
     return result_df
 
 
+def get_good_strategy():
+    good_strategy_path = 'backtest_result/good_strategy_df.csv'
+    # df = pd.read_csv(good_strategy_path)
+
+    step = 100
+    top_n = 2
+    file_path_list = ['backtest_result/analyze_data_mean.csv', 'backtest_result/analyze_data_median.csv']
+    result_list = []
+    for file_path in file_path_list:
+        low_output_path = file_path.replace('.csv', f'_low_{step}_{top_n}.csv')
+        high_output_path = file_path.replace('.csv', f'_high_{step}_{top_n}.csv')
+        if os.path.exists(low_output_path) and os.path.exists(high_output_path):
+            result_list.append(pd.read_csv(low_output_path))
+            result_list.append(pd.read_csv(high_output_path))
+
+            print(f"结果文件 {low_output_path} 和 {high_output_path} 已存在，跳过计算")
+            continue
+        result_df = pd.read_csv(file_path)
+        base_key_word_list = [f"score{i}" for i in range(1, 5)]
+        key_word_list = base_key_word_list.copy()
+        for key_word in base_key_word_list:
+            key_word_list.append(f"{key_word}_median")
+            key_word_list.append(f"{key_word}_total")
+        # 过滤掉target_value小于0的行
+        result_df = result_df[result_df['target_value'] > 0]
+        # 筛选出target_name的值包含low的行
+        low_result_df = result_df[result_df['target_name'].str.contains('low')]
+        high_result_df = result_df[result_df['target_name'].str.contains('high')]
+
+        low_result_df_list = []
+        high_result_df_list = []
+        for key_word in key_word_list:
+            key_word_low_result_df = low_result_df[low_result_df['target_name'].str.contains(key_word)]
+            key_word_high_result_df = high_result_df[high_result_df['target_name'].str.contains(key_word)]
+
+            # 按照target_value降序排列
+            key_word_low_result_df = key_word_low_result_df.sort_values(by='target_value', ascending=False)
+            key_word_high_result_df = key_word_high_result_df.sort_values(by='target_value', ascending=False)
+
+            current_df = key_word_low_result_df
+            while not current_df.empty:
+                top_2 = current_df.head(top_n)
+                max_group_size = top_2['group_size'].max()
+                current_df = current_df[current_df['group_size'] > max_group_size + step]
+                low_result_df_list.append(top_2)
+
+            current_df = key_word_high_result_df
+            while not current_df.empty:
+                top_2 = current_df.head(top_n)
+                max_group_size = top_2['group_size'].max()
+                current_df = current_df[current_df['group_size'] > max_group_size + step]
+                high_result_df_list.append(top_2)
+        final_low_result_df = pd.concat(low_result_df_list)
+        final_high_result_df = pd.concat(high_result_df_list)
+        result_list.append(final_low_result_df)
+        result_list.append(final_high_result_df)
+        final_low_result_df.to_csv(low_output_path, index=False)
+        final_high_result_df.to_csv(high_output_path, index=False)
+    result_df = pd.concat(result_list)
+    result_df['result_path'] = ''
+    result_df.to_csv(good_strategy_path, index=False)
+
+
 def example():
-    file_path_list = ['kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv',
-     'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv']
+    file_path_list = ['kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv',
+                      'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv',
+                      'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv',
+                      'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv']
+
+    # 示例-1：根据统一的数据获取好的策略，然后再获取详细的结果
+    # get_good_strategy()
+
+    # 示例0:更加详细的回测考虑超时的处理
+    detail_backtest()
 
     # 示例一:传统的一一获取不同信号在三种指定时间段上面的表现结果
     # truly_backtest(file_path_list)
@@ -1081,40 +1403,40 @@ def example():
     # 示例二:使用预处理后的数据初略获取回测效果数据
     # statistic_data(file_path_list)
 
-
     # #示例三: 对原始数据进行预处理
     # for file_path in file_path_list:
     #     calculate_time_to_targets(file_path)
 
-    # 示例四：分析初略的回测结果数据
-    file_path_list = [
-        # "temp/temp.csv",
-        "kline_data/price_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
-        "kline_data/price_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
-        "kline_data/price_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
-        "kline_data/price_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
-        "kline_data/price_reverse_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
-        "kline_data/price_reverse_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
-        "kline_data/price_reverse_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
-        "kline_data/price_reverse_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
-        "kline_data/price_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
-        "kline_data/price_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
-        "kline_data/price_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
-        "kline_data/price_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
-        "kline_data/price_reverse_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
-        "kline_data/price_reverse_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
-        "kline_data/price_reverse_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
-        "kline_data/price_reverse_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv"
-    ]
-    analyze_df_list = []
-    for file_path in file_path_list:
-        analyze_df = analyze_data(file_path)
-        file_path_split = file_path.split('_')
-        key_name = f'{file_path_split[2]}_{file_path_split[6]}_{file_path_split[7]}'
-        analyze_df['key_name'] = key_name
-        analyze_df_list.append(analyze_df)
-    analyze_df = pd.concat(analyze_df_list, ignore_index=True)
-    analyze_df.to_csv('backtest_result/analyze_data.csv', index=False)
+    # # 示例四：分析初略的回测结果数据
+    # file_path_list = [
+    #     # "temp/temp.csv",
+    #     "kline_data/price_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+    #     "kline_data/price_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+    #     "kline_data/price_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+    #     "kline_data/price_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+    #     "kline_data/price_reverse_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+    #     "kline_data/price_reverse_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+    #     "kline_data/price_reverse_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+    #     "kline_data/price_reverse_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+    #     "kline_data/price_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+    #     "kline_data/price_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+    #     "kline_data/price_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+    #     "kline_data/price_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+    #     "kline_data/price_reverse_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+    #     "kline_data/price_reverse_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+    #     "kline_data/price_reverse_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+    #     "kline_data/price_reverse_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv"
+    # ]
+    # analyze_df_list = []
+    # for file_path in file_path_list:
+    #     analyze_df = analyze_data(file_path)
+    #     file_path_split = file_path.split('_')
+    #     key_name = f'{file_path_split[2]}_{file_path_split[6]}_{file_path_split[7]}'
+    #     analyze_df['key_name'] = key_name
+    #     analyze_df_list.append(analyze_df)
+    # analyze_df = pd.concat(analyze_df_list, ignore_index=True)
+    # analyze_df.to_csv('backtest_result/analyze_data.csv', index=False)
+
 
 if __name__ == "__main__":
     example()
