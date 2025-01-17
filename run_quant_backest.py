@@ -417,13 +417,15 @@ def process_signals(signal_df, lever, total_money, init_money, max_sell_time_dif
 
 def calculate_combination(args):
     """多进程计算单个组合的回测结果"""
+
     start_time = time.time()
     profit, period, data_df, lever, init_money, max_sell_time_diff, power, signal_name, side, signal_func, signal_param = args
+    # print(f"time{datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')} profit: {profit}, period: {period},'max_sell_time_diff': {max_sell_time_diff}, 'power': {power} start")
     signal_df = gen_buy_sell_signal(data_df, profit, signal_name, side, signal_func, signal_param)
     last_data = process_signals(signal_df, lever, init_money, init_money, max_sell_time_diff=max_sell_time_diff,
                                 power=power)
     last_data.update({'profit': profit, 'period': period, 'max_sell_time_diff': max_sell_time_diff, 'power': power})
-    print(f"profit: {profit}, period: {period}, cost time: {time.time() - start_time} 'max_sell_time_diff': {max_sell_time_diff}, 'power': {power}")
+    # print(f"time{datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')} profit: {profit}, period: {period},'max_sell_time_diff': {max_sell_time_diff}, 'power': {power}  cost time: {time.time() - start_time} end")
     return last_data
 
 
@@ -922,7 +924,9 @@ def process_with_timeout(func, args, timeout):
                 res = async_result.get(timeout=timeout)
                 results.append(res)
             except multiprocessing.TimeoutError:
-                print(f"Task for parameter: {args[i]} timed out and was skipped.")
+                # 去除args[i]中的第三个参数
+                param = args[i][:2] + args[i][3:]
+                print(f"Task for parameter: {param} timed out and was skipped.")
 
         return results
 
@@ -933,7 +937,7 @@ def detail_backtest():
     """
 
     good_strategy_path = 'backtest_result/good_strategy_df.csv'
-    timeout_limit = 100
+    timeout_limit = 1000
     sell_time_diff_step = 100
     sell_time_diff_start = 100
     sell_time_diff_end = 10000
@@ -1043,6 +1047,9 @@ def detail_backtest():
                     df_good_strategies.to_csv(good_strategy_path, index=False)
                     continue
                 print(f"开始计算: {output_path}")
+
+                # for params in parameter_list:
+                #     calculate_combination(params)
 
                 # 使用进程池并行计算
                 results = process_with_timeout(safe_calculate_combination, parameter_list, timeout_limit)
