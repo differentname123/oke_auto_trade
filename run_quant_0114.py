@@ -3,6 +3,7 @@ import json
 import os
 import time
 import logging
+import traceback
 
 import numpy as np
 import okx.Trade as Trade
@@ -48,7 +49,7 @@ CONFIG = {
 }
 
 MAX_POSITION_RATIO = 1  # 最大持仓比例为1
-flag = "0"  # 实盘: 0, 模拟盘: 1
+flag = "1"  # 实盘: 0, 模拟盘: 1
 
 # API 初始化
 if flag == "1":
@@ -120,6 +121,10 @@ def get_alg_open_orders():
 def cancel_order(inst_id, order_id):
     """撤销订单"""
     return safe_api_call(tradeAPI.cancel_order, instId=inst_id, ordId=order_id)
+
+def cancel_order_batch(cancel_orders_with_orderId ):
+    """撤销订单"""
+    return safe_api_call(tradeAPI.cancel_multiple_orders, cancel_orders_with_orderId)
 
 def cancel_alg_order(inst_id, order_id):
     """撤销订单"""
@@ -322,21 +327,18 @@ def release_near_funds(inst_id):
 
     now_ts = int(time.time() * 1000)  # 当前时间戳，毫秒级
     one_minute_ago_ts = now_ts - 60 * 1000  # 1分钟前的时间戳
-
+    cancel_orders_with_orderId = []
     for order in open_orders['data']:
         order_id = order['ordId']
         order_ctime = int(order['cTime'])
 
         if order_ctime < one_minute_ago_ts:
-            logger.warning(
-                f"取消订单 {order_id}，创建时间：{order_ctime}，早于1分钟前"
-            )
-            print(cancel_order(inst_id, order_id))
-        else:
-            logger.info(
-                f"保留订单 {order_id}，创建时间：{order_ctime}，在1分钟内"
-            )
-    print(f"取消订单耗时：{time.time() - start_time:.2f}秒")
+            cancel_orders_with_orderId.append({"instId": inst_id, "ordId": order_id})
+
+    batch_cancel_list = [cancel_orders_with_orderId[i:i + 20] for i in range(0, len(cancel_orders_with_orderId), 20)]
+    for order_list_ in batch_cancel_list:
+        order_result = cancel_order_batch(order_list_)
+    print(f"取消订单耗时：{time.time() - start_time:.2f}秒 长度：{len(cancel_orders_with_orderId)} cancel_result: {order_result}")
 def release_funds(inst_id, latest_price, release_len):
     """根据当前价格和订单价格差距，取消指定数量的订单。"""
     start_time = time.time()
@@ -817,132 +819,150 @@ def place_order(inst_id, side, order_type, size, price=None, tp_price=None):
         print(f"{side.upper()} 订单失败，错误信息：", e)
         return None
 
-def read_json(file_path):
+def generate_price_extremes_reverse_signals(df,periods=[20]):
     """
-    读取 JSON 文件并返回 Python 对象。
+    生成价格极值反转信号：
+    如果上一个时间点创造了最高或最低价，并且当前价格反转，则生成信号。
 
     Args:
-      file_path: JSON 文件的路径。
+        df (pd.DataFrame): 包含 'close' 列的 DataFrame。
 
     Returns:
-      一个 Python 对象，表示 JSON 文件的内容。
+        pd.DataFrame: 添加了价格极值信号列的 DataFrame。
     """
+    signals = {}
+    for period in periods:
+        # 计算指定周期内的最高价和最低价
+        highest_close = df['close'].rolling(window=period).max()
+        lowest_close = df['close'].rolling(window=period).min()
 
-    with open(file_path, 'r') as file:
-        return json.load(file)
+        # 卖出信号：上一时间点创造了最高价，且当前价格下跌
+        signals[f'Highest_{period}_reverse_Sell'] = np.where(
+            (df['close'].shift(1) == highest_close.shift(1)) & (df['close'] < df['close'].shift(1)),
+            1,
+            0
+        )
+
+        # 买入信号：上一时间点创造了最低价，且当前价格上涨
+        signals[f'Lowest_{period}_reverse_Buy'] = np.where(
+            (df['close'].shift(1) == lowest_close.shift(1)) & (df['close'] > df['close'].shift(1)),
+            1,
+            0
+        )
+
+    # 将信号列添加到原始 DataFrame 中
+    df = df.assign(**signals)
+    return df
+
+def deal_good_strategy(inst_id, strategy_df):
+    order_size = 0.1
+    # 对strategy_df进行去重，如果signal_name相同的话保留score最高的
+    strategy_df = strategy_df.sort_values(by='score', ascending=False)
+    strategy_df = strategy_df.drop_duplicates(subset='signal_name', keep='first')
+
+    newest_data = LatestDataManager(10000, inst_id)
+    df = newest_data.get_newest_data()
+    # df = pd.read_csv('temp/temp.csv')
+    while True:
+        try:
+            order_list = []
+            start_time = time.time()
+
+            # 控制每次循环的间隔，避免过于频繁地调用
+            if start_time % 60 < 58:
+                time.sleep(1)
+                continue
+            for index, row in strategy_df.iterrows():
+                porder_info = {"instId": inst_id}
+                signal_name = row['signal_name']
+                target_name = row['target_name']
+                if 'low' in target_name:
+                    side = 'sell'
+                    pos_side = 'short'
+                else:
+                    side = 'buy'
+                    pos_side = 'long'
+
+                porder_info['tdMode'] = "cross"
+                # porder_info['clOrdId'] = "clOrdId"
+                porder_info['side'] = side
+                porder_info['posSide'] = pos_side
+                porder_info['ordType'] = 'limit'
+
+                porder_info['sz'] = order_size
+                period = row['period']
+                profit = row['profit']
+                if 'reverse' not in signal_name:
+                    # 获取newest_data中close最近period时间内的最大值和最小值
+                    max_price = df['close'].iloc[-period:].max()
+                    min_price = df['close'].iloc[-period:].min()
+                    if side == 'buy':
+                        porder_info['px'] = min_price
+                        porder_info['tpTriggerPx'] = min_price + profit * min_price
+                        porder_info['tpOrdPx'] = min_price + profit * min_price
+                    else:
+                        porder_info['px'] = max_price
+                        porder_info['tpTriggerPx'] = max_price - profit * max_price
+                        porder_info['tpOrdPx'] = min_price + profit * min_price
+                    order_list.append(porder_info)
+                else:
+                    signal_df = generate_price_extremes_reverse_signals(df, periods=[period])
+                    # 判断最近的signal_df中的signal_name是否为1
+                    if signal_df[signal_name].iloc[-1] == 1:
+                        if side == 'buy':
+                            porder_info['px'] = df['close'].iloc[-1]
+                            porder_info['tpTriggerPx'] = df['close'].iloc[-1] + profit * df['close'].iloc[-1]
+                            porder_info['tpOrdPx'] = df['close'].iloc[-1] + profit * df['close'].iloc[-1]
+
+                        else:
+                            porder_info['px'] = df['close'].iloc[-1]
+                            porder_info['tpTriggerPx'] = df['close'].iloc[-1] - profit * df['close'].iloc[-1]
+                            porder_info['tpOrdPx'] = df['close'].iloc[-1] + profit * df['close'].iloc[-1]
+
+                        order_list.append(porder_info)
+            # 将order_list分成每个批次最多20个订单
+            batch_order_list = [order_list[i:i + 20] for i in range(0, len(order_list), 20)]
+            for order_list_ in batch_order_list:
+                order_result = place_batch_orders(order_list_)
+            print(f"完成一次下单，订单数量：{len(order_list)}，耗时：{time.time() - start_time:.2f}秒 结果：{order_result}")
+
+            time.sleep(3)
+            release_near_funds(inst_id)
+        except Exception as e:
+            traceback.print_exc()
+
+
+
+
+
 
 # 主循环
 if __name__ == "__main__":
     count = 1000000
     last_price = None
-    good_strategy_path = 'backtest_result/good_strategy.json'
-    good_strategy_json = read_json(good_strategy_path)
-    for
+    good_strategy_path = 'backtest_result/good_strategy_df.csv'
+    df_good_strategies = pd.read_csv(good_strategy_path)
+    # 找到df_good_strategies中result_path不为空的行
+    df_good_strategies = df_good_strategies[~df_good_strategies['result_path'].isna()]
+    inst_id_list = ['BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'TON-USDT-SWAP']
+    temp_list = []
+    for index, row in df_good_strategies.iterrows():
+        result_path = row['result_path']
+        for inst_id in inst_id_list:
+            if inst_id.split('-')[0] in result_path:
+                break
+        df = pd.read_csv(result_path)
+        df['signal_name'] = row['signal_name']
+        df['target_name'] = row['target_name']
+        df['inst_id'] = inst_id
+        df['result_path'] = result_path
 
-    INST_ID = "SOL-USDT-SWAP"
-    ORDER_SIZE = 0.01
-    offset = 0
-    strategy_info_list = [{"inst_id": "SOL-USDT-SWAP", "offset": 0.1, "profit": 0.1}]
-    extremes_period_profit_map = {
-        8385: 0.45 / 100,
-        7982: 0.38 / 100,
-        5863: 0.34 / 100,
-    }
+        df['score'] = df['profit_ratio'] / df['max_cost_money'] * 10000
+        df['score1'] = df['profit_ratio'] / df['max_cost_money'] * df['buy_signals']
+        temp_list.append(df)
+    all_df = pd.concat(temp_list)
 
-    extremes_reverse_period_profit_map = {
-        7679: 1.1 / 100,
-        6973: 0.2 / 100,
-    }
-    max_cost_list = [0.63824, 2.42634, 2.047]
-    newest_data = LatestDataManager(8000, INST_ID)
-
-    while count > 0:
-        try:
-            count -= 1
-            current_time = time.time()
-            current_time = pd.to_datetime(current_time, unit='s')
-            start_time = time.time()
-
-            # 控制每次循环的间隔，避免过于频繁地调用
-            if start_time % 60 < 59:
-                time.sleep(1)
-                continue
-
-            feature_df = newest_data.get_newest_data()
-            if len(feature_df) < 2:  # 确保至少有两条数据来判断反转
-                time.sleep(1)
-                continue
-
-            latest_price = feature_df['close'].iloc[-1]
-            previous_close = feature_df['close'].iloc[-2]
-            for period, profit in extremes_period_profit_map.items():
-                # 获取feature_df中最新数据close在period时间内的最大值和最小值
-                max_price = feature_df['close'].iloc[-period:].max()
-                min_price = feature_df['close'].iloc[-period:].min()
-                # print(f"max_price: {max_price}, min_price: {min_price} latest_price: {latest_price} long_sz: {long_sz} short_sz: {short_sz}")
-                # 做多限价单
-                place_order(
-                    INST_ID,
-                    "buy",
-                    "limit",  # 限价单
-                    ORDER_SIZE,
-                    price=min_price - offset,  # 买入价格
-                    tp_price=min_price + profit * min_price   # 止盈价格
-                )
-
-                # 做空限价单
-                place_order(
-                    INST_ID,
-                    "sell",
-                    "limit",  # 限价单
-                    ORDER_SIZE,
-                    price=max_price + offset,  # 卖出价格
-                    tp_price=max_price - profit * max_price  # 止盈价格
-                )
-                time.sleep(3)
-                release_near_funds(INST_ID)
-
-
-            for period, profit in extremes_reverse_period_profit_map.items():
-                # 获取feature_df中最新数据close在period时间内的最大值和最小值
-                period_closes = feature_df['close'].iloc[-period:]
-                max_price_period = period_closes.max()
-                min_price_period = period_closes.min()
-
-                # 判断上一个 close 是否是 period 内的最高点且当前 close 开始反转
-                if previous_close == max_price_period and latest_price < previous_close:
-                    # 做空限价单
-                    place_order(
-                        INST_ID,
-                        "sell",
-                        "limit",  # 限价单
-                        ORDER_SIZE,
-                        price=max_price_period + offset,  # 卖出价格
-                        tp_price=max_price_period - profit * max_price_period  # 止盈价格
-                    )
-                    print(
-                        f"下单做空：价格 {max_price_period + offset}, 止盈 {max_price_period - profit * max_price_period}")
-                    time.sleep(3)
-                    release_near_funds(INST_ID)
-
-                # 判断上一个 close 是否是 period 内的最低点且当前 close 开始反转
-                elif previous_close == min_price_period and latest_price > previous_close:
-                    # 做多限价单
-                    place_order(
-                        INST_ID,
-                        "buy",
-                        "limit",  # 限价单
-                        ORDER_SIZE,
-                        price=min_price_period - offset,  # 买入价格
-                        tp_price=min_price_period + profit * min_price_period  # 止盈价格
-                    )
-                    print(
-                        f"下单做多：价格 {min_price_period - offset}, 止盈 {min_price_period + profit * min_price_period}")
-                    time.sleep(3)
-                    release_near_funds(INST_ID)
-                else:
-                    print("未满足下单条件, max_price_period: ", max_price_period, "min_price_period: ", min_price_period, "latest_price: ", latest_price)
-
-        except Exception as e:
-            print(f"发生错误: {e}")
-            continue
+    # 将all_df按照inst_id分组
+    grouped = all_df.groupby('inst_id')
+    for inst_id, group in grouped:
+        deal_good_strategy(inst_id, group)

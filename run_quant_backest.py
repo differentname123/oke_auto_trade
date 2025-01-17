@@ -417,13 +417,13 @@ def process_signals(signal_df, lever, total_money, init_money, max_sell_time_dif
 
 def calculate_combination(args):
     """多进程计算单个组合的回测结果"""
-    # start_time = time.time()
+    start_time = time.time()
     profit, period, data_df, lever, init_money, max_sell_time_diff, power, signal_name, side, signal_func, signal_param = args
     signal_df = gen_buy_sell_signal(data_df, profit, signal_name, side, signal_func, signal_param)
     last_data = process_signals(signal_df, lever, init_money, init_money, max_sell_time_diff=max_sell_time_diff,
                                 power=power)
     last_data.update({'profit': profit, 'period': period, 'max_sell_time_diff': max_sell_time_diff, 'power': power})
-    # print(f"profit: {profit}, period: {period}, cost time: {time.time() - start_time}")
+    print(f"profit: {profit}, period: {period}, cost time: {time.time() - start_time} 'max_sell_time_diff': {max_sell_time_diff}, 'power': {power}")
     return last_data
 
 
@@ -907,6 +907,25 @@ def safe_calculate_combination(params):
             "params": params
         }
 
+def process_with_timeout(func, args, timeout):
+    num_processes = max(1, (os.cpu_count()))  # 避免出现负数
+    with multiprocessing.Pool(processes=num_processes) as pool:
+        results = []
+        async_results = []
+
+        for param in args:
+            async_result = pool.apply_async(func, (param,))
+            async_results.append(async_result)
+
+        for i, async_result in enumerate(async_results):
+            try:
+                res = async_result.get(timeout=timeout)
+                results.append(res)
+            except multiprocessing.TimeoutError:
+                print(f"Task for parameter: {args[i]} timed out and was skipped.")
+
+        return results
+
 
 def detail_backtest():
     """
@@ -914,7 +933,7 @@ def detail_backtest():
     """
 
     good_strategy_path = 'backtest_result/good_strategy_df.csv'
-
+    timeout_limit = 100
     sell_time_diff_step = 100
     sell_time_diff_start = 100
     sell_time_diff_end = 10000
@@ -936,8 +955,12 @@ def detail_backtest():
 
     # 读取“好策略”列表
     df_good_strategies = pd.read_csv(good_strategy_path)
+    # 删除signal_name为base_line的行
+    df_good_strategies = df_good_strategies[~df_good_strategies['signal_name'].str.contains('baseline')]
+    # 删除group_size大于10000的行
+    df_good_strategies = df_good_strategies[df_good_strategies['group_size'] <= 10000]
     # 找到df_good_strategies中result_path为空的行
-    # df_good_strategies = df_good_strategies[df_good_strategies['result_path'].isna()]
+    df_good_strategies = df_good_strategies[df_good_strategies['result_path'].isna()]
 
     # 按照 key_name 分组
     df_group = df_good_strategies.groupby('key_name')
@@ -1019,19 +1042,10 @@ def detail_backtest():
                     # 将df_good_strategies保存到文件
                     df_good_strategies.to_csv(good_strategy_path, index=False)
                     continue
-
                 print(f"开始计算: {output_path}")
 
-                # 进程池大小
-                num_processes = max(1, (os.cpu_count() or 1))  # 避免出现负数
-
                 # 使用进程池并行计算
-                results = []
-                with multiprocessing.Pool(processes=num_processes) as pool:
-                    # 使用 imap_unordered 解决长尾问题，tasks 完成一个就返回一个
-                    # chunksize=1 避免单个耗时任务阻塞其他任务
-                    for res in pool.imap_unordered(safe_calculate_combination, parameter_list, chunksize=1):
-                        results.append(res)
+                results = process_with_timeout(safe_calculate_combination, parameter_list, timeout_limit)
 
                 # 将计算结果转换为 DataFrame
                 result_df = pd.DataFrame(results)
@@ -1045,7 +1059,7 @@ def detail_backtest():
                 df_good_strategies.to_csv(good_strategy_path, index=False)
             except Exception as e:
                 traceback.print_exc()
-                print(f"计算 {output_path} 时出现异常：{e}")
+                print(f"计算 时出现异常：{e} {row}")
 
 
 def truly_backtest():
