@@ -713,8 +713,11 @@ def add_trading_signals(data_df):
     return data_df
 
 def add_trading_signals_op(data_df,is_need_profit=False, max_hold_time=999999):
+    start_time = time.time()
     data_df = generate_signals(data_df)
-    return match_sell_info(data_df, is_need_profit, max_hold_time)
+    result = match_sell_info_op(data_df, is_need_profit, max_hold_time)
+    print(f"add_trading_signals_op cost time: {time.time() - start_time}")
+    return result
 
 def generate_signals(data_df):
     """
@@ -747,6 +750,119 @@ def generate_signals(data_df):
             data_df.loc[i, 'signal'] = 1
             data_df.loc[i, 'buy_price'] = previous_high
             current_signal = 1
+
+    return data_df
+
+def match_sell_info_op(data_df, is_need_profit=False, max_hold_time=999999):
+    # 将需要的列一次性转为本地数组
+    signal_arr = data_df['signal'].values
+    buy_price_arr = data_df['buy_price'].values
+    close_arr = data_df['close'].values
+    timestamp_arr = data_df['timestamp'].values
+
+    n_row = len(data_df)
+    sell_price_arr = [0.0] * n_row
+    sell_time_arr = [None] * n_row
+    profit_ratio_arr = [0.0] * n_row
+    hold_time_arr = [0] * n_row
+
+    signal_indexes = [i for i, s in enumerate(signal_arr) if s != 0]
+    n = len(signal_indexes)
+    if n == 0:
+        print("无任何交易信号")
+        # 将新列写回
+        data_df['sell_price'] = sell_price_arr
+        data_df['sell_time'] = sell_time_arr
+        data_df['profit_ratio'] = profit_ratio_arr
+        data_df['hold_time'] = hold_time_arr
+        return data_df
+
+    # 核心的嵌套循环逻辑
+    for i in range(n):
+        buy_idx = signal_indexes[i]
+        buy_signal = signal_arr[buy_idx]
+        buy_price = buy_price_arr[buy_idx]
+
+        # 如果已经是最后一个信号
+        if i == n - 1:
+            sell_price_arr[buy_idx] = close_arr[-1]
+            sell_time_arr[buy_idx] = timestamp_arr[-1]
+            hold_time_arr[buy_idx] = (n_row - 1) - buy_idx
+        else:
+            matched = False
+            for j in range(i + 1, n):
+                sell_idx = signal_indexes[j]
+                sell_signal = signal_arr[sell_idx]
+                sell_price_candidate = buy_price_arr[sell_idx]
+
+                if buy_signal == 1:
+                    potential_profit = sell_price_candidate - buy_price
+                else:
+                    potential_profit = buy_price - sell_price_candidate
+
+                potential_hold_time = sell_idx - buy_idx
+                if (not is_need_profit) or (potential_profit > 0) or (potential_hold_time >= max_hold_time):
+                    sell_price_arr[buy_idx] = sell_price_candidate
+                    sell_time_arr[buy_idx] = timestamp_arr[sell_idx]
+                    hold_time_arr[buy_idx] = potential_hold_time
+                    matched = True
+                    break
+
+            if not matched:
+                sell_price_arr[buy_idx] = close_arr[-1]
+                sell_time_arr[buy_idx] = timestamp_arr[-1]
+                hold_time_arr[buy_idx] = (n_row - 1) - buy_idx
+
+    # 修正多空信号可能导致的异常卖价
+    mask_signal_1 = (signal_arr == 1) & (buy_price_arr > close_arr)
+    for idx, cond in enumerate(mask_signal_1):
+        if cond:
+            sell_price_arr[idx] = buy_price_arr[idx]
+
+    mask_signal_0 = (signal_arr == -1) & (buy_price_arr < close_arr)
+    for idx, cond in enumerate(mask_signal_0):
+        if cond:
+            sell_price_arr[idx] = buy_price_arr[idx]
+
+    fix_count = sum(mask_signal_1) + sum(mask_signal_0)
+    print(f"fix_count: {fix_count} cost {0.07 * fix_count}")
+
+    # 计算收益率
+    for idx in signal_indexes:
+        if sell_price_arr[idx] != 0:
+            if signal_arr[idx] == 1:
+                profit_ratio_arr[idx] = (sell_price_arr[idx] - buy_price_arr[idx]) / buy_price_arr[idx] * 100
+            else:
+                profit_ratio_arr[idx] = (buy_price_arr[idx] - sell_price_arr[idx]) / sell_price_arr[idx] * 100
+
+    # 统计
+    signal_count = len(signal_indexes)
+    cost = 0.07 * signal_count
+    total_profit = sum(profit_ratio_arr)
+    avg_hold_time = sum(hold_time_arr[idx] for idx in signal_indexes) / signal_count
+
+    print(
+        f"所有信号条数 = {signal_count} | "
+        f"总收益 = {total_profit:.2f}% | "
+        f"手续费 = {cost:.2f} | "
+        f"平均持仓时间 = {avg_hold_time:.2f}"
+    )
+
+    # 一次性写回 DataFrame
+    data_df['sell_price'] = sell_price_arr
+    data_df['sell_time'] = sell_time_arr
+    data_df['profit_ratio'] = profit_ratio_arr
+    data_df['hold_time'] = hold_time_arr
+
+    # 调整列顺序
+    new_column_order = [
+        'signal', 'buy_price', 'sell_price', 'sell_time',
+        'profit_ratio', 'hold_time'
+    ] + [
+        col for col in data_df.columns
+        if col not in ['signal', 'buy_price', 'sell_price', 'sell_time', 'profit_ratio', 'hold_time']
+    ]
+    data_df = data_df.reindex(columns=new_column_order)
 
     return data_df
 
@@ -899,9 +1015,9 @@ def debug_calculate_combination():
     start_time = time.time()
     # data_df = pd.read_csv("temp/TON_1m_10000.csv")
     # data_df = pd.read_csv("temp/SOL_1m_10000.csv")
-    data_df = pd.read_csv("kline_data/origin_data_30m_10000000_SOL-USDT-SWAP.csv")
+    data_df = pd.read_csv("kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv")
 
-    data_df = data_df[-50000:]
+    # data_df = data_df[-50000:]
 
     # 重置索引
     data_df.reset_index(drop=True, inplace=True)
