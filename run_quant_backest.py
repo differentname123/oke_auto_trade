@@ -911,7 +911,7 @@ def safe_calculate_combination(params):
 
 def process_with_timeout(func, args, timeout):
     num_processes = max(1, (os.cpu_count()))  # 避免出现负数
-    with multiprocessing.Pool(processes=num_processes) as pool:
+    with multiprocessing.Pool(processes=num_processes - 3) as pool:
         results = []
         async_results = []
 
@@ -1004,6 +1004,9 @@ def detail_backtest():
 
                 target_name = row['target_name']
                 profit = float(target_name.split('_')[2])
+                if profit > 0.02:
+                    print(f"profit: {profit} 大于0.04，跳过")
+                    continue
 
                 # 根据 target_name 判断多空
                 if "high" in target_name:

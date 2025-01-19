@@ -1,7 +1,10 @@
+import bisect
 import json
+import multiprocessing
 import os
 import multiprocessing as mp
 import time
+import traceback
 from datetime import datetime
 
 import numpy as np
@@ -11,10 +14,16 @@ from tqdm import tqdm  # 用于显示进度条
 import pandas as pd
 
 from get_feature_op import generate_price_extremes_signals, generate_price_unextremes_signals, \
-    generate_price_extremes_reverse_signals
+    generate_price_extremes_reverse_signals, generate_trend_signals
+
+function_map = {
+    "price_extremes": generate_price_extremes_signals,
+    "price_reverse_extremes": generate_price_extremes_reverse_signals,
+    "price_change": generate_trend_signals
+}
 
 
-def gen_buy_sell_signal(data_df, profit=1 / 100, period=10):
+def gen_buy_sell_signal(data_df, profit, signal_name, side, signal_func, signal_param):
     """
     为data生成相应的买卖信号，并生成相应的buy_price, sell_price
     :param data_df:
@@ -22,44 +31,222 @@ def gen_buy_sell_signal(data_df, profit=1 / 100, period=10):
     :param period:
     :return:
     """
-    # start_time = datetime.now()
-    signal_df = generate_price_extremes_signals(data_df, periods=[period])
-    # 找到包含Buy的列和包含Sell的列名
-    buy_col = [col for col in signal_df.columns if 'Buy' in col]
-    sell_col = [col for col in signal_df.columns if 'Sell' in col]
-    # 将buy_col[0]重命名为Buy
-    signal_df.rename(columns={buy_col[0]: 'Buy'}, inplace=True)
-    signal_df.rename(columns={sell_col[0]: 'Sell'}, inplace=True)
+    signal_df = signal_func(data_df, signal_param)
     # 初始化 buy_price 和 sell_price 列，可以设置为 NaN 或者其他默认值
     signal_df['buy_price'] = None
     signal_df['sell_price'] = None
-
-    # 找到 Buy 为 1 的行，设置 buy_price 和 sell_price
-    buy_rows = signal_df['Buy'] == 1
-    signal_df.loc[buy_rows, 'buy_price'] = signal_df.loc[buy_rows, 'close']
-    signal_df.loc[buy_rows, 'sell_price'] = signal_df.loc[buy_rows, 'close'] * (1 + profit)
-
-    # 找到 Sell 为 1 的行，设置 sell_price 和 buy_price
-    sell_rows = signal_df['Sell'] == 1
-    signal_df.loc[sell_rows, 'buy_price'] = signal_df.loc[sell_rows, 'close']
-    signal_df.loc[sell_rows, 'sell_price'] = signal_df.loc[sell_rows, 'close'] * (1 - profit)
+    # 找到包含Buy的列和包含Sell的列名
+    target_col = [col for col in signal_df.columns if signal_name in col]
+    if side == 'long':
+        signal_df.rename(columns={target_col[0]: 'Buy'}, inplace=True)
+        # 找到 Buy 为 1 的行，设置 buy_price 和 sell_price
+        buy_rows = signal_df['Buy'] == 1
+        signal_df.loc[buy_rows, 'buy_price'] = signal_df.loc[buy_rows, 'close']
+        signal_df.loc[buy_rows, 'sell_price'] = signal_df.loc[buy_rows, 'close'] * (1 + profit)
+        signal_df['Sell'] = 0
+    else:
+        signal_df.rename(columns={target_col[0]: 'Sell'}, inplace=True)
+        # 找到 Sell 为 1 的行，设置 sell_price 和 buy_price
+        sell_rows = signal_df['Sell'] == 1
+        signal_df.loc[sell_rows, 'buy_price'] = signal_df.loc[sell_rows, 'close']
+        signal_df.loc[sell_rows, 'sell_price'] = signal_df.loc[sell_rows, 'close'] * (1 - profit)
+        signal_df['Buy'] = 0
     # 初始化 count 列
     signal_df['count'] = 0.01
-    # signal_df['Sell'] = 0
-    # signal_df['Buy'] = 0
 
     return signal_df
 
+def optimized_gen_buy_sell_signal(data_df, signal_func, param_info, is_need_profit=False):
+    """
+    优化后的买卖信号生成函数。
+    """
+    start_time = time.time()
+    # 1. 先生成基础策略列(change_Buy, change_Sell)，并得到 Buy / Sell
+    signal_df = signal_func(data_df, param_info)
+
+    signal_df['Buy'] = ((signal_df['change_Buy'] == 1) &
+                        (signal_df['change_Buy'].shift(1) == 0)).astype(int)
+    signal_df['Sell'] = ((signal_df['change_Sell'] == 1) &
+                         (signal_df['change_Sell'].shift(1) == 0)).astype(int)
+
+    # 2. 初始化需要的列
+    signal_df['buy_price'] = 0.0
+    signal_df['sell_price'] = 0.0
+    signal_df['hold_time'] = np.nan
+    signal_df['sell_time'] = pd.NaT  # 若为 DatetimeIndex，可用 NaT 占位
+
+    # 3. 提取所有 Buy / Sell 信号的行索引
+    buy_indices = signal_df.index[signal_df['Buy'] == 1].tolist()
+    sell_indices = signal_df.index[signal_df['Sell'] == 1].tolist()
+
+    # ===============================
+    #    A. 处理 Buy -> Sell
+    # ===============================
+    for idx in buy_indices:
+        # 找到 sell_indices 中第一个“大于 idx”的位置
+        pos = bisect.bisect_right(sell_indices, idx)
+        buy_close = signal_df.at[idx, 'close']
+
+        found_match = False
+        while pos < len(sell_indices):
+            j = sell_indices[pos]  # 这是实际的行索引，可能是整数或时间戳
+            sell_close = signal_df.at[j, 'close']
+            sell_time = signal_df.at[j, 'timestamp']
+
+            if not is_need_profit:
+                # 不需要利润，遇到的第一个 Sell 即可
+                signal_df.at[idx, 'buy_price'] = buy_close
+                signal_df.at[idx, 'sell_price'] = sell_close
+                # 记录持仓时长 (j - idx)，若 index = int 则为行数差
+                signal_df.at[idx, 'hold_time'] = j - idx
+                # 记录卖出的时间戳 (若 DatetimeIndex 则 j 即为 Timestamp)
+                signal_df.at[idx, 'sell_time'] = sell_time
+                found_match = True
+                break
+            else:
+                # 需要利润：卖出价 > 买入价
+                if sell_close > buy_close:
+                    signal_df.at[idx, 'buy_price'] = buy_close
+                    signal_df.at[idx, 'sell_price'] = sell_close
+                    signal_df.at[idx, 'hold_time'] = j - idx
+                    signal_df.at[idx, 'sell_time'] = sell_time
+                    found_match = True
+                    break
+
+            pos += 1
+
+        # 如果没有匹配到任何符合条件的卖出信号，则用最后一行兜底
+        if not found_match:
+            # 用最后一行的收盘价
+            last_idx = signal_df.index[-1]
+            signal_df.at[idx, 'buy_price'] = signal_df.at[idx, 'close']
+            signal_df.at[idx, 'sell_price'] = signal_df.at[last_idx, 'close']
+            signal_df.at[idx, 'hold_time'] = last_idx - idx
+            signal_df.at[idx, 'sell_time'] = signal_df.at[last_idx, 'timestamp']
+
+    # ===============================
+    #    B. 处理 Sell -> Buy
+    # ===============================
+    for idx in sell_indices:
+        # 在 buy_indices 中找第一个“大于 idx”的位置
+        pos = bisect.bisect_right(buy_indices, idx)
+        buy_close = signal_df.at[idx, 'close']
+        found_match = False
+        while pos < len(buy_indices):
+            j = buy_indices[pos]
+            sell_close = signal_df.at[j, 'close']
+            sell_time = signal_df.at[idx, 'timestamp']
+
+            if not is_need_profit:
+                # 不需要利润，遇到的第一个 Buy 直接反手
+                signal_df.at[idx, 'buy_price'] = buy_close
+                signal_df.at[idx, 'sell_price'] = sell_close
+                # 以“卖出行”作为基准记录，也可以自行调整到买入行
+                signal_df.at[idx, 'hold_time'] = j - idx
+                signal_df.at[idx, 'sell_time'] = sell_time
+                found_match = True
+                break
+            else:
+                # 需要利润：买入价 < 卖出价(原先的价)
+                if buy_close > sell_close:
+                    signal_df.at[idx, 'buy_price'] = buy_close
+                    signal_df.at[idx, 'sell_price'] = sell_close
+                    signal_df.at[idx, 'hold_time'] = j - idx
+                    signal_df.at[idx, 'sell_time'] = sell_time
+                    found_match = True
+                    break
+
+            pos += 1
+
+        # 若没匹配到任何符合条件的买入信号，则用最后一行兜底
+        if not found_match:
+            last_idx = signal_df.index[-1]
+            signal_df.at[idx, 'buy_price'] = buy_close
+            signal_df.at[idx, 'sell_price'] = signal_df.at[last_idx, 'close']
+            signal_df.at[idx, 'hold_time'] = last_idx - idx
+            signal_df.at[idx, 'sell_time'] = signal_df.at[last_idx, 'timestamp']
+
+    # 4. 把指定列移动到前面；其余列保持原顺序
+    front_cols = ['Buy', 'Sell', 'buy_price', 'sell_price', 'hold_time', 'sell_time']
+    all_cols = list(signal_df.columns)
+    remaining_cols = [col for col in all_cols if col not in front_cols]
+    signal_df = signal_df[front_cols + remaining_cols]
+
+    # 增加一个 count 列（与原逻辑保持一致）
+    signal_df['count'] = 0.01
+    print(f"optimized_gen_buy_sell_signal cost time: {time.time() - start_time}")
+    return signal_df
+
+def debug_gen_buy_sell_signal(data_df, signal_func, param_info):
+    """
+    为data生成相应的买卖信号，并生成相应的buy_price, sell_price
+    :param data_df:
+    :param profit:
+    :param period:
+    :return:
+    """
+    start_time = time.time()
+    signal_df = signal_func(data_df, param_info)
+    # 初始化 Buy 和 Sell 列
+    signal_df['Buy'] = 0
+    signal_df['Sell'] = 0
+    is_need_profit = True
+
+    # 生成 Buy 信号
+    signal_df['Buy'] = ((signal_df['change_Buy'] == 1) & (signal_df['change_Buy'].shift(1) == 0)).astype(int)
+
+    # 生成 Sell 信号
+    signal_df['Sell'] = ((signal_df['change_Sell'] == 1) & (signal_df['change_Sell'].shift(1) == 0)).astype(int)
+
+    # 初始化 buy_price 和 sell_price 列
+    signal_df['buy_price'] = 0.0
+    signal_df['sell_price'] = 0.0
+
+    for i in range(len(signal_df)):
+        if signal_df.loc[i, 'Buy'] == 1:
+            signal_df.loc[i, 'buy_price'] = signal_df.loc[i, 'close']
+            # 查找下一个 Sell 信号
+            for j in range(i + 1, len(signal_df)):
+                if signal_df.loc[j, 'Sell'] == 1:
+                    if is_need_profit:
+                         if signal_df.loc[j, 'close'] > signal_df.loc[i, 'close']:
+                             signal_df.loc[i, 'sell_price'] = signal_df.loc[j, 'close']
+                             break
+                    else:
+                        signal_df.loc[i, 'sell_price'] = signal_df.loc[j, 'close']
+                        break
+            signal_df.loc[i, 'sell_price'] = signal_df.loc[j, 'close']
+        elif signal_df.loc[i, 'Sell'] == 1:
+            signal_df.loc[i, 'buy_price'] = signal_df.loc[i, 'close']
+            # 查找下一个 Buy 信号
+            for j in range(i + 1, len(signal_df)):
+                if signal_df.loc[j, 'Buy'] == 1:
+                    if is_need_profit:
+                        if signal_df.loc[j, 'close'] < signal_df.loc[i, 'close']:
+                            signal_df.loc[i, 'sell_price'] = signal_df.loc[j, 'close']
+                            break
+                    else:
+                        signal_df.loc[i, 'sell_price'] = signal_df.loc[j, 'close']
+                        break
+            signal_df.loc[i, 'sell_price'] = signal_df.loc[j, 'close']
+
+    # 将最后四列移动到最前面
+    cols = ['Buy', 'Sell', 'buy_price', 'sell_price'] + [col for col in signal_df.columns if
+                                                         col not in ['Buy', 'Sell', 'buy_price', 'sell_price']]
+    signal_df = signal_df[cols]
+    signal_df['count'] = 0.01
+    print(f"debug_gen_buy_sell_signal cost time: {time.time() - start_time}")
+    return signal_df
 
 @njit(parallel=True)
 def _calculate_time_to_targets_numba_parallel(
-    timestamps,
-    closes,
-    highs,
-    lows,
-    increase_targets,
-    decrease_targets,
-    max_search=1000000
+        timestamps,
+        closes,
+        highs,
+        lows,
+        increase_targets,
+        decrease_targets,
+        max_search=1000000
 ):
     n = len(timestamps)
     total_targets = len(increase_targets) + len(decrease_targets)
@@ -134,6 +321,7 @@ def calculate_time_to_targets(file_path):
     print(f"calculate_time_to_targets cost time: {datetime.now() - start_time}")
     df.to_csv(result_file_path, index=False)
     return df
+
 
 def analysis_position(pending_order_list, row, total_money, leverage=100):
     """
@@ -223,11 +411,11 @@ def calculate_time_diff_minutes(time1, time2):
     return time_diff.total_seconds() / 60
 
 
-def deal_pending_order(pending_order_list, row, position_info, lever, total_money, max_time_diff=2 * 1):
+def deal_pending_order(pending_order_list, row, position_info, lever, total_money, max_time_diff=2 * 1,
+                       max_sell_time_diff=1000000, power=1):
     """
     处理委托单
     """
-    max_sell_time_diff = 1000000  # 最大卖出时间差
     high = row.high
     low = row.low
     close = row.close
@@ -235,6 +423,7 @@ def deal_pending_order(pending_order_list, row, position_info, lever, total_mone
     timestamp = row.timestamp
     history_order_list = []
     fee = 0.0007  # 手续费
+    check_flag = True  # 是否真实的按照能否买入来回测
 
     for order in pending_order_list:
         if order['side'] == 'kai':  # 开仓
@@ -242,7 +431,7 @@ def deal_pending_order(pending_order_list, row, position_info, lever, total_mone
             time_diff = calculate_time_diff_minutes(timestamp, order['timestamp'])
             if time_diff < max_time_diff:
                 if order['type'] == 'long':  # 开多仓
-                    if order['buy_price'] > low:  # 买入价格高于最低价
+                    if order['buy_price'] > low or check_flag:  # 买入价格高于最低价
                         # order['count'] += long_sz
                         # 判断可用资金是否足够开仓
                         required_margin = order['count'] * order['buy_price'] / lever
@@ -254,7 +443,7 @@ def deal_pending_order(pending_order_list, row, position_info, lever, total_mone
                             order['side'] = 'done'
                             order['message'] = 'insufficient funds'
                 if order['type'] == 'short':  # 开空仓
-                    if order['buy_price'] < high:
+                    if order['buy_price'] < high or check_flag:  # 买入价格低于最高价
                         # order['count'] += short_sz
                         # 判断可用资金是否足够开仓
                         required_margin = order['count'] * order['buy_price'] / lever
@@ -270,6 +459,7 @@ def deal_pending_order(pending_order_list, row, position_info, lever, total_mone
                 order['message'] = 'time out'
 
         elif order['side'] == 'ping':  # 平仓
+            profit_value = power * (order['sell_price'] - order['buy_price'])
             pin_time_diff = calculate_time_diff_minutes(timestamp, order['kai_time'])
             if order['type'] == 'long':  # 平多仓
                 if order['sell_price'] < high:
@@ -278,12 +468,12 @@ def deal_pending_order(pending_order_list, row, position_info, lever, total_mone
                     # 计算收益并更新总资金
                     profit = order['count'] * (order['sell_price'] - order['buy_price'] - fee * order['sell_price'])
                     order['profit'] = profit
-                    order['time_cost'] = pin_time_diff
+                    order['time_cost'] = calculate_time_diff_minutes(timestamp, order['timestamp'])
                     total_money += profit
                 else:
                     # 对超时的调整售出价格
                     if pin_time_diff > max_sell_time_diff:
-                        order['sell_price'] = close - order['buy_price'] + order['sell_price']
+                        order['sell_price'] = close + profit_value
                         order['kai_time'] = timestamp
                         order['message'] = 'sell time out'
             if order['type'] == 'short':  # 平空仓
@@ -293,13 +483,13 @@ def deal_pending_order(pending_order_list, row, position_info, lever, total_mone
                     # 计算收益并更新总资金
                     profit = order['count'] * (order['buy_price'] - order['sell_price'] - fee * order['sell_price'])
                     order['profit'] = profit
-                    order['time_cost'] = pin_time_diff
+                    order['time_cost'] = calculate_time_diff_minutes(timestamp, order['timestamp'])
                     total_money += profit
                 else:
                     # 对超时的调整售出价格
                     if pin_time_diff > max_sell_time_diff:
-                        order['sell_price'] = close - order['buy_price'] + order['sell_price']
-                        order['ping_time'] = timestamp
+                        order['sell_price'] = close + profit_value
+                        order['kai_time'] = timestamp
                         order['message'] = 'sell time out'
 
     # 删除已经完成的订单，移动到history_order_list
@@ -321,7 +511,7 @@ def create_order(order_type, row, lever):
     }
 
 
-def process_signals(signal_df, lever, total_money, init_money):
+def process_signals(signal_df, lever, total_money, init_money, max_sell_time_diff=1000000, power=1):
     """处理信号生成的订单并计算收益"""
     pending_order_list = []
     all_history_order_list = []
@@ -338,7 +528,8 @@ def process_signals(signal_df, lever, total_money, init_money):
 
         # 处理委托单
         pending_order_list, history_order_list, total_money = deal_pending_order(
-            pending_order_list, row, position_info, lever, total_money
+            pending_order_list, row, position_info, lever, total_money, max_sell_time_diff=max_sell_time_diff,
+            power=power
         )
         all_history_order_list.extend(history_order_list)
 
@@ -409,37 +600,363 @@ def process_signals(signal_df, lever, total_money, init_money):
 
 def calculate_combination(args):
     """多进程计算单个组合的回测结果"""
-    profit, period, data_df, lever, init_money = args
-    signal_df = gen_buy_sell_signal(data_df, profit=profit, period=period)
-    last_data = process_signals(signal_df, lever, init_money, init_money)
-    last_data.update({'profit': profit, 'period': period})
+
+    start_time = time.time()
+    profit, period, data_df, lever, init_money, max_sell_time_diff, power, signal_name, side, signal_func, signal_param = args
+    # print(f"time{datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')} profit: {profit}, period: {period},'max_sell_time_diff': {max_sell_time_diff}, 'power': {power} start")
+    signal_df = gen_buy_sell_signal(data_df, profit, signal_name, side, signal_func, signal_param)
+    last_data = process_signals(signal_df, lever, init_money, init_money, max_sell_time_diff=max_sell_time_diff,
+                                power=power)
+    last_data.update({'profit': profit, 'period': period, 'max_sell_time_diff': max_sell_time_diff, 'power': power})
+    # print(f"time{datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')} profit: {profit}, period: {period},'max_sell_time_diff': {max_sell_time_diff}, 'power': {power}  cost time: {time.time() - start_time} end")
     return last_data
 
+
+def add_trading_signals(data_df):
+    """
+    根据给定的交易逻辑，在股票k线数据DataFrame中添加交易信号、买卖价格和卖出时间。
+
+    Args:
+        data_df: pandas DataFrame，包含股票k线数据，字段包括 'high', 'low', 'close', 'open', 'timestamp'。
+
+    Returns:
+        pandas DataFrame，添加了 'signal', 'buy_price', 'sell_price', 'sell_time' 字段。
+    """
+    data_df['signal'] = 0
+    data_df['buy_price'] = 0.0
+    data_df['sell_price'] = 0.0
+    data_df['sell_time'] = None
+
+    # 初始化状态：开多
+    current_signal = 1
+    data_df.loc[0, 'signal'] = 1
+    data_df.loc[0, 'buy_price'] = data_df.loc[0, 'close']
+    last_buy_index = 0
+
+    for i in range(1, len(data_df)):
+        previous_close = data_df.loc[i - 1, 'close']
+        previous_high = data_df.loc[i - 1, 'high']
+        previous_low = data_df.loc[i - 1, 'low']
+        current_high = data_df.loc[i, 'high']
+        current_low = data_df.loc[i, 'low']
+
+        if current_signal == 1:  # 持有多单
+            if current_low < previous_low:
+                # 平多开空
+                data_df.loc[i, 'signal'] = -1
+                data_df.loc[i, 'buy_price'] = previous_low
+
+                # 回填之前的卖出信息
+                data_df.loc[last_buy_index, 'sell_price'] = previous_low
+                data_df.loc[last_buy_index, 'sell_time'] = data_df.loc[i, 'timestamp']
+
+                current_signal = -1
+                last_buy_index = i
+        elif current_signal == -1:  # 持有空单
+            if current_high > previous_high:
+                # 平空开多
+                data_df.loc[i, 'signal'] = 1
+                data_df.loc[i, 'buy_price'] = previous_high
+
+                # 回填之前的卖出信息
+                data_df.loc[last_buy_index, 'sell_price'] = previous_high
+                data_df.loc[last_buy_index, 'sell_time'] = data_df.loc[i, 'timestamp']
+
+                current_signal = 1
+                last_buy_index = i
+
+    # 处理最后一笔交易
+    if data_df.loc[last_buy_index, 'signal'] != 0:
+        # 查找最后一次信号对应的卖出信息
+        found_sell = False
+        for i in range(last_buy_index + 1, len(data_df)):
+            previous_close = data_df.loc[last_buy_index, 'close'] if data_df.loc[last_buy_index, 'signal'] == 1 else \
+            data_df.loc[last_buy_index, 'buy_price']
+            previous_high = data_df.loc[last_buy_index, 'high']
+            previous_low = data_df.loc[last_buy_index, 'low']
+
+            if data_df.loc[last_buy_index, 'signal'] == 1 and data_df.loc[i, 'low'] < previous_low:
+                data_df.loc[last_buy_index, 'sell_price'] = previous_low
+                data_df.loc[last_buy_index, 'sell_time'] = data_df.loc[i, 'timestamp']
+                found_sell = True
+                break
+            elif data_df.loc[last_buy_index, 'signal'] == -1 and data_df.loc[i, 'high'] > previous_high:
+                data_df.loc[last_buy_index, 'sell_price'] = previous_high
+                data_df.loc[last_buy_index, 'sell_time'] = data_df.loc[i, 'timestamp']
+                found_sell = True
+                break
+
+        # 如果循环结束仍然没有找到卖出信号，则以最后一行的收盘价作为卖出价
+        if not found_sell:
+            data_df.loc[last_buy_index, 'sell_price'] = data_df.loc[len(data_df) - 1, 'close']
+            data_df.loc[last_buy_index, 'sell_time'] = data_df.loc[len(data_df) - 1, 'timestamp']
+    data_df['profit_ratio'] = 0.0  # 初始化 profit_ratio 列
+    for i in range(len(data_df)):
+        if data_df.loc[i, 'signal'] != 0 and data_df.loc[i, 'sell_price'] != 0:
+            # 当有卖出价格时才计算 profit_ratio
+            if data_df.loc[i, 'buy_price']!=0:
+                # 当之前的买入价格不为零的时候才计算
+                if data_df.loc[i, 'signal'] == 1:
+                    data_df.loc[i, 'profit_ratio'] = (data_df.loc[i, 'sell_price'] - data_df.loc[i, 'buy_price']) / data_df.loc[i, 'buy_price'] * 100
+                elif data_df.loc[i, 'signal'] == -1:  # 上一笔是开空
+                    data_df.loc[i, 'profit_ratio'] = (data_df.loc[i, 'buy_price'] - data_df.loc[i, 'sell_price']) / data_df.loc[i, 'sell_price'] * 100
+
+    # 调整列的顺序
+    new_column_order = ['signal', 'buy_price', 'sell_price', 'sell_time', 'profit_ratio'] + [col for col in data_df.columns if col not in ['signal', 'buy_price', 'sell_price', 'sell_time', 'profit_ratio']]
+    data_df = data_df.reindex(columns=new_column_order)
+
+    # 找到profit_ratio不为0的行的数量
+    signal_count = data_df[data_df['signal'] != 0].shape[0]
+    cost = 0.07 * signal_count
+    # 输出profit_ratio的和
+    print(f"profit_ratio: {data_df['profit_ratio'].sum()} 手续费: {cost} 数量: {signal_count}")
+    return data_df
+
+def add_trading_signals_op(data_df,is_need_profit=False, max_hold_time=999999):
+    data_df = generate_signals(data_df)
+    return match_sell_info(data_df, is_need_profit, max_hold_time)
+
+def generate_signals(data_df):
+    """
+    根据交易逻辑生成买入和卖出信号。
+
+    Args:
+        data_df: pandas DataFrame，包含股票k线数据。
+
+    Returns:
+        pandas DataFrame，添加了 'signal', 'buy_price' 字段。
+    """
+    data_df['signal'] = 0
+    data_df['buy_price'] = 0.0
+
+    current_signal = 1
+    data_df.loc[0, 'signal'] = 1
+    data_df.loc[0, 'buy_price'] = data_df.loc[0, 'close']
+
+    for i in range(1, len(data_df)):
+        previous_high = data_df.loc[i - 1, 'high']
+        previous_low = data_df.loc[i - 1, 'low']
+        current_high = data_df.loc[i, 'high']
+        current_low = data_df.loc[i, 'low']
+
+        if current_signal == 1 and current_low < previous_low:  # 平多开空
+            data_df.loc[i, 'signal'] = -1
+            data_df.loc[i, 'buy_price'] = previous_low
+            current_signal = -1
+        elif current_signal == -1 and current_high > previous_high:  # 平空开多
+            data_df.loc[i, 'signal'] = 1
+            data_df.loc[i, 'buy_price'] = previous_high
+            current_signal = 1
+
+    return data_df
+
+def match_sell_info(data_df, is_need_profit=False, max_hold_time=999999):
+    """
+    根据信号匹配卖出价格和时间。
+
+    当 is_need_profit=True 时，会尝试在后续信号中寻找能带来正收益的平仓点；
+    若一直找不到正收益的平仓点，或持仓天数超过 max_hold_time 时，则也可以使用后续信号（无论是否盈利）平仓；
+    若到最后也没有信号，则使用最后一行收盘价平仓。
+
+    Args:
+        data_df (pd.DataFrame): 数据表，至少需要包含以下列：
+            'signal' (int): 交易信号。1 表示开多，-1 表示开空，0 表示无交易。
+            'buy_price' (float): 对应开仓时的价格。
+            'close' (float): 数据的收盘价，用于无法找到平仓信号时使用。
+            'timestamp': 时间戳/日期，用于记录交易时间，可为字符串或 datetime。
+        is_need_profit (bool): 是否强制要求找到盈利的平仓点。
+        max_hold_time (int): 允许持仓的最大天数(或K线数量)。超过则不再强制需求盈利。
+
+    Returns:
+        pd.DataFrame: 在原有数据表基础上，新增以下列：
+            'sell_price' (float): 平仓价格
+            'sell_time' (any): 平仓所在行的 timestamp
+            'profit_ratio' (float): 收益率（单位：%）
+            'hold_time' (int): 卖出行索引 - 买入行索引
+    """
+
+    # 新增需要的列
+    data_df['sell_price'] = 0.0
+    data_df['sell_time'] = None
+    data_df['profit_ratio'] = 0.0
+    data_df['hold_time'] = 0
+
+    # 所有有交易信号的行索引
+    signal_indexes = data_df.index[data_df['signal'] != 0].tolist()
+    n = len(signal_indexes)
+
+    # 如果没有任何信号，直接返回
+    if n == 0:
+        print("无任何交易信号")
+        return data_df
+
+    # 逐条处理每一个交易信号
+    for i in range(n):
+        buy_idx = signal_indexes[i]
+        buy_signal = data_df.loc[buy_idx, 'signal']
+        buy_price = data_df.loc[buy_idx, 'buy_price']
+
+        # 如果已经是最后一个信号，则平仓价格只能用整张表最后一行的 close
+        if i == n - 1:
+            data_df.loc[buy_idx, 'sell_price'] = data_df.loc[len(data_df) - 1, 'close']
+            data_df.loc[buy_idx, 'sell_time'] = data_df.loc[len(data_df) - 1, 'timestamp']
+            data_df.loc[buy_idx, 'hold_time'] = (len(data_df) - 1) - buy_idx
+        else:
+            # 从下一条信号开始，依次向后寻找“可平仓”的信号
+            matched = False
+            for j in range(i + 1, n):
+                sell_idx = signal_indexes[j]
+                sell_signal = data_df.loc[sell_idx, 'signal']
+                sell_price_candidate = data_df.loc[sell_idx, 'buy_price']
+
+                # 计算潜在利润
+                if buy_signal == 1:
+                    # 多单，潜在利润 = 卖出价 - 买入价
+                    potential_profit = sell_price_candidate - buy_price
+                else:
+                    # 空单，潜在利润 = 买入价 - 卖出价
+                    potential_profit = buy_price - sell_price_candidate
+
+                # 计算“持仓时长” = 卖出信号索引 - 买入信号索引
+                potential_hold_time = sell_idx - buy_idx
+
+                # 如果没有强制要求盈利，或已经盈利，或已经超时，则可平仓
+                # 注意：一旦 hold_time 超过 max_hold_time，就不再要求是正收益，也可以平仓
+                if (
+                    (not is_need_profit)
+                    or (potential_profit > 0)
+                    or (potential_hold_time >= max_hold_time)
+                ):
+                    data_df.loc[buy_idx, 'sell_price'] = sell_price_candidate
+                    data_df.loc[buy_idx, 'sell_time'] = data_df.loc[sell_idx, 'timestamp']
+                    data_df.loc[buy_idx, 'hold_time'] = potential_hold_time
+                    matched = True
+                    break
+
+            # 如果在剩余信号里都没匹配到，则用最后一根 K 线 收盘价平仓
+            if not matched:
+                data_df.loc[buy_idx, 'sell_price'] = data_df.loc[len(data_df) - 1, 'close']
+                data_df.loc[buy_idx, 'sell_time'] = data_df.loc[len(data_df) - 1, 'timestamp']
+                data_df.loc[buy_idx, 'hold_time'] = (len(data_df) - 1) - buy_idx
+
+    # 修改 signal 为 1 的行
+    mask_signal_1 = (data_df['signal'] == 1) & (data_df['buy_price'] > data_df['close'])
+    data_df.loc[mask_signal_1, 'sell_price'] = data_df.loc[mask_signal_1, 'buy_price']
+
+    # 修改 signal 为 -1 的行
+    mask_signal_0 = (data_df['signal'] == -1) & (data_df['buy_price'] < data_df['close'])
+    data_df.loc[mask_signal_0, 'sell_price'] = data_df.loc[mask_signal_0, 'buy_price']
+
+    # 计算修改的行数
+    fix_count = mask_signal_1.sum() + mask_signal_0.sum()
+    print(f"fix_count: {fix_count} cost {0.07 * fix_count}")
+
+
+    # ------ 统一计算收益率 ------
+    for idx in signal_indexes:
+        buy_signal = data_df.loc[idx, 'signal']
+        buy_price = data_df.loc[idx, 'buy_price']
+        sell_price = data_df.loc[idx, 'sell_price']
+
+        if sell_price != 0:
+            if buy_signal == 1:
+                # 多单收益率
+                data_df.loc[idx, 'profit_ratio'] = (sell_price - buy_price) / buy_price * 100
+            else:
+                # 空单收益率
+                data_df.loc[idx, 'profit_ratio'] = (buy_price - sell_price) / sell_price * 100
+
+    # ------ 输出统计信息 ------
+    signal_count = len(signal_indexes)
+    cost = 0.07 * signal_count
+    total_profit = data_df['profit_ratio'].sum()
+
+    print(
+        f"所有信号条数 = {signal_count} | "
+        f"总收益 = {total_profit:.2f}% | "
+        f"手续费 = {cost:.2f}"
+        f"平均持仓时间 = {data_df['hold_time'].sum() / signal_count:.2f}"
+    )
+
+    # ------ 调整列顺序 ------
+    new_column_order = [
+        'signal', 'buy_price', 'sell_price', 'sell_time',
+        'profit_ratio', 'hold_time'
+    ] + [
+        col for col in data_df.columns
+        if col not in ['signal', 'buy_price', 'sell_price', 'sell_time', 'profit_ratio', 'hold_time']
+    ]
+    data_df = data_df.reindex(columns=new_column_order)
+
+    return data_df
+
+def debug_calculate_combination():
+    """多进程计算单个组合的回测结果"""
+    lever = 100
+    init_money = 1000000
+    max_sell_time_diff = 1000000
+    power = 1
+    start_time = time.time()
+    # data_df = pd.read_csv("temp/TON_1m_10000.csv")
+    # data_df = pd.read_csv("temp/SOL_1m_10000.csv")
+    data_df = pd.read_csv("kline_data/origin_data_30m_10000000_SOL-USDT-SWAP.csv")
+
+    data_df = data_df[-50000:]
+
+    # 重置索引
+    data_df.reset_index(drop=True, inplace=True)
+    print(f"长度: {data_df.shape[0]}")
+    temp_df1 = add_trading_signals_op(data_df)
+    temp_df2 = add_trading_signals_op(data_df, True)
+    # for i in range(10, 100, 10):
+    #     temp_df3 = add_trading_signals_op(data_df, True, i)
+    #     print(f"max_hold_time: {i} profit: {temp_df3['profit_ratio'].sum()} cost time: {time.time() - start_time}")
+    # last_data_list = []
+    # for i in range(1, 10):
+    #     param_info = {"period": i}
+    #     signal_func = generate_trend_signals
+    #     # print(f"time{datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')} profit: {profit}, period: {period},'max_sell_time_diff': {max_sell_time_diff}, 'power': {power} start")
+    #     signal_df = optimized_gen_buy_sell_signal(data_df, signal_func, param_info)
+    #     # 统计signal_df中hold_time不为nan的行中的hold_time的平均值
+    #     hold_time = signal_df[~signal_df['hold_time'].isna()]['hold_time'].mean()
+    #     print(f"hold_time: {hold_time}")
+    #
+    #     # 将signal_df的最后四列放到前面
+    #
+    #
+    #     last_data = process_signals(signal_df, lever, init_money, init_money, max_sell_time_diff=max_sell_time_diff,power=power)
+    #     last_data_list.append(last_data)
+    # # print(f"time{datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')} profit: {profit}, period: {period},'max_sell_time_diff': {max_sell_time_diff}, 'power': {power}  cost time: {time.time() - start_time} end")
+    # # 将last_data_list转换为DataFrame
+    # last_data_df = pd.DataFrame(last_data_list)
+    # return last_data_df
+
+
 def generate_list(start, end, count, decimals):
-  """
-  生成一个从起始值到最终值的数字列表，包含指定数量的元素，并保留指定位数的小数。
+    """
+    生成一个从起始值到最终值的数字列表，包含指定数量的元素，并保留指定位数的小数。
 
-  Args:
-    start: 起始值。
-    end: 最终值。
-    count: 列表元素的数量。
-    decimals: 保留的小数位数。
+    Args:
+      start: 起始值。
+      end: 最终值。
+      count: 列表元素的数量。
+      decimals: 保留的小数位数。
 
-  Returns:
-    一个包含指定数量元素的数字列表，从起始值线性递增到最终值，并保留指定位数的小数。
-  """
+    Returns:
+      一个包含指定数量元素的数字列表，从起始值线性递增到最终值，并保留指定位数的小数。
+    """
 
-  if count <= 0:
-    return []
-  elif count == 1:
-    return [round(start, decimals)]
+    if count <= 0:
+        return []
+    elif count == 1:
+        return [round(start, decimals)]
 
-  step = (end - start) / (count - 1)
-  result = []
-  for i in range(count):
-    value = start + i * step
-    result.append(round(value, decimals))
-  return result
+    step = (end - start) / (count - 1)
+    result = []
+    for i in range(count):
+        value = start + i * step
+        result.append(round(value, decimals))
+    return result
 
 
 def merge_dataframes(df_list):
@@ -461,18 +978,19 @@ def merge_dataframes(df_list):
         df['hold_time_score'] = 10000 * df['profit_ratio'] / df['hold_time']
 
         df_list[i] = df.copy()  # Create a copy to avoid modifying the original DataFrame
-        df_list[i]['source_df'] = f'df_{i+1}'
+        df_list[i]['source_df'] = f'df_{i + 1}'
 
     merged_df = df_list[0]
     for i in range(1, len(df_list)):
-        merged_df = pd.merge(merged_df, df_list[i], on=['profit', 'period'], how='outer', suffixes=('', f'_{i+1}'))
+        merged_df = pd.merge(merged_df, df_list[i], on=['profit', 'period'], how='outer', suffixes=('', f'_{i + 1}'))
 
     # 重命名和排序
     def categorize_and_sort_cols(df):
         # 识别不同类别的列
         source_df_cols = [col for col in df.columns if 'source_df' in col]
         profit_ratio_cols = [col for col in df.columns if 'profit_ratio' in col]
-        other_cols = [col for col in df.columns if col not in source_df_cols and col not in profit_ratio_cols and col != 'score' and col != 'score_plus' and col != 'score_mul']
+        other_cols = [col for col in df.columns if
+                      col not in source_df_cols and col not in profit_ratio_cols and col != 'score' and col != 'score_plus' and col != 'score_mul']
 
         # 对每种类别的列进行排序
         source_df_cols.sort()
@@ -486,26 +1004,29 @@ def merge_dataframes(df_list):
     new_cols_order = categorize_and_sort_cols(merged_df)
     merged_df = merged_df.reindex(columns=new_cols_order)
 
-    #计算分数
+    # 计算分数
     profit_ratio_cols = [col for col in merged_df.columns if 'profit_ratio' in col and 'source_df' not in col]
     profit_ratio_cols.sort()
-    if len(profit_ratio_cols) >=3:
-      merged_df['score'] = 10000 * merged_df[profit_ratio_cols[0]] * merged_df[profit_ratio_cols[1]] * merged_df[profit_ratio_cols[2]]
-      merged_df['score_plus'] = merged_df[profit_ratio_cols[0]] + merged_df[profit_ratio_cols[1]] + merged_df[profit_ratio_cols[2]]
-      merged_df['score_mul'] = merged_df['score_plus'] * merged_df['score']
-      merged_df['hold_time_score_plus'] = merged_df['hold_time_score'] + merged_df['hold_time_score_2'] + merged_df['hold_time_score_3']
-    elif len(profit_ratio_cols) >=2:
-      merged_df['score'] = 10000 * merged_df[profit_ratio_cols[0]] * merged_df[profit_ratio_cols[1]]
-      merged_df['score_plus'] = merged_df[profit_ratio_cols[0]] + merged_df[profit_ratio_cols[1]]
-      merged_df['score_mul'] = merged_df['score_plus'] * merged_df['score']
-      merged_df['hold_time_score_plus'] = merged_df['hold_time_score'] + merged_df['hold_time_score_2']
+    if len(profit_ratio_cols) >= 3:
+        merged_df['score'] = 10000 * merged_df[profit_ratio_cols[0]] * merged_df[profit_ratio_cols[1]] * merged_df[
+            profit_ratio_cols[2]]
+        merged_df['score_plus'] = merged_df[profit_ratio_cols[0]] + merged_df[profit_ratio_cols[1]] + merged_df[
+            profit_ratio_cols[2]]
+        merged_df['score_mul'] = merged_df['score_plus'] * merged_df['score']
+        merged_df['hold_time_score_plus'] = merged_df['hold_time_score'] + merged_df['hold_time_score_2'] + merged_df[
+            'hold_time_score_3']
+    elif len(profit_ratio_cols) >= 2:
+        merged_df['score'] = 10000 * merged_df[profit_ratio_cols[0]] * merged_df[profit_ratio_cols[1]]
+        merged_df['score_plus'] = merged_df[profit_ratio_cols[0]] + merged_df[profit_ratio_cols[1]]
+        merged_df['score_mul'] = merged_df['score_plus'] * merged_df['score']
+        merged_df['hold_time_score_plus'] = merged_df['hold_time_score'] + merged_df['hold_time_score_2']
     return merged_df
 
 
 def compute_diff_statistics_signals_time_ranges_readable(
-    signal_df: pd.DataFrame,
-    time_range_list: list,
-    optimized_parquet_path: str
+        signal_df: pd.DataFrame,
+        time_range_list: list,
+        optimized_parquet_path: str
 ) -> pd.DataFrame:
     """
     一个更直观（但不一定是最高效）的实现示例：
@@ -782,6 +1303,7 @@ def read_json(file_path):
     with open(file_path, 'r') as file:
         return json.load(file)
 
+
 def generate_time_segments(origin_df, time_len=20):
     """
     Generates a list of 10 evenly spaced time segments based on the timestamp
@@ -842,19 +1364,21 @@ def statistic_data(file_path_list):
             time_len = len(time_range_list)
             file_path_output = file_path_output_dir + f"/start_period_{start_period}_end_period_{end_period}_step_period_{step_period}_min_{global_min.strftime('%Y%m%d')}_max_{global_max.strftime('%Y%m%d')}_time_len_{time_len}.csv"
 
-
             if os.path.exists(file_path_output):
                 print(f"结果文件 {file_path_output} 已存在，跳过计算")
                 continue
             if key_word == "price_extremes":
-                signal_df = generate_price_extremes_signals(origin_df, periods=[x for x in range(start_period, end_period, step_period)])
+                signal_df = generate_price_extremes_signals(origin_df, periods=[x for x in
+                                                                                range(start_period, end_period,
+                                                                                      step_period)])
             else:
-                signal_df = generate_price_extremes_reverse_signals(origin_df, periods=[x for x in range(start_period, end_period, step_period)])
-
+                signal_df = generate_price_extremes_reverse_signals(origin_df, periods=[x for x in
+                                                                                        range(start_period, end_period,
+                                                                                              step_period)])
 
             print(f"开始计算 {file_path_output}")
             result_df = compute_diff_statistics_signals_time_ranges_readable(signal_df, time_range_list,
-                                                                    optimized_parquet_path)
+                                                                             optimized_parquet_path)
             result_df.to_csv(file_path_output, index=False)
 
         # for i in range(1, 11):
@@ -871,13 +1395,196 @@ def statistic_data(file_path_list):
         #     result_df.to_csv(file_path_output, index=False)
 
 
+def safe_calculate_combination(params):
+    """
+    包装原先的 calculate_combination 函数，捕获异常，以免某一次计算失败导致整个进程中断。
+    返回值中增加 'error' 字段，用于记录异常信息。
+    """
+    try:
+        result = calculate_combination(params)
+        # 为了更好地区分成功与失败，这里也可加入一个标志
+        result["error"] = None
+        return result
+    except Exception as e:
+        return {
+            "error": str(e),
+            # 如果需要保留部分上下文信息，可一并返回
+            "params": params
+        }
+
+def process_with_timeout(func, args, timeout):
+    num_processes = max(1, (os.cpu_count()))  # 避免出现负数
+    with multiprocessing.Pool(processes=num_processes - 3) as pool:
+        results = []
+        async_results = []
+
+        for param in args:
+            async_result = pool.apply_async(func, (param,))
+            async_results.append(async_result)
+
+        for i, async_result in enumerate(async_results):
+            try:
+                res = async_result.get(timeout=timeout)
+                results.append(res)
+            except multiprocessing.TimeoutError:
+                # 去除args[i]中的第三个参数
+                param = args[i][:2] + args[i][3:]
+                print(f"Task for parameter: {param} timed out and was skipped.")
+
+        return results
+
+
+def detail_backtest():
+    """
+    更加详细的回测，是为已经比较好的策略指定的参数组合生成详细回测数据。
+    """
+
+    good_strategy_path = 'backtest_result/good_strategy_df.csv'
+    timeout_limit = 1000
+    sell_time_diff_step = 100
+    sell_time_diff_start = 100
+    sell_time_diff_end = 10000
+    max_sell_time_diff_list = [x for x in range(sell_time_diff_start, sell_time_diff_end, sell_time_diff_step)]
+    # 为了覆盖更大范围，追加一个极大的阈值
+    max_sell_time_diff_list.append(1000000)
+
+    power_step = 1
+    power_start = 0
+    power_end = 5
+    power_list = [x for x in range(power_start, power_end, power_step)]
+
+    file_path_list = [
+        'kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv',
+        'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv',
+        'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv',
+        'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv'
+    ]
+
+    # 读取“好策略”列表
+    df_good_strategies = pd.read_csv(good_strategy_path)
+    # 删除signal_name为base_line的行
+    df_good_strategies = df_good_strategies[~df_good_strategies['signal_name'].str.contains('baseline')]
+    # 删除group_size大于10000的行
+    df_good_strategies = df_good_strategies[df_good_strategies['group_size'] <= 10000]
+    # 找到df_good_strategies中result_path为空的行
+    df_good_strategies = df_good_strategies[df_good_strategies['result_path'].isna()]
+
+    # 按照 key_name 分组
+    df_group = df_good_strategies.groupby('key_name')
+
+    # 遍历每个分组
+    for key_name_group, value_df in df_group:
+        # 根据 key_name 判断信号类型
+        if 'reverse' in key_name_group:
+            signal_type = 'price_reverse_extremes'
+        else:
+            signal_type = 'price_extremes'
+
+        # 提取真正的币种标识，下面在 file_path_list 中匹配
+        coin_name = key_name_group.split('-')[0].split('_')[-1]
+
+        # 找到对应的文件路径
+        matched_file_path = None
+        for fpath in file_path_list:
+            if coin_name in fpath:
+                matched_file_path = fpath
+                break
+
+        if not matched_file_path:
+            print(f"未找到 {coin_name} 对应的 K线文件路径，跳过该分组。")
+            continue
+
+        # 读取 K 线文件
+        df_kline = pd.read_csv(matched_file_path)
+
+        start_time = time.time()
+
+        # 遍历该分组下每一行
+        for index, row in value_df.iterrows():
+            try:
+                signal_name = row['signal_name']
+                period = int(signal_name.split('_')[1])
+
+                target_name = row['target_name']
+                profit = float(target_name.split('_')[2])
+                if profit > 0.02:
+                    print(f"profit: {profit} 大于0.04，跳过")
+                    continue
+
+                # 根据 target_name 判断多空
+                if "high" in target_name:
+                    side = 'long'
+                else:
+                    side = 'short'
+
+                # 组装 signal_param
+                signal_param = {
+                    "periods": [period]
+                }
+
+                # 构建参数列表
+                parameter_list = []
+                # 这里的 100 和 10000000 是原先固定传入的参数
+                fixed_params = (profit, period, df_kline, 100, 10000000)
+
+                for max_sell_time_diff in max_sell_time_diff_list:
+                    for power in power_list:
+                        params = (
+                                fixed_params
+                                + (max_sell_time_diff, power)
+                                + (signal_name, side, function_map[signal_type], signal_param)
+                        )
+                        parameter_list.append(params)
+
+                # 生成输出文件路径
+                output_path = (
+                    f"backtest_result/detail_{coin_name}"
+                    f"_signal_name_{signal_name}_period_{period}_profit_{profit}_side_{side}"
+                    f"_len_{len(parameter_list)}_{sell_time_diff_step}_{sell_time_diff_start}"
+                    f"_{sell_time_diff_end}_{power_step}_{power_start}_{power_end}.csv"
+                )
+
+                # 如果结果文件已存在，跳过计算
+                if os.path.exists(output_path):
+                    print(f"结果文件 {output_path} 已存在，跳过计算")
+                    # 如果想在原 DataFrame 中记录 result_path，需要用 loc
+                    df_good_strategies.loc[index, 'result_path'] = output_path
+                    # 将df_good_strategies保存到文件
+                    df_good_strategies.to_csv(good_strategy_path, index=False)
+                    continue
+                print(f"开始计算: {output_path}")
+
+                # for params in parameter_list:
+                #     calculate_combination(params)
+
+                # 使用进程池并行计算
+                results = process_with_timeout(safe_calculate_combination, parameter_list, timeout_limit)
+
+                # 将计算结果转换为 DataFrame
+                result_df = pd.DataFrame(results)
+                result_df.to_csv(output_path, index=False)
+
+                print(f"结果已保存到 {output_path} 耗时：{time.time() - start_time:.2f} 秒")
+
+                # 如果想在原 DataFrame 中记录 result_path，需要用 loc
+                df_good_strategies.loc[index, 'result_path'] = output_path
+                # 将df_good_strategies保存到文件
+                df_good_strategies.to_csv(good_strategy_path, index=False)
+            except Exception as e:
+                traceback.print_exc()
+                print(f"计算 时出现异常：{e} {row}")
+
+
 def truly_backtest():
     """
     之前一一组合生成回测数据的代码
     :return:
     """
     backtest_path = 'backtest_result'
-    file_path_list = ['kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv']
+    file_path_list = ['kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv',
+                      'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv',
+                      'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv',
+                      'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv']
     gen_signal_method = 'price_extremes'
     profit_list = generate_list(0.001, 0.1, 100, 4)
     period_list = generate_list(10, 10000, 100, 0)
@@ -888,19 +1595,18 @@ def truly_backtest():
     longest_periods_info_path = 'kline_data/longest_periods_info.json'
     all_longest_periods_info = read_json(longest_periods_info_path)
 
-
     for file_path in file_path_list:
         base_name = file_path.split('/')[-1].split('.')[0]
         origin_data_df = pd.read_csv(file_path)  # 只取最近1000条数据
         origin_data_df['timestamp'] = pd.to_datetime(origin_data_df['timestamp'])
-
 
         longest_periods_info = all_longest_periods_info[base_name]
         for key, value in longest_periods_info.items():
             start_time_str, end_time_str = value.split('_')
             start_time = pd.to_datetime(start_time_str)
             end_time = pd.to_datetime(end_time_str)
-            data_df = origin_data_df[(origin_data_df['timestamp'] >= start_time) & (origin_data_df['timestamp'] <= end_time)]
+            data_df = origin_data_df[
+                (origin_data_df['timestamp'] >= start_time) & (origin_data_df['timestamp'] <= end_time)]
 
             data_len = len(data_df)
 
@@ -911,9 +1617,9 @@ def truly_backtest():
             # 生成time_key
             time_key_str = f"{start_time.strftime('%Y%m%d%H%M%S')}_{end_time.strftime('%Y%m%d%H%M%S')}"
 
-
             # 准备参数组合
-            combinations = [(profit, period, data_df, lever, init_money) for profit in profit_list for period in period_list]
+            combinations = [(profit, period, data_df, lever, init_money) for profit in profit_list for period in
+                            period_list]
             print(f"共有 {len(combinations)} 个组合，开始计算...")
 
             file_out = f'{backtest_path}/result_{data_len}_{len(combinations)}_{base_name}_{time_key_str}_{gen_signal_method}_{key}.csv'
@@ -929,6 +1635,7 @@ def truly_backtest():
             result_df = pd.DataFrame(results)
             result_df.to_csv(file_out, index=False)
             print(f"结果已保存到 {file_out}")
+
 
 def covert_df(df):
     target = 'target'
@@ -946,6 +1653,7 @@ def covert_df(df):
         value_name='target_value'  # 存储值的列名
     )
     return melted_df
+
 
 def select_top_rows_by_group_size(grouped_df, score_columns, group_step=1000):
     """
@@ -1053,22 +1761,22 @@ def analyze_data(file_path, score_key='median'):
         # 计算 4 种评分 (score1～4)
         # 注意要先排除 mean_col 和 nan_ratio_col 可能的 NaN 或 0，这里假设数据完整
         temp_df[score1_col] = (
-            (temp_df[profit_key] - temp_df[nan_ratio_col]) * temp_df[profit_key] * 100
-            / temp_df[mean_col] * 10000
-            / temp_df[mean_col] * 10000
+                (temp_df[profit_key] - temp_df[nan_ratio_col]) * temp_df[profit_key] * 100
+                / temp_df[mean_col] * 10000
+                / temp_df[mean_col] * 10000
         )
         temp_df[score2_col] = (
-            (temp_df[profit_key] - temp_df[nan_ratio_col]) * 100
-            / temp_df[mean_col] * 10000
-            / temp_df[mean_col] * 10000
+                (temp_df[profit_key] - temp_df[nan_ratio_col]) * 100
+                / temp_df[mean_col] * 10000
+                / temp_df[mean_col] * 10000
         )
         temp_df[score3_col] = (
-            (temp_df[profit_key] - temp_df[nan_ratio_col]) * temp_df[profit_key] * 100
-            / temp_df[mean_col] * 10000
+                (temp_df[profit_key] - temp_df[nan_ratio_col]) * temp_df[profit_key] * 100
+                / temp_df[mean_col] * 10000
         )
         temp_df[score4_col] = (
-            (temp_df[profit_key] - temp_df[nan_ratio_col]) * 100
-            / temp_df[mean_col] * 10000
+                (temp_df[profit_key] - temp_df[nan_ratio_col]) * 100
+                / temp_df[mean_col] * 10000
         )
 
         # 在原数据中必须有 time_range 这一列，否则需根据业务需求自行处理
@@ -1116,7 +1824,6 @@ def analyze_data(file_path, score_key='median'):
 
         grouped_df = pd.merge(grouped_df_sum, grouped_df_median, on="signal_name", how="left")
 
-
         # -------------------------------------------------------------------
         # Step 2: 根据 score 列取 top (原逻辑: nlargest(1))
         # -------------------------------------------------------------------
@@ -1142,9 +1849,82 @@ def analyze_data(file_path, score_key='median'):
     return result_df
 
 
+def get_good_strategy():
+    good_strategy_path = 'backtest_result/good_strategy_df.csv'
+    # df = pd.read_csv(good_strategy_path)
+
+    step = 100
+    top_n = 2
+    file_path_list = ['backtest_result/analyze_data_mean.csv', 'backtest_result/analyze_data_median.csv']
+    result_list = []
+    for file_path in file_path_list:
+        low_output_path = file_path.replace('.csv', f'_low_{step}_{top_n}.csv')
+        high_output_path = file_path.replace('.csv', f'_high_{step}_{top_n}.csv')
+        if os.path.exists(low_output_path) and os.path.exists(high_output_path):
+            result_list.append(pd.read_csv(low_output_path))
+            result_list.append(pd.read_csv(high_output_path))
+
+            print(f"结果文件 {low_output_path} 和 {high_output_path} 已存在，跳过计算")
+            continue
+        result_df = pd.read_csv(file_path)
+        base_key_word_list = [f"score{i}" for i in range(1, 5)]
+        key_word_list = base_key_word_list.copy()
+        for key_word in base_key_word_list:
+            key_word_list.append(f"{key_word}_median")
+            key_word_list.append(f"{key_word}_total")
+        # 过滤掉target_value小于0的行
+        result_df = result_df[result_df['target_value'] > 0]
+        # 筛选出target_name的值包含low的行
+        low_result_df = result_df[result_df['target_name'].str.contains('low')]
+        high_result_df = result_df[result_df['target_name'].str.contains('high')]
+
+        low_result_df_list = []
+        high_result_df_list = []
+        for key_word in key_word_list:
+            key_word_low_result_df = low_result_df[low_result_df['target_name'].str.contains(key_word)]
+            key_word_high_result_df = high_result_df[high_result_df['target_name'].str.contains(key_word)]
+
+            # 按照target_value降序排列
+            key_word_low_result_df = key_word_low_result_df.sort_values(by='target_value', ascending=False)
+            key_word_high_result_df = key_word_high_result_df.sort_values(by='target_value', ascending=False)
+
+            current_df = key_word_low_result_df
+            while not current_df.empty:
+                top_2 = current_df.head(top_n)
+                max_group_size = top_2['group_size'].max()
+                current_df = current_df[current_df['group_size'] > max_group_size + step]
+                low_result_df_list.append(top_2)
+
+            current_df = key_word_high_result_df
+            while not current_df.empty:
+                top_2 = current_df.head(top_n)
+                max_group_size = top_2['group_size'].max()
+                current_df = current_df[current_df['group_size'] > max_group_size + step]
+                high_result_df_list.append(top_2)
+        final_low_result_df = pd.concat(low_result_df_list)
+        final_high_result_df = pd.concat(high_result_df_list)
+        result_list.append(final_low_result_df)
+        result_list.append(final_high_result_df)
+        final_low_result_df.to_csv(low_output_path, index=False)
+        final_high_result_df.to_csv(high_output_path, index=False)
+    result_df = pd.concat(result_list)
+    result_df['result_path'] = ''
+    result_df.to_csv(good_strategy_path, index=False)
+
+
 def example():
-    file_path_list = ['kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv',
-     'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv', 'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv']
+    file_path_list = ['kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv',
+                      'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv',
+                      'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv',
+                      'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv']
+
+    # 示例-1：根据统一的数据获取好的策略，然后再获取详细的结果
+    # get_good_strategy()
+
+    debug_calculate_combination()
+
+    # 示例0:更加详细的回测考虑超时的处理
+    # detail_backtest()
 
     # 示例一:传统的一一获取不同信号在三种指定时间段上面的表现结果
     # truly_backtest(file_path_list)
@@ -1152,43 +1932,40 @@ def example():
     # 示例二:使用预处理后的数据初略获取回测效果数据
     # statistic_data(file_path_list)
 
-
     # #示例三: 对原始数据进行预处理
     # for file_path in file_path_list:
     #     calculate_time_to_targets(file_path)
 
-    # 示例四：分析初略的回测结果数据
-    file_path_list = [
-        # "temp/temp.csv",
-        "kline_data/price_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
-        "kline_data/price_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
-        "kline_data/price_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
-        "kline_data/price_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
-        "kline_data/price_reverse_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
-        "kline_data/price_reverse_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
-        "kline_data/price_reverse_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
-        "kline_data/price_reverse_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
-        "kline_data/price_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
-        "kline_data/price_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
-        "kline_data/price_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
-        "kline_data/price_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
-        "kline_data/price_reverse_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
-        "kline_data/price_reverse_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
-        "kline_data/price_reverse_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
-        "kline_data/price_reverse_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv"
-    ]
-    # result_df1 = pd.read_csv('backtest_result/analyze_data_mean.csv')
-    # result_df2 = pd.read_csv('backtest_result/analyze_data_median.csv')
-    analyze_df_list = []
-    score_key = 'median'
-    for file_path in file_path_list:
-        analyze_df = analyze_data(file_path, score_key)
-        file_path_split = file_path.split('_')
-        key_name = f'{file_path_split[2]}_{file_path_split[6]}_{file_path_split[7]}'
-        analyze_df['key_name'] = key_name
-        analyze_df_list.append(analyze_df)
-    analyze_df = pd.concat(analyze_df_list, ignore_index=True)
-    analyze_df.to_csv(f'backtest_result/analyze_data_{score_key}.csv', index=False)
+    # # 示例四：分析初略的回测结果数据
+    # file_path_list = [
+    #     # "temp/temp.csv",
+    #     "kline_data/price_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+    #     "kline_data/price_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+    #     "kline_data/price_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+    #     "kline_data/price_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+    #     "kline_data/price_reverse_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+    #     "kline_data/price_reverse_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+    #     "kline_data/price_reverse_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+    #     "kline_data/price_reverse_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_10.csv",
+    #     "kline_data/price_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+    #     "kline_data/price_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+    #     "kline_data/price_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+    #     "kline_data/price_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+    #     "kline_data/price_reverse_extremes/origin_data_1m_10000000_BTC-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+    #     "kline_data/price_reverse_extremes/origin_data_1m_10000000_ETH-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+    #     "kline_data/price_reverse_extremes/origin_data_1m_10000000_SOL-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv",
+    #     "kline_data/price_reverse_extremes/origin_data_1m_10000000_TON-USDT-SWAP/start_period_10_end_period_10000_step_period_10_min_20230208_max_20250103_time_len_1.csv"
+    # ]
+    # analyze_df_list = []
+    # for file_path in file_path_list:
+    #     analyze_df = analyze_data(file_path)
+    #     file_path_split = file_path.split('_')
+    #     key_name = f'{file_path_split[2]}_{file_path_split[6]}_{file_path_split[7]}'
+    #     analyze_df['key_name'] = key_name
+    #     analyze_df_list.append(analyze_df)
+    # analyze_df = pd.concat(analyze_df_list, ignore_index=True)
+    # analyze_df.to_csv('backtest_result/analyze_data.csv', index=False)
+
 
 if __name__ == "__main__":
     example()

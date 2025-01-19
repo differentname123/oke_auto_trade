@@ -1206,6 +1206,68 @@ def generate_price_extremes_signals(df, param_info={"periods": [20]}):
     df = df.assign(**signals)
     return df
 
+def generate_trend_signals1(df, param_info={"period": 1}):
+    """
+    根据指定周期的数据价格变化生成买入和卖出信号。
+
+    Args:
+        df (pd.DataFrame): 包含 'close' 列的 DataFrame。
+        period (int, optional):  用于分组数据的周期数。默认为 1，即每行数据单独比较。
+
+    Returns:
+        pd.DataFrame: 添加了 'buy_signal' 和 'sell_signal' 列的 DataFrame。
+    """
+    period = param_info.get("period", 1)
+
+    if period < 1:
+        raise ValueError("Period must be at least 1.")
+
+    # 计算指定周期的价格变化
+    price_change = df['close'].diff(periods=period)
+
+    # 生成买入信号：涨幅大于 0
+    df['change_Buy'] = np.where(price_change > 0, 1, 0)
+
+    # 生成卖出信号：涨幅小于 0
+    df['change_Sell'] = np.where(price_change < 0, 1, 0)
+
+    return df
+
+
+def generate_trend_signals(df, param_info={"period": 1}):
+    """
+    根据指定周期的数据价格变化生成买入和卖出信号。
+
+    Args:
+        df (pd.DataFrame): 包含 'close' 列的 DataFrame。
+        period (int, optional):  用于分组数据的周期数。默认为 1，即每行数据单独比较。
+
+    Returns:
+        pd.DataFrame: 添加了 'buy_signal' 和 'sell_signal' 列的 DataFrame。
+    """
+    period = param_info.get("period", 1)
+    theshold = param_info.get("theshold", 0.1)
+    window = 2000
+
+    # 计算指定周期的价格变化
+    price_change = df['close'].diff(periods=period)
+
+    # 计算最近100周期的最大值和最小值
+    df['roll_max_100'] = df['close'].rolling(window=window, min_periods=1).max()
+    df['roll_min_100'] = df['close'].rolling(window=window, min_periods=1).min()
+    df['cha'] = df['roll_max_100'] - df['roll_min_100']
+
+    # 生成买入信号：涨幅大于 0 且 close 不大于最近100周期最大值的90%
+    df['change_Buy'] = np.where((price_change > 0) & (df['close'] < (theshold * df['cha'] + df['roll_min_100'])), 1, 0)
+
+    # 生成卖出信号：涨幅小于 0 且 close 的 90% 不小于最近100周期最小值
+    df['change_Sell'] = np.where((price_change < 0) & (df['close'] > (df['roll_max_100'] - theshold * df['cha'])), 1, 0)
+
+    # 删除辅助列
+    # df.drop(columns=['roll_max_100', 'roll_min_100'], inplace=True)
+
+    return df
+
 def generate_price_unextremes_signals(df, param_info={"periods": [20]}):
     """
     根据指定周期内的最高价和最低价生成买入和卖出信号。
@@ -1875,29 +1937,32 @@ def run():
 
 
 def download_data():
-    backtest_path = 'kline_data'
-    base_file_path = 'origin_data.csv'
-    is_reload = False
-    inst_id_list = [ 'BTC-USDT-SWAP','ETH-USDT-SWAP','SOL-USDT-SWAP','TON-USDT-SWAP', 'DOGE-USDT-SWAP', 'XRP-USDT-SWAP', 'PEPE-USDT-SWAP']
-    if not os.path.exists(backtest_path):
-        os.makedirs(backtest_path)
-    bar_list = ['1m', '1s', '5m', '15m', '30m', '1H', '4H']
-    max_candles_list = [10000000]
-    for max_candles in max_candles_list:
-        for bar in bar_list:
-            for inst_id in inst_id_list:
-                final_file_path = f'{backtest_path}/{base_file_path[:-4]}_{bar}_{max_candles}_{inst_id}.csv'
-                # 判断文件是否存在，并且有一定的大小
-                if not is_reload and os.path.exists(final_file_path) and os.path.getsize(final_file_path) > 1024:
-                    print('已经存在该文件，直接读取')
-                else:
-                    print(f'不存在该文件，开始获取 {final_file_path}')
-                    data = get_train_data(inst_id=inst_id, bar=bar, max_candles=max_candles)
-                    data.to_csv(final_file_path, index=False)
+    df = get_train_data(inst_id='TON-USDT-SWAP', bar='1m', max_candles=10000)
+    df.to_csv('temp/TON_1m_10000.csv', index=False)
+    #
+    # backtest_path = 'kline_data'
+    # base_file_path = 'origin_data.csv'
+    # is_reload = False
+    # inst_id_list = [ 'BTC-USDT-SWAP','ETH-USDT-SWAP','SOL-USDT-SWAP','TON-USDT-SWAP', 'DOGE-USDT-SWAP', 'XRP-USDT-SWAP', 'PEPE-USDT-SWAP']
+    # if not os.path.exists(backtest_path):
+    #     os.makedirs(backtest_path)
+    # bar_list = ['1m', '1s', '5m', '15m', '30m', '1H', '4H']
+    # max_candles_list = [10000000]
+    # for max_candles in max_candles_list:
+    #     for bar in bar_list:
+    #         for inst_id in inst_id_list:
+    #             final_file_path = f'{backtest_path}/{base_file_path[:-4]}_{bar}_{max_candles}_{inst_id}.csv'
+    #             # 判断文件是否存在，并且有一定的大小
+    #             if not is_reload and os.path.exists(final_file_path) and os.path.getsize(final_file_path) > 1024:
+    #                 print('已经存在该文件，直接读取')
+    #             else:
+    #                 print(f'不存在该文件，开始获取 {final_file_path}')
+    #                 data = get_train_data(inst_id=inst_id, bar=bar, max_candles=max_candles)
+    #                 data.to_csv(final_file_path, index=False)
 
 def example():
-    # download_data()
-    run_backtest()
+    download_data()
+    # run_backtest()
     # analyze_backtest_results()
     # run()
 
@@ -2046,7 +2111,7 @@ def run_backtest():
                     final_op_output_file_path = f'{backtest_path}/statistic_op_{base_file_path[:-4]}_{bar}_{max_candles}.csv'
                     # 去除后60行
                     data = full_data[:-10000]
-                    # signal_data = generate_signals(data)
+                    signal_data = generate_signals(data)
                     # backtest_df = backtest_strategy(signal_data)
                     # backtest_df_op = backtest_strategy_op(signal_data)
                     backtest_df = pd.read_csv(final_output_file_path)
