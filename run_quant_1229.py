@@ -1015,15 +1015,23 @@ def debug_calculate_combination():
     start_time = time.time()
     # data_df = pd.read_csv("temp/TON_1m_10000.csv")
     # data_df = pd.read_csv("temp/SOL_1m_10000.csv")
-    data_df = pd.read_csv("kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv")
+    data_df = pd.read_csv("kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv")
+    # 找到kline_data文件夹下的所有csv文件
+    file_list = os.listdir("kline_data")
+    for file in file_list:
+        if file.endswith(".csv"):
+            if len(file.split("_")) == 4:
+                try:
+                    print(f"file: {file}")
+                    data_df = pd.read_csv(f"kline_data/{file}")
+                    data_df.reset_index(drop=True, inplace=True)
 
-    # data_df = data_df[-50000:]
+                    print(f"长度: {data_df.shape[0]}")
+                    temp_df1 = add_trading_signals_op(data_df)
+                    temp_df2 = add_trading_signals_op(data_df, True)
+                except Exception as e:
+                    pass
 
-    # 重置索引
-    data_df.reset_index(drop=True, inplace=True)
-    print(f"长度: {data_df.shape[0]}")
-    temp_df1 = add_trading_signals_op(data_df)
-    temp_df2 = add_trading_signals_op(data_df, True)
     # for i in range(10, 100, 10):
     #     temp_df3 = add_trading_signals_op(data_df, True, i)
     #     print(f"max_hold_time: {i} profit: {temp_df3['profit_ratio'].sum()} cost time: {time.time() - start_time}")
