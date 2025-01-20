@@ -731,14 +731,24 @@ def generate_signals(data_df):
     """
     data_df['signal'] = 0
     data_df['buy_price'] = 0.0
+    data_df['previous_high'] = 0.0
+    data_df['previous_low'] = 0.0
+    data_df['previous_open'] = 0.0
+    data_df['previous_close'] = 0.0
+
+    # 使用 shift() 方法计算前一日的数据
+    data_df['previous_high'] = data_df['high'].shift(1)
+    data_df['previous_low'] = data_df['low'].shift(1)
+    data_df['previous_open'] = data_df['open'].shift(1)
+    data_df['previous_close'] = data_df['close'].shift(1)
 
     current_signal = 1
     data_df.loc[0, 'signal'] = 1
     data_df.loc[0, 'buy_price'] = data_df.loc[0, 'close']
 
     for i in range(1, len(data_df)):
-        previous_high = data_df.loc[i - 1, 'high']
-        previous_low = data_df.loc[i - 1, 'low']
+        previous_high = data_df.loc[i, 'previous_high']
+        previous_low = data_df.loc[i, 'previous_low']
         current_high = data_df.loc[i, 'high']
         current_low = data_df.loc[i, 'low']
 
@@ -758,7 +768,13 @@ def match_sell_info_op(data_df, is_need_profit=False, max_hold_time=999999):
     signal_arr = data_df['signal'].values
     buy_price_arr = data_df['buy_price'].values
     close_arr = data_df['close'].values
+    high_arr = data_df['high'].values
+    low_arr = data_df['low'].values
     timestamp_arr = data_df['timestamp'].values
+    previous_high_arr = data_df['previous_high'].values
+    previous_low_arr = data_df['previous_low'].values
+    previous_open_arr = data_df['previous_open'].values
+    previous_close_arr = data_df['previous_close'].values
 
     n_row = len(data_df)
     sell_price_arr = [0.0] * n_row
@@ -813,16 +829,33 @@ def match_sell_info_op(data_df, is_need_profit=False, max_hold_time=999999):
                 sell_time_arr[buy_idx] = timestamp_arr[-1]
                 hold_time_arr[buy_idx] = (n_row - 1) - buy_idx
 
+    # # 修正多空信号可能导致的异常卖价
+    # mask_signal_1 = (signal_arr == 1) & (buy_price_arr > close_arr)
+    # for idx, cond in enumerate(mask_signal_1):
+    #     if cond:
+    #         sell_price_arr[idx] = buy_price_arr[idx]
+    #
+    # mask_signal_0 = (signal_arr == -1) & (buy_price_arr < close_arr)
+    # for idx, cond in enumerate(mask_signal_0):
+    #     if cond:
+    #         sell_price_arr[idx] = buy_price_arr[idx]
+    #
+    # fix_count = sum(mask_signal_1) + sum(mask_signal_0)
+    # print(f"fix_count: {fix_count} cost {0.07 * fix_count}")
+
+
     # 修正多空信号可能导致的异常卖价
     mask_signal_1 = (signal_arr == 1) & (buy_price_arr > close_arr)
     for idx, cond in enumerate(mask_signal_1):
         if cond:
-            sell_price_arr[idx] = buy_price_arr[idx]
+            if low_arr[idx] < previous_low_arr[idx]:
+                sell_price_arr[idx] = previous_low_arr[idx]
 
     mask_signal_0 = (signal_arr == -1) & (buy_price_arr < close_arr)
     for idx, cond in enumerate(mask_signal_0):
         if cond:
-            sell_price_arr[idx] = buy_price_arr[idx]
+            if high_arr[idx] > previous_high_arr[idx]:
+                sell_price_arr[idx] = previous_high_arr[idx]
 
     fix_count = sum(mask_signal_1) + sum(mask_signal_0)
     print(f"fix_count: {fix_count} cost {0.07 * fix_count}")
@@ -864,7 +897,18 @@ def match_sell_info_op(data_df, is_need_profit=False, max_hold_time=999999):
     ]
     data_df = data_df.reindex(columns=new_column_order)
 
-    return data_df
+    try:
+        # 只截取data_df中的signal, buy_price, sell_price, sell_time, profit_ratio, hold_time列
+        temp_df = data_df[['signal', 'buy_price', 'sell_price', 'sell_time', 'profit_ratio', 'hold_time', 'timestamp']]
+        precious_df = pd.read_csv('temp/precious_df.csv')[['signal', 'buy_price', 'sell_price', 'sell_time', 'profit_ratio', 'hold_time', 'timestamp']]
+        # 合并两个DataFrame，以timestamp为准,重复的列新的加上_new后缀，老的加上_old后缀
+        compare_df = pd.merge(precious_df, temp_df, on='timestamp', how='outer', suffixes=('_old', '_new'))
+        compare_df['profit_ratio_diff'] = compare_df['profit_ratio_new'] - compare_df['profit_ratio_old']
+    except Exception as e:
+        traceback.print_exc()
+        compare_df = pd.DataFrame()
+    data_df.to_csv('temp/precious_df.csv', index=False)
+    return data_df, compare_df
 
 def match_sell_info(data_df, is_need_profit=False, max_hold_time=999999):
     """
@@ -1015,21 +1059,25 @@ def debug_calculate_combination():
     start_time = time.time()
     # data_df = pd.read_csv("temp/TON_1m_10000.csv")
     # data_df = pd.read_csv("temp/SOL_1m_10000.csv")
-    data_df = pd.read_csv("kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv")
     # 找到kline_data文件夹下的所有csv文件
     file_list = os.listdir("kline_data")
     for file in file_list:
         if file.endswith(".csv"):
-            if len(file.split("_")) == 4:
+            if len(file.split("_")) == 5:
                 try:
-                    print(f"file: {file}")
-                    data_df = pd.read_csv(f"kline_data/{file}")
+                    # data_df = pd.read_csv(f"kline_data/{file}")
+                    data_df = pd.read_csv('temp/TON_1H_10000.csv')
+                    data_df = data_df[-50000:]
                     data_df.reset_index(drop=True, inplace=True)
-
+                    print(f"file: {file}")
                     print(f"长度: {data_df.shape[0]}")
-                    temp_df1 = add_trading_signals_op(data_df)
+                    if data_df.shape[0] > 500000:
+                        continue
+                    temp_df1, compare = add_trading_signals_op(data_df)
                     temp_df2 = add_trading_signals_op(data_df, True)
+                    print("\n\n\n")
                 except Exception as e:
+                    traceback.print_exc()
                     pass
 
     # for i in range(10, 100, 10):

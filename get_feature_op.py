@@ -1937,8 +1937,8 @@ def run():
 
 
 def download_data():
-    df = get_train_data(inst_id='TON-USDT-SWAP', bar='1m', max_candles=10000)
-    df.to_csv('temp/TON_1m_10000.csv', index=False)
+    df = get_train_data(inst_id='TON-USDT-SWAP', bar='1H', max_candles=10000)
+    df.to_csv('temp/TON_1h_10000.csv', index=False)
     #
     # backtest_path = 'kline_data'
     # base_file_path = 'origin_data.csv'
