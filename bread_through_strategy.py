@@ -288,13 +288,13 @@ def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
     is_filter = True
 
 
-    # debug
-    df = pd.read_csv(data_path)
-    long_column = '4811_low_short'
-    short_column = '36_high_long'
-    signal_cache = {}
-    # df = df[-50000:]
-    get_detail_backtest_result(df, long_column, short_column, signal_cache, is_filter)
+    # # debug
+    # df = pd.read_csv(data_path)
+    # long_column = '4811_low_short'
+    # short_column = '36_high_long'
+    # signal_cache = {}
+    # # df = df[-50000:]
+    # get_detail_backtest_result(df, long_column, short_column, signal_cache, is_filter)
 
 
 
