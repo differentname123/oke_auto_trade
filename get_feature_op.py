@@ -1937,28 +1937,28 @@ def run():
 
 
 def download_data():
-    df = get_train_data(inst_id='TON-USDT-SWAP', bar='1H', max_candles=10000)
-    df.to_csv('temp/TON_1h_10000.csv', index=False)
-    #
-    # backtest_path = 'kline_data'
-    # base_file_path = 'origin_data.csv'
-    # is_reload = False
-    # inst_id_list = [ 'BTC-USDT-SWAP','ETH-USDT-SWAP','SOL-USDT-SWAP','TON-USDT-SWAP', 'DOGE-USDT-SWAP', 'XRP-USDT-SWAP', 'PEPE-USDT-SWAP']
-    # if not os.path.exists(backtest_path):
-    #     os.makedirs(backtest_path)
-    # bar_list = ['1m', '1s', '5m', '15m', '30m', '1H', '4H']
-    # max_candles_list = [10000000]
-    # for max_candles in max_candles_list:
-    #     for bar in bar_list:
-    #         for inst_id in inst_id_list:
-    #             final_file_path = f'{backtest_path}/{base_file_path[:-4]}_{bar}_{max_candles}_{inst_id}.csv'
-    #             # 判断文件是否存在，并且有一定的大小
-    #             if not is_reload and os.path.exists(final_file_path) and os.path.getsize(final_file_path) > 1024:
-    #                 print('已经存在该文件，直接读取')
-    #             else:
-    #                 print(f'不存在该文件，开始获取 {final_file_path}')
-    #                 data = get_train_data(inst_id=inst_id, bar=bar, max_candles=max_candles)
-    #                 data.to_csv(final_file_path, index=False)
+    # df = get_train_data(inst_id='TON-USDT-SWAP', bar='5m', max_candles=1000)
+    # df.to_csv('temp/TON_5m_1000.csv', index=False)
+
+    backtest_path = 'kline_data'
+    base_file_path = 'origin_data.csv'
+    is_reload = False
+    inst_id_list = [ 'BTC-USDT-SWAP','ETH-USDT-SWAP','SOL-USDT-SWAP','TON-USDT-SWAP', 'DOGE-USDT-SWAP', 'XRP-USDT-SWAP', 'PEPE-USDT-SWAP']
+    if not os.path.exists(backtest_path):
+        os.makedirs(backtest_path)
+    bar_list = ['1m', '1s', '5m', '15m', '30m', '1H', '4H']
+    max_candles_list = [86000]
+    for max_candles in max_candles_list:
+        for bar in bar_list:
+            for inst_id in inst_id_list:
+                final_file_path = f'{backtest_path}/{base_file_path[:-4]}_{bar}_{max_candles}_{inst_id}.csv'
+                # 判断文件是否存在，并且有一定的大小
+                if not is_reload and os.path.exists(final_file_path) and os.path.getsize(final_file_path) > 1024:
+                    print('已经存在该文件，直接读取')
+                else:
+                    print(f'不存在该文件，开始获取 {final_file_path}')
+                    data = get_train_data(inst_id=inst_id, bar=bar, max_candles=max_candles)
+                    data.to_csv(final_file_path, index=False)
 
 def example():
     download_data()

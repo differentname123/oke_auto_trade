@@ -5,7 +5,7 @@ from zhipuai import ZhipuAI
 app = Flask(__name__)
 
 # 初始化ZhipuAI客户端
-client = ZhipuAI(api_key="764d9c6af5fc87d7c35f9daedd9888cc.F3FAVkoMCA8BHjrj")
+client = ZhipuAI(api_key="9f80395737174fddb69e1b6b4514fce9.Ihd6A6FR2MOfvGBo")
 
 # 全局变量存储对话历史
 conversation_history = []

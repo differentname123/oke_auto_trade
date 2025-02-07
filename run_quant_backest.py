@@ -940,7 +940,7 @@ def detail_backtest():
     timeout_limit = 1000
     sell_time_diff_step = 100
     sell_time_diff_start = 100
-    sell_time_diff_end = 10000
+    sell_time_diff_end = 1000
     max_sell_time_diff_list = [x for x in range(sell_time_diff_start, sell_time_diff_end, sell_time_diff_step)]
     # 为了覆盖更大范围，追加一个极大的阈值
     max_sell_time_diff_list.append(1000000)
@@ -1416,7 +1416,7 @@ def example():
                       'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv']
 
     # 示例-1：根据统一的数据获取好的策略，然后再获取详细的结果
-    # get_good_strategy()
+    get_good_strategy()
 
     # 示例0:更加详细的回测考虑超时的处理
     detail_backtest()

@@ -1,5 +1,7 @@
 import asyncio
+import os
 
+import numpy as np
 import pandas as pd
 import websockets
 import json
@@ -234,8 +236,77 @@ def select_best_rows_in_ranges(df, range_size, sort_key, range_key='total_count'
 
     return result_df
 
+def choose_good_strategy():
+    # 找到temp下面所有包含False的文件
+    file_list = os.listdir('temp')
+    file_list = [file for file in file_list if 'True' in file and INSTRUMENT in file and '.csv_start_period-1_end_period-5000_step-5' in file and '1m' in file and '0' in file]
+    df_list = []
+    for file in file_list:
+        df = pd.read_csv(f'temp/{file}')
+        if df.shape[0] < 1000000:
+            continue
+
+        df['filename'] = file.split('_')[5]
+        # 过滤掉avg_profit_rate小于0的数据
+        df['reverse_profit_rate'] = df['profit_rate'] * -1
+        df['reverse_net_profit_rate'] = df['reverse_profit_rate'] - df['cost_rate']
+        df['reverse_avg_profit_rate'] = round(df['reverse_net_profit_rate'] / df['kai_count'] * 100, 4)
+        # df['reverse_avg_profit_rate'] = 0
+        # df['avg_profit_rate'] = 0
+        # 筛选出reverse_avg_profit_rate大于0的数据或者avg_profit_rate大于0的数据
+        df = df[(df['reverse_avg_profit_rate'] > 0) | (df['avg_profit_rate'] > 0)]
+        df_list.append(df)
+    signal_data_df = pd.concat(df_list)
+    signal_data_df['score'] = signal_data_df['avg_profit_rate'] / signal_data_df['max_pin_count']
+    signal_data_df['score1'] = signal_data_df['avg_profit_rate'] / (signal_data_df['hold_time_mean'] + 20) * 1000
+    signal_data_df['score2'] = signal_data_df['avg_profit_rate'] / (signal_data_df['hold_time_mean'] + 20) * 1000 * (signal_data_df['trade_rate'] + 0.001)
+    signal_data_df['score3'] = signal_data_df['avg_profit_rate'] * (signal_data_df['trade_rate'] + 0.0001)
+
+    temp = pd.merge(df_list[0], df_list[1], on=['kai_side', 'kai_column', 'pin_column'], how='inner')
+    temp['avg_profit_rate_min'] = temp[['avg_profit_rate_x', 'avg_profit_rate_y']].min(axis=1)
+    temp['avg_profit_rate_mean'] = temp[['avg_profit_rate_x', 'avg_profit_rate_y']].mean(axis=1)
+    temp['avg_profit_rate_plus'] = temp['avg_profit_rate_x'] + temp['avg_profit_rate_y']
+    temp['avg_profit_rate_mult'] = np.where(
+        (temp['avg_profit_rate_x'] < 0) & (temp['avg_profit_rate_y'] < 0),
+        # 条件：avg_profit_rate_x 和 avg_profit_rate_y 都小于 0
+        0,  # 如果条件为真，则赋值为 0
+        temp['avg_profit_rate_x'] * temp['avg_profit_rate_y']  # 如果条件为假，则进行正常的乘法运算
+    )
+
+    temp['reverse_avg_profit_rate_min'] = temp[['reverse_avg_profit_rate_x', 'reverse_avg_profit_rate_y']].min(axis=1)
+    temp['reverse_avg_profit_rate_mean'] = temp[['reverse_avg_profit_rate_x', 'reverse_avg_profit_rate_y']].mean(axis=1)
+    temp['reverse_avg_profit_rate_plus'] = temp['reverse_avg_profit_rate_x'] + temp['reverse_avg_profit_rate_y']
+    temp['reverse_avg_profit_rate_mult'] = np.where(
+        (temp['reverse_avg_profit_rate_x'] < 0) & (temp['reverse_avg_profit_rate_y'] < 0),
+        # 条件：reverse_avg_profit_rate_x 和 reverse_avg_profit_rate_y 都小于 0
+        0,  # 如果条件为真，则赋值为 0
+        temp['reverse_avg_profit_rate_x'] * temp['reverse_avg_profit_rate_y']  # 如果条件为假，则进行正常的乘法运算
+    )
+    temp['net_profit_rate_min'] = temp[['net_profit_rate_x', 'net_profit_rate_y']].min(axis=1)
+    temp['net_profit_rate_mean'] = temp[['net_profit_rate_x', 'net_profit_rate_y']].mean(axis=1)
+    temp['net_profit_rate_plus'] = temp['net_profit_rate_x'] + temp['net_profit_rate_y']
+    temp['net_profit_rate_mult'] = np.where(
+        (temp['net_profit_rate_x'] < 0) & (temp['net_profit_rate_y'] < 0),
+        # 条件：net_profit_rate_x 和 net_profit_rate_y 都小于 0
+        0,  # 如果条件为真，则赋值为 0
+        temp['net_profit_rate_x'] * temp['net_profit_rate_y']  # 如果条件为假，则进行正常的乘法运算
+    )
+    temp['reverse_net_profit_rate_min'] = temp[['reverse_net_profit_rate_x', 'reverse_net_profit_rate_y']].min(axis=1)
+    temp['reverse_net_profit_rate_mean'] = temp[['reverse_net_profit_rate_x', 'reverse_net_profit_rate_y']].mean(axis=1)
+    temp['reverse_net_profit_rate_plus'] = temp['reverse_net_profit_rate_x'] + temp['reverse_net_profit_rate_y']
+    temp['reverse_net_profit_rate_mult'] = np.where(
+        (temp['reverse_net_profit_rate_x'] < 0) & (temp['reverse_net_profit_rate_y'] < 0),
+        # 条件：reverse_net_profit_rate_x 和 reverse_net_profit_rate_y 都小于 0
+        0,  # 如果条件为真，则赋值为 0
+        temp['reverse_net_profit_rate_x'] * temp['reverse_net_profit_rate_y']  # 如果条件为假，则进行正常的乘法运算
+    )
+
+    temp = temp[(temp['avg_profit_rate_min'] > 0) | (temp['reverse_avg_profit_rate_min'] > 0)]
+    return temp
+
 async def main():
-    good_strategy_df = pd.read_csv('temp/temp.csv')
+    # good_strategy_df1 = pd.read_csv('temp/temp.csv')
+    good_strategy_df = choose_good_strategy()
     # 筛选出kai_side为long的数据
     long_good_strategy_df = good_strategy_df[good_strategy_df['kai_side'] == 'long']
     short_good_strategy_df = good_strategy_df[good_strategy_df['kai_side'] == 'short']
@@ -250,6 +321,7 @@ async def main():
     # short_good_select_df['kai_column'] = '1_low_short'
     # short_good_select_df['pin_column'] = '1_high_long'
     final_good_df = pd.concat([long_good_select_df, short_good_select_df])
+    print(f'final_good_df shape: {final_good_df.shape[0]}')
     # 遍历final_good_df，将kai_column和pin_column一一对应
     for index, row in final_good_df.iterrows():
         kai_column = row['kai_column']

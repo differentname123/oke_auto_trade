@@ -81,7 +81,7 @@ def place_order(inst_id, side, order_type, size, price=None, tp_price=None):
 
 if __name__ == "__main__":
     offset = 25  # 下单价格的偏移量
-    profit = 25
+    profit = 100
     count = 1000
     while True:
         count -= 1

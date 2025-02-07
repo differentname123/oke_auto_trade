@@ -806,9 +806,6 @@ def place_order(inst_id, side, order_type, size, price=None, tp_price=None):
 
         # 调用下单接口
         order = tradeAPI.place_order(**order_params)
-        # 将 order 增量写入到文件
-        with open("order_history.txt", "a") as f:
-            f.write(str(order) + "\n")
 
         print(f"{side.upper()} 订单成功：", order)
         return order
