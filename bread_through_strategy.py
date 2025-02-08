@@ -71,7 +71,7 @@ def calculate_max_sequence(kai_data_df):
             current_loss = 0
             trade_count = 0 # 当盈利出现时，重置亏损和交易计数
 
-    return max_loss, start_index, end_index, trade_count
+    return max_loss, start_index, end_index, max_sequence_length
 
 
 def calculate_max_profit(kai_data_df):
@@ -104,7 +104,7 @@ def calculate_max_profit(kai_data_df):
             current_profit = 0
             trade_count = 0 # 当亏损出现时，重置盈利和交易计数
 
-    return max_profit, start_index, end_index, trade_count
+    return max_profit, start_index, end_index, max_sequence_length
 
 
 def get_detail_backtest_result(df, kai_column, pin_column, signal_cache, is_filter=True):
@@ -158,13 +158,15 @@ def get_detail_backtest_result(df, kai_column, pin_column, signal_cache, is_filt
         kai_data_df['profit'] = ((kai_data_df['kai_price'] - kai_data_df['pin_price']) /
                                  kai_data_df['pin_price'] * 100).round(4)
     kai_data_df['true_profit'] = kai_data_df['profit'] - 0.07
-    # 获取kai_data_df['true_profit']的最大值和最小值
-    max_single_profit = kai_data_df['true_profit'].max()
-    min_single_profit = kai_data_df['true_profit'].min()
+
 
     # 如果is_filter为True，则相同pin_time的交易只保留最早的一笔
     if is_filter:
         kai_data_df = kai_data_df.sort_values('timestamp').drop_duplicates('pin_time', keep='first')
+
+    # 获取kai_data_df['true_profit']的最大值和最小值
+    max_single_profit = kai_data_df['true_profit'].max()
+    min_single_profit = kai_data_df['true_profit'].min()
 
     # 计算最大连续亏损
     max_loss, max_loss_start_idx, max_loss_end_idx, loss_trade_count = calculate_max_sequence(kai_data_df)
@@ -244,7 +246,6 @@ def process_tasks(task_chunk, df, is_filter):
     print(f"处理 {len(task_chunk)*2} 个任务，耗时 {time.time()-start_time:.2f} 秒。")
     return results
 
-
 def backtest_breakthrough_strategy(df, output_path, start_period, end_period, step, is_filter):
     """
     回测函数：基于原始数据 df 和指定周期范围，
@@ -255,9 +256,11 @@ def backtest_breakthrough_strategy(df, output_path, start_period, end_period, st
     long_columns = [f"{period}_high_long" for period in period_list]
     short_columns = [f"{period}_low_short" for period in period_list]
     task_list = list(product(long_columns, short_columns))
+    # 将task_list打乱顺序
+    np.random.shuffle(task_list)
 
     # 将任务分块，每块包含一定数量的任务
-    chunk_size = 200
+    chunk_size = 100
     task_chunks = [task_list[i:i + chunk_size] for i in range(0, len(task_list), chunk_size)]
     print(f'共有 {len(task_list)} 个任务，分为 {len(task_chunks)} 块。')
 
@@ -272,7 +275,6 @@ def backtest_breakthrough_strategy(df, output_path, start_period, end_period, st
     statistic_df.to_csv(output_path, index=False)
     print(f'结果已保存到 {output_path}')
 
-
 def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
     """
     主函数：
@@ -284,14 +286,14 @@ def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
 
     start_period = 1
     end_period = 3000
-    step = 1
+    step = 2
     is_filter = True
 
 
     # # debug
     # df = pd.read_csv(data_path)
-    # long_column = '4811_low_short'
-    # short_column = '36_high_long'
+    # long_column = '2584_high_long'
+    # short_column = '2849_low_short'
     # signal_cache = {}
     # # df = df[-50000:]
     # get_detail_backtest_result(df, long_column, short_column, signal_cache, is_filter)
@@ -308,24 +310,12 @@ def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
     else:
         print(f'已存在 {output_path}')
 
-    is_filter = True
-    output_path = f"temp/statistic_{base_name}_start_period-{start_period}_end_period-{end_period}_step-{step}_is_filter-{is_filter}.csv"
-    # backtest_breakthrough_strategy(df, output_path, start_period, end_period, step, is_filter)
-
-    if not os.path.exists(output_path):
-        df = pd.read_csv(data_path)
-        needed_columns = ['timestamp', 'open', 'high', 'low', 'close']
-        df = df[needed_columns]
-        backtest_breakthrough_strategy(df, output_path, start_period, end_period, step, is_filter)
-    else:
-        print(f'已存在 {output_path}')
-
 
 def example():
     start_time = time.time()
 
     data_path_list = [
-        'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv',
+        'kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv',
         'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv',
         'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv',
         'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv',
