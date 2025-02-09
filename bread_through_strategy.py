@@ -15,6 +15,7 @@ from itertools import product
 
 import numpy as np
 import pandas as pd
+from numba import njit
 
 
 def compute_signal(df, col_name):
@@ -276,7 +277,7 @@ def backtest_breakthrough_strategy(df, base_name, start_period, end_period, step
         print(f'共有 {len(task_chunk)} 个任务，分为 {len(task_chunks)} 块。')
 
         statistic_dict_list = []
-        pool_processes = max(1, multiprocessing.cpu_count() - 3)
+        pool_processes = max(1, multiprocessing.cpu_count())
         with multiprocessing.Pool(processes=pool_processes) as pool:
             results = pool.starmap(process_tasks, [(chunk, df, is_filter) for chunk in task_chunks])
         for res in results:
@@ -321,7 +322,132 @@ def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
     #     print(f'已存在 {output_path}')
 
 
+def optimal_leverage_opt(max_loss_rate, num_losses, max_profit_rate, num_profits,
+                         max_single_loss, max_single_profit, other_rate, other_count,
+                         L_min=1):
+    """
+    利用向量化计算不同杠杆下的最终收益，并返回使最终收益最大的杠杆值和对应收益。
+    参数含义与原函数一致，不再赘述。
+    """
+    # 将百分比转换为小数
+    max_loss_rate = max_loss_rate / 100.0
+    max_profit_rate = max_profit_rate / 100.0
+    max_single_loss = max_single_loss / 100.0
+
+    # 计算每次交易亏损率
+    r_loss = max_loss_rate / num_losses
+
+    # 计算避免爆仓的最大杠杆
+    L_max = abs(1 / max_single_loss)
+
+    # 直接构造整数候选杠杆序列
+    L_values = np.arange(L_min, int(L_max) + 1, dtype=float)
+
+    # 向量化计算最终收益
+    # 计算因亏损累计的收益（先计算亏损部分）
+    after_loss = (1 + L_values * r_loss) ** num_losses
+    after_loss *= (1 + L_values * max_single_loss)
+
+    # 对于 after_loss<=0 的情况认为爆仓，收益记为 0
+    valid = after_loss > 0
+    final_balance = np.zeros_like(L_values)
+
+    if np.any(valid):
+        after_gain = after_loss[valid] * (1 + L_values[valid] * max_profit_rate)
+        after_gain *= (1 + L_values[valid] * max_single_profit)
+        final_balance[valid] = after_gain * (1 + L_values[valid] * other_rate)
+
+    # 找到最佳杠杆对应的索引
+    optimal_idx = np.argmax(final_balance)
+    optimal_L = int(L_values[optimal_idx])
+    max_balance = final_balance[optimal_idx]
+
+    return optimal_L, max_balance
+
+def choose_good_strategy():
+    # df = pd.read_csv('temp/temp.csv')
+    start_time = time.time()
+    # 找到temp下面所有包含False的文件
+    file_list = os.listdir('temp')
+    file_list = [file for file in file_list if 'True' in file and 'BTC' in file and '-USDT-SWAP.csv_start_period-1_end_period-3000_step-2_is_filter-True' in file and '1m' in file and '0000' in file]
+    df_list = []
+    for file in file_list:
+        df = pd.read_csv(f'temp/{file}')
+        # if df.shape[0] < 1000000:
+        #     continue
+
+        df['filename'] = file.split('_')[5]
+        # 过滤掉avg_profit_rate小于0的数据
+        df['reverse_profit_rate'] = df['profit_rate'] * -1
+        df['reverse_net_profit_rate'] = df['reverse_profit_rate'] - df['cost_rate']
+        df['reverse_avg_profit_rate'] = round(df['reverse_net_profit_rate'] / df['kai_count'] * 100, 4)
+        df['reverse_avg_profit_rate'] = 0
+        # df['avg_profit_rate'] = 0
+        # 筛选出reverse_avg_profit_rate大于0的数据或者avg_profit_rate大于0的数据
+        df = df[(df['reverse_avg_profit_rate'] > 0) | (df['avg_profit_rate'] > 0)]
+        df_list.append(df)
+    signal_data_df = pd.concat(df_list)
+    signal_data_df['score'] = signal_data_df['avg_profit_rate']
+    signal_data_df['score1'] = signal_data_df['avg_profit_rate'] / (signal_data_df['hold_time_mean'] + 20) * 1000
+    signal_data_df['score2'] = signal_data_df['avg_profit_rate'] / (signal_data_df['hold_time_mean'] + 20) * 1000 * (signal_data_df['trade_rate'] + 0.001)
+    signal_data_df['score3'] = signal_data_df['avg_profit_rate'] * (signal_data_df['trade_rate'] + 0.0001)
+    print(f'耗时 {time.time() - start_time:.2f} 秒。 长度 {signal_data_df.shape[0]}')
+    # 对 DataFrame 每一行计算 optimal_leverage
+    signal_data_df[['optimal_L', 'max_balance']] = signal_data_df.apply(
+        lambda row: optimal_leverage_opt(
+            row['max_consecutive_loss'], row['max_loss_trade_count'], row['max_consecutive_profit'], row['max_profit_trade_count'],
+            row['min_profit'], row['max_profit'], row['net_profit_rate'], row['kai_count']
+        ), axis=1, result_type='expand'
+    )
+
+    print(f'耗时 {time.time() - start_time:.2f} 秒。')
+    signal_data_df.to_csv('temp/temp.csv', index=False)
+
+    # temp = pd.merge(df_list[0], df_list[1], on=['kai_side', 'kai_column', 'pin_column'], how='inner')
+    # temp['avg_profit_rate_min'] = temp[['avg_profit_rate_x', 'avg_profit_rate_y']].min(axis=1)
+    # temp['avg_profit_rate_mean'] = temp[['avg_profit_rate_x', 'avg_profit_rate_y']].mean(axis=1)
+    # temp['avg_profit_rate_plus'] = temp['avg_profit_rate_x'] + temp['avg_profit_rate_y']
+    # temp['avg_profit_rate_mult'] = np.where(
+    #     (temp['avg_profit_rate_x'] < 0) & (temp['avg_profit_rate_y'] < 0),
+    #     # 条件：avg_profit_rate_x 和 avg_profit_rate_y 都小于 0
+    #     0,  # 如果条件为真，则赋值为 0
+    #     temp['avg_profit_rate_x'] * temp['avg_profit_rate_y']  # 如果条件为假，则进行正常的乘法运算
+    # )
+    #
+    # temp['reverse_avg_profit_rate_min'] = temp[['reverse_avg_profit_rate_x', 'reverse_avg_profit_rate_y']].min(axis=1)
+    # temp['reverse_avg_profit_rate_mean'] = temp[['reverse_avg_profit_rate_x', 'reverse_avg_profit_rate_y']].mean(axis=1)
+    # temp['reverse_avg_profit_rate_plus'] = temp['reverse_avg_profit_rate_x'] + temp['reverse_avg_profit_rate_y']
+    # temp['reverse_avg_profit_rate_mult'] = np.where(
+    #     (temp['reverse_avg_profit_rate_x'] < 0) & (temp['reverse_avg_profit_rate_y'] < 0),
+    #     # 条件：reverse_avg_profit_rate_x 和 reverse_avg_profit_rate_y 都小于 0
+    #     0,  # 如果条件为真，则赋值为 0
+    #     temp['reverse_avg_profit_rate_x'] * temp['reverse_avg_profit_rate_y']  # 如果条件为假，则进行正常的乘法运算
+    # )
+    # temp['net_profit_rate_min'] = temp[['net_profit_rate_x', 'net_profit_rate_y']].min(axis=1)
+    # temp['net_profit_rate_mean'] = temp[['net_profit_rate_x', 'net_profit_rate_y']].mean(axis=1)
+    # temp['net_profit_rate_plus'] = temp['net_profit_rate_x'] + temp['net_profit_rate_y']
+    # temp['net_profit_rate_mult'] = np.where(
+    #     (temp['net_profit_rate_x'] < 0) & (temp['net_profit_rate_y'] < 0),
+    #     # 条件：net_profit_rate_x 和 net_profit_rate_y 都小于 0
+    #     0,  # 如果条件为真，则赋值为 0
+    #     temp['net_profit_rate_x'] * temp['net_profit_rate_y']  # 如果条件为假，则进行正常的乘法运算
+    # )
+    # temp['reverse_net_profit_rate_min'] = temp[['reverse_net_profit_rate_x', 'reverse_net_profit_rate_y']].min(axis=1)
+    # temp['reverse_net_profit_rate_mean'] = temp[['reverse_net_profit_rate_x', 'reverse_net_profit_rate_y']].mean(axis=1)
+    # temp['reverse_net_profit_rate_plus'] = temp['reverse_net_profit_rate_x'] + temp['reverse_net_profit_rate_y']
+    # temp['reverse_net_profit_rate_mult'] = np.where(
+    #     (temp['reverse_net_profit_rate_x'] < 0) & (temp['reverse_net_profit_rate_y'] < 0),
+    #     # 条件：reverse_net_profit_rate_x 和 reverse_net_profit_rate_y 都小于 0
+    #     0,  # 如果条件为真，则赋值为 0
+    #     temp['reverse_net_profit_rate_x'] * temp['reverse_net_profit_rate_y']  # 如果条件为假，则进行正常的乘法运算
+    # )
+    #
+    # temp = temp[(temp['avg_profit_rate_min'] > 0) | (temp['reverse_avg_profit_rate_min'] > 0)]
+    # return temp
+
+
 def example():
+    # choose_good_strategy()
     start_time = time.time()
 
     data_path_list = [
