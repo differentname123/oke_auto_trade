@@ -246,34 +246,45 @@ def process_tasks(task_chunk, df, is_filter):
     print(f"处理 {len(task_chunk)*2} 个任务，耗时 {time.time()-start_time:.2f} 秒。")
     return results
 
-def backtest_breakthrough_strategy(df, output_path, start_period, end_period, step, is_filter):
+def backtest_breakthrough_strategy(df, base_name, start_period, end_period, step, is_filter):
     """
     回测函数：基于原始数据 df 和指定周期范围，
     生成所有 (kai, pin) 信号对（kai 信号命名为 "{period}_high_long"，pin 信号命名为 "{period}_low_short"），
     使用多进程并行调用 process_tasks() 完成回测，并将统计结果保存到 CSV 文件。
     """
+
+
     period_list = range(start_period, end_period, step)
     long_columns = [f"{period}_high_long" for period in period_list]
     short_columns = [f"{period}_low_short" for period in period_list]
     task_list = list(product(long_columns, short_columns))
-    # 将task_list打乱顺序
-    np.random.shuffle(task_list)
+    big_chunk_size = 200000
+    big_task_chunks = [task_list[i:i + big_chunk_size] for i in range(0, len(task_list), big_chunk_size)]
+    print(f'共有 {len(task_list)} 个任务，分为 {len(big_task_chunks)} 大块。')
+    for i, task_chunk in enumerate(big_task_chunks):
+        # 将task_list打乱顺序
+        output_path = f"temp/statistic_{base_name}_start_period-{start_period}_end_period-{end_period}_step-{step}_is_filter-{is_filter}_part{i}.csv"
+        if os.path.exists(output_path):
+            print(f'已存在 {output_path}')
+            continue
+        task_chunk = task_chunk.copy()
+        np.random.shuffle(task_chunk)
 
-    # 将任务分块，每块包含一定数量的任务
-    chunk_size = 100
-    task_chunks = [task_list[i:i + chunk_size] for i in range(0, len(task_list), chunk_size)]
-    print(f'共有 {len(task_list)} 个任务，分为 {len(task_chunks)} 块。')
+        # 将任务分块，每块包含一定数量的任务
+        chunk_size = 200
+        task_chunks = [task_chunk[i:i + chunk_size] for i in range(0, len(task_chunk), chunk_size)]
+        print(f'共有 {len(task_chunk)} 个任务，分为 {len(task_chunks)} 块。')
 
-    statistic_dict_list = []
-    pool_processes = max(1, multiprocessing.cpu_count())
-    with multiprocessing.Pool(processes=pool_processes) as pool:
-        results = pool.starmap(process_tasks, [(chunk, df, is_filter) for chunk in task_chunks])
-    for res in results:
-        statistic_dict_list.extend(res)
+        statistic_dict_list = []
+        pool_processes = max(1, multiprocessing.cpu_count() - 3)
+        with multiprocessing.Pool(processes=pool_processes) as pool:
+            results = pool.starmap(process_tasks, [(chunk, df, is_filter) for chunk in task_chunks])
+        for res in results:
+            statistic_dict_list.extend(res)
 
-    statistic_df = pd.DataFrame(statistic_dict_list)
-    statistic_df.to_csv(output_path, index=False)
-    print(f'结果已保存到 {output_path}')
+        statistic_df = pd.DataFrame(statistic_dict_list)
+        statistic_df.to_csv(output_path, index=False)
+        print(f'结果已保存到 {output_path}')
 
 def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
     """
@@ -300,34 +311,39 @@ def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
 
 
 
-    output_path = f"temp/statistic_{base_name}_start_period-{start_period}_end_period-{end_period}_step-{step}_is_filter-{is_filter}.csv"
-    if not os.path.exists(output_path):
-        df = pd.read_csv(data_path)
-        needed_columns = ['timestamp', 'open', 'high', 'low', 'close']
-        df = df[needed_columns]
-        print(f'开始回测 {base_name} ... 长度 {df.shape[0]}')
-        backtest_breakthrough_strategy(df, output_path, start_period, end_period, step, is_filter)
-    else:
-        print(f'已存在 {output_path}')
+    # if not os.path.exists(output_path):
+    df = pd.read_csv(data_path)
+    needed_columns = ['timestamp', 'open', 'high', 'low', 'close']
+    df = df[needed_columns]
+    print(f'开始回测 {base_name} ... 长度 {df.shape[0]} 当前时间 {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}')
+    backtest_breakthrough_strategy(df, base_name, start_period, end_period, step, is_filter)
+    # else:
+    #     print(f'已存在 {output_path}')
 
 
 def example():
     start_time = time.time()
 
     data_path_list = [
-        'kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv',
-        'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv',
-        'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv',
-        'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv',
-        'kline_data/origin_data_1m_10000000_DOGE-USDT-SWAP.csv',
-        'kline_data/origin_data_1m_10000000_XRP-USDT-SWAP.csv',
-        'kline_data/origin_data_1m_10000000_PEPE-USDT-SWAP.csv',
-        'kline_data/origin_data_1m_86000_BTC-USDT-SWAP.csv',
+        # 'kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv',
+        # 'kline_data/origin_data_1m_86000_BTC-USDT-SWAP.csv',
+
+        # 'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv',
         'kline_data/origin_data_1m_86000_ETH-USDT-SWAP.csv',
+
+        'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv',
         'kline_data/origin_data_1m_86000_SOL-USDT-SWAP.csv',
+
+        'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv',
         'kline_data/origin_data_1m_86000_TON-USDT-SWAP.csv',
+
+        'kline_data/origin_data_1m_10000000_DOGE-USDT-SWAP.csv',
         'kline_data/origin_data_1m_86000_DOGE-USDT-SWAP.csv',
+
+        'kline_data/origin_data_1m_10000000_XRP-USDT-SWAP.csv',
         'kline_data/origin_data_1m_86000_XRP-USDT-SWAP.csv',
+
+        'kline_data/origin_data_1m_10000000_PEPE-USDT-SWAP.csv',
         'kline_data/origin_data_1m_86000_PEPE-USDT-SWAP.csv'
     ]
     for data_path in data_path_list:
