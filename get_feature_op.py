@@ -1942,12 +1942,12 @@ def download_data():
 
     backtest_path = 'kline_data'
     base_file_path = 'origin_data.csv'
-    is_reload = False
+    is_reload = True
     inst_id_list = [ 'BTC-USDT-SWAP','ETH-USDT-SWAP','SOL-USDT-SWAP','TON-USDT-SWAP', 'DOGE-USDT-SWAP', 'XRP-USDT-SWAP', 'PEPE-USDT-SWAP']
     if not os.path.exists(backtest_path):
         os.makedirs(backtest_path)
-    bar_list = ['1m', '1s', '5m', '15m', '30m', '1H', '4H']
-    max_candles_list = [86000]
+    bar_list = ['1m']
+    max_candles_list = [10000]
     for max_candles in max_candles_list:
         for bar in bar_list:
             for inst_id in inst_id_list:

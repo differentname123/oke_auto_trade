@@ -86,6 +86,7 @@ def calculate_max_profit(kai_data_df):
     temp_start_index = None
     end_index = None
     trade_count = 0  # 初始化交易计数器
+    max_sequence_length = 0
 
     for i, profit in enumerate(true_profit_series):
         if current_profit == 0:
@@ -194,6 +195,17 @@ def get_detail_backtest_result(df, kai_column, pin_column, signal_cache, is_filt
     # max_pin_count = pin_time_counts.max() if not pin_time_counts.empty else 0
     # avg_pin_time_counts = pin_time_counts.mean() if not pin_time_counts.empty else 0
 
+    # 分别筛选出true_profit大于0和小于0的数据
+    profit_df = kai_data_df[kai_data_df['true_profit'] > 0]
+    loss_df = kai_data_df[kai_data_df['true_profit'] < 0]
+
+    loss_rate = loss_df.shape[0] / kai_data_df.shape[0] if kai_data_df.shape[0] > 0 else 0
+
+    loss_time = loss_df['hold_time'].sum() if not loss_df.empty else 0
+    profit_time = profit_df['hold_time'].sum() if not profit_df.empty else 0
+
+    loss_time_rate = loss_time / (loss_time + profit_time) if (loss_time + profit_time) > 0 else 0
+
     # 生成统计数据字典 statistic_dict
     statistic_dict = {
         'kai_side': kai_side,
@@ -203,6 +215,8 @@ def get_detail_backtest_result(df, kai_column, pin_column, signal_cache, is_filt
         'kai_count': kai_data_df.shape[0],
         'trade_rate': round(kai_data_df.shape[0] / df.shape[0], 4) if df.shape[0] > 0 else 0,
         'hold_time_mean': kai_data_df['hold_time'].mean() if not kai_data_df.empty else 0,
+        'loss_rate': loss_rate,
+        'loss_time_rate': loss_time_rate,
         'profit_rate': kai_data_df['profit'].sum(),
         'max_profit': max_single_profit,
         'min_profit': min_single_profit,
@@ -229,6 +243,120 @@ def get_detail_backtest_result(df, kai_column, pin_column, signal_cache, is_filt
     return kai_data_df, statistic_dict
 
 
+def get_detail_backtest_result_op(df, kai_column, pin_column, signal_cache, is_filter=True):
+    """
+    根据传入的信号列（开仓信号 kai_column 与平仓信号 pin_column），在原始 df 上动态生成信号，
+    进行回测计算，并返回对应的明细 DataFrame 和统计信息（statistic_dict）。
+    """
+
+    kai_side = 'long' if 'long' in kai_column else 'short'
+
+    # 统一处理信号计算，减少重复代码
+    def get_signal_and_price(column):
+        if column in signal_cache:
+            return signal_cache[column]
+        signal_data = compute_signal(df, column)
+        signal_cache[column] = signal_data
+        return signal_data
+
+    kai_signal, kai_price_series = get_signal_and_price(kai_column)
+    pin_signal, pin_price_series = get_signal_and_price(pin_column)
+
+    # 直接索引筛选，无需额外 copy
+    kai_data_df = df.loc[kai_signal].copy()
+    pin_data_df = df.loc[pin_signal]
+
+    # 添加价格列
+    kai_data_df['kai_price'] = kai_price_series[kai_signal].values
+    pin_data_df = pin_data_df.assign(pin_price=pin_price_series[pin_signal].values)
+
+    # 使用 searchsorted 进行索引匹配
+    kai_data_df['pin_index'] = pin_data_df.index.searchsorted(kai_data_df.index, side='right')
+    valid_mask = kai_data_df['pin_index'] < len(pin_data_df)
+    kai_data_df = kai_data_df.loc[valid_mask]
+    kai_data_df['kai_side'] = kai_side
+
+    matched_pin = pin_data_df.iloc[kai_data_df['pin_index'].values]
+    kai_data_df['pin_price'] = matched_pin['pin_price'].values
+    kai_data_df['pin_time'] = matched_pin['timestamp'].values
+    kai_data_df['hold_time'] = matched_pin.index.values - kai_data_df.index.values
+
+    # 向量化计算收益率
+    if kai_side == 'long':
+        kai_data_df['profit'] = ((kai_data_df['pin_price'] - kai_data_df['kai_price']) /
+                                 kai_data_df['kai_price'] * 100).round(4)
+    else:
+        kai_data_df['profit'] = ((kai_data_df['kai_price'] - kai_data_df['pin_price']) /
+                                 kai_data_df['pin_price'] * 100).round(4)
+
+    kai_data_df['true_profit'] = kai_data_df['profit'] - 0.07
+
+    # 过滤重复平仓时间的交易
+    if is_filter:
+        kai_data_df = kai_data_df.sort_values('timestamp').drop_duplicates('pin_time', keep='first')
+
+    # 计算统计指标
+    trade_count = kai_data_df.shape[0]
+    total_count = df.shape[0]
+    profit_sum = kai_data_df['profit'].sum()
+
+    max_single_profit = kai_data_df['true_profit'].max()
+    min_single_profit = kai_data_df['true_profit'].min()
+
+    # 计算最大连续亏损
+    max_loss, max_loss_start_idx, max_loss_end_idx, loss_trade_count = calculate_max_sequence(kai_data_df)
+    max_loss_start_time = kai_data_df.loc[max_loss_start_idx, 'timestamp'] if max_loss_start_idx is not None else None
+    max_loss_end_time = kai_data_df.loc[max_loss_end_idx, 'timestamp'] if max_loss_end_idx is not None else None
+    max_loss_hold_time = (max_loss_end_idx - max_loss_start_idx
+                          if max_loss_start_idx is not None and max_loss_end_idx is not None else None)
+
+    # 计算最大连续盈利
+    max_profit, max_profit_start_idx, max_profit_end_idx, profit_trade_count = calculate_max_profit(kai_data_df)
+    max_profit_start_time = kai_data_df.loc[max_profit_start_idx, 'timestamp'] if max_profit_start_idx is not None else None
+    max_profit_end_time = kai_data_df.loc[max_profit_end_idx, 'timestamp'] if max_profit_end_idx is not None else None
+    max_profit_hold_time = (max_profit_end_idx - max_profit_start_idx
+                            if max_profit_start_idx is not None and max_profit_end_idx is not None else None)
+
+    # 盈亏分布计算
+    profit_df = kai_data_df[kai_data_df['true_profit'] > 0]
+    loss_df = kai_data_df[kai_data_df['true_profit'] < 0]
+
+    loss_rate = loss_df.shape[0] / trade_count if trade_count > 0 else 0
+    loss_time = loss_df['hold_time'].sum() if not loss_df.empty else 0
+    profit_time = profit_df['hold_time'].sum() if not profit_df.empty else 0
+    loss_time_rate = loss_time / (loss_time + profit_time) if (loss_time + profit_time) > 0 else 0
+
+    # 生成统计数据字典
+    statistic_dict = {
+        'kai_side': kai_side,
+        'kai_column': kai_column,
+        'pin_column': pin_column,
+        'total_count': total_count,
+        'kai_count': trade_count,
+        'trade_rate': round(trade_count / total_count, 4) if total_count > 0 else 0,
+        'hold_time_mean': kai_data_df['hold_time'].mean() if trade_count > 0 else 0,
+        'loss_rate': loss_rate,
+        'loss_time_rate': loss_time_rate,
+        'profit_rate': profit_sum,
+        'max_profit': max_single_profit,
+        'min_profit': min_single_profit,
+        'cost_rate': trade_count * 0.07,
+        'net_profit_rate': profit_sum - trade_count * 0.07,
+        'avg_profit_rate': round((profit_sum - trade_count * 0.07) / trade_count * 100, 4) if trade_count > 0 else 0,
+        'max_consecutive_loss': round(max_loss, 4),
+        'max_loss_trade_count': loss_trade_count,
+        'max_loss_hold_time': max_loss_hold_time,
+        'max_loss_start_time': max_loss_start_time,
+        'max_loss_end_time': max_loss_end_time,
+        'max_consecutive_profit': round(max_profit, 4),
+        'max_profit_trade_count': profit_trade_count,
+        'max_profit_hold_time': max_profit_hold_time,
+        'max_profit_start_time': max_profit_start_time,
+        'max_profit_end_time': max_profit_end_time,
+    }
+
+    return kai_data_df, statistic_dict
+
 def process_tasks(task_chunk, df, is_filter):
     """
     处理一块任务（每块任务包含 chunk_size 个任务）。
@@ -239,10 +367,10 @@ def process_tasks(task_chunk, df, is_filter):
     signal_cache = {}  # 同一进程内对信号结果进行缓存
     for long_column, short_column in task_chunk:
         # 对应一次做「开仓」回测
-        _, stat_long = get_detail_backtest_result(df, long_column, short_column, signal_cache, is_filter)
+        _, stat_long = get_detail_backtest_result_op(df, long_column, short_column, signal_cache, is_filter)
         results.append(stat_long)
         # 再做「开空」方向回测（此时互换信号）
-        _, stat_short = get_detail_backtest_result(df, short_column, long_column, signal_cache, is_filter)
+        _, stat_short = get_detail_backtest_result_op(df, short_column, long_column, signal_cache, is_filter)
         results.append(stat_short)
     print(f"处理 {len(task_chunk)*2} 个任务，耗时 {time.time()-start_time:.2f} 秒。")
     return results
@@ -259,7 +387,7 @@ def backtest_breakthrough_strategy(df, base_name, start_period, end_period, step
     long_columns = [f"{period}_high_long" for period in period_list]
     short_columns = [f"{period}_low_short" for period in period_list]
     task_list = list(product(long_columns, short_columns))
-    big_chunk_size = 200000
+    big_chunk_size = 100000
     big_task_chunks = [task_list[i:i + big_chunk_size] for i in range(0, len(task_list), big_chunk_size)]
     print(f'共有 {len(task_list)} 个任务，分为 {len(big_task_chunks)} 大块。')
     for i, task_chunk in enumerate(big_task_chunks):
@@ -272,9 +400,12 @@ def backtest_breakthrough_strategy(df, base_name, start_period, end_period, step
         np.random.shuffle(task_chunk)
 
         # 将任务分块，每块包含一定数量的任务
-        chunk_size = 200
+        chunk_size = 100
         task_chunks = [task_chunk[i:i + chunk_size] for i in range(0, len(task_chunk), chunk_size)]
         print(f'共有 {len(task_chunk)} 个任务，分为 {len(task_chunks)} 块。')
+
+        # # debug
+        # result = process_tasks(task_chunks[0], df, is_filter)
 
         statistic_dict_list = []
         pool_processes = max(1, multiprocessing.cpu_count())
@@ -285,7 +416,7 @@ def backtest_breakthrough_strategy(df, base_name, start_period, end_period, step
 
         statistic_df = pd.DataFrame(statistic_dict_list)
         statistic_df.to_csv(output_path, index=False)
-        print(f'结果已保存到 {output_path}')
+        print(f'结果已保存到 {output_path} 当前时间 {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}')
 
 def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
     """
@@ -297,7 +428,7 @@ def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
     base_name = os.path.basename(data_path)
 
     start_period = 1
-    end_period = 3000
+    end_period = 2000
     step = 2
     is_filter = True
 
@@ -312,14 +443,11 @@ def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
 
 
 
-    # if not os.path.exists(output_path):
     df = pd.read_csv(data_path)
     needed_columns = ['timestamp', 'open', 'high', 'low', 'close']
     df = df[needed_columns]
     print(f'开始回测 {base_name} ... 长度 {df.shape[0]} 当前时间 {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}')
     backtest_breakthrough_strategy(df, base_name, start_period, end_period, step, is_filter)
-    # else:
-    #     print(f'已存在 {output_path}')
 
 
 def optimal_leverage_opt(max_loss_rate, num_losses, max_profit_rate, num_profits,
@@ -364,97 +492,109 @@ def optimal_leverage_opt(max_loss_rate, num_losses, max_profit_rate, num_profits
 
     return optimal_L, max_balance
 
+def count_L():
+    file_list = os.listdir('temp')
+    file_list = [file for file in file_list if 'True' in file and '1m' in file and '3000' in file and 'withL' not in file]
+    for file in file_list:
+        print(f'开始处理 {file}')
+        out_file = file.replace('.csv', '_withL.csv')
+        if os.path.exists(f'temp/{out_file}'):
+            print(f'已存在 {out_file}')
+            continue
+        start_time = time.time()
+
+        try:
+            signal_data_df = pd.read_csv(f'temp/{file}')
+            signal_data_df[['optimal_L', 'max_balance']] = signal_data_df.apply(
+                lambda row: optimal_leverage_opt(
+                    row['max_consecutive_loss'], row['max_loss_trade_count'], row['max_consecutive_profit'],
+                    row['max_profit_trade_count'],
+                    row['min_profit'], row['max_profit'], row['net_profit_rate'], row['kai_count']
+                ), axis=1, result_type='expand'
+            )
+
+            signal_data_df['filename'] = file.split('_')[5]
+            signal_data_df.to_csv(f'temp/{out_file}')
+            print(f'{file} 耗时 {time.time() - start_time:.2f} 秒。 长度 {signal_data_df.shape[0]}')
+        except Exception as e:
+            pass
+
 def choose_good_strategy():
     # df = pd.read_csv('temp/temp.csv')
     start_time = time.time()
+    # count_L()
     # 找到temp下面所有包含False的文件
     file_list = os.listdir('temp')
-    file_list = [file for file in file_list if 'True' in file and 'BTC' in file and '-USDT-SWAP.csv_start_period-1_end_period-3000_step-2_is_filter-True' in file and '1m' in file and '0000' in file]
+    file_list = [file for file in file_list if 'True' in file and 'ETH' in file and '0' in file and '1m' in file and 'with' in file]
     df_list = []
+    df_map = {}
     for file in file_list:
+        file_key = file.split('_')[4]
         df = pd.read_csv(f'temp/{file}')
-        # if df.shape[0] < 1000000:
-        #     continue
 
         df['filename'] = file.split('_')[5]
-        # 过滤掉avg_profit_rate小于0的数据
-        df['reverse_profit_rate'] = df['profit_rate'] * -1
-        df['reverse_net_profit_rate'] = df['reverse_profit_rate'] - df['cost_rate']
-        df['reverse_avg_profit_rate'] = round(df['reverse_net_profit_rate'] / df['kai_count'] * 100, 4)
-        df['reverse_avg_profit_rate'] = 0
-        # df['avg_profit_rate'] = 0
-        # 筛选出reverse_avg_profit_rate大于0的数据或者avg_profit_rate大于0的数据
-        df = df[(df['reverse_avg_profit_rate'] > 0) | (df['avg_profit_rate'] > 0)]
+        df = df[(df['avg_profit_rate'] > 0)]
+        if file_key not in df_map:
+            df_map[file_key] = []
+        df['score'] = df['avg_profit_rate']
+        df['score1'] = df['avg_profit_rate'] / (df['hold_time_mean'] + 20) * 1000
+        df['score2'] = df['avg_profit_rate'] / (
+                    df['hold_time_mean'] + 20) * 1000 * (df['trade_rate'] + 0.001)
+        df['score3'] = df['avg_profit_rate'] * (df['trade_rate'] + 0.0001)
+        df_map[file_key].append(df)
+    for key in df_map:
+        df = pd.concat(df_map[key])
         df_list.append(df)
-    signal_data_df = pd.concat(df_list)
-    signal_data_df['score'] = signal_data_df['avg_profit_rate']
-    signal_data_df['score1'] = signal_data_df['avg_profit_rate'] / (signal_data_df['hold_time_mean'] + 20) * 1000
-    signal_data_df['score2'] = signal_data_df['avg_profit_rate'] / (signal_data_df['hold_time_mean'] + 20) * 1000 * (signal_data_df['trade_rate'] + 0.001)
-    signal_data_df['score3'] = signal_data_df['avg_profit_rate'] * (signal_data_df['trade_rate'] + 0.0001)
-    print(f'耗时 {time.time() - start_time:.2f} 秒。 长度 {signal_data_df.shape[0]}')
-    # 对 DataFrame 每一行计算 optimal_leverage
-    signal_data_df[['optimal_L', 'max_balance']] = signal_data_df.apply(
-        lambda row: optimal_leverage_opt(
-            row['max_consecutive_loss'], row['max_loss_trade_count'], row['max_consecutive_profit'], row['max_profit_trade_count'],
-            row['min_profit'], row['max_profit'], row['net_profit_rate'], row['kai_count']
-        ), axis=1, result_type='expand'
-    )
-
     print(f'耗时 {time.time() - start_time:.2f} 秒。')
-    signal_data_df.to_csv('temp/temp.csv', index=False)
 
-    # temp = pd.merge(df_list[0], df_list[1], on=['kai_side', 'kai_column', 'pin_column'], how='inner')
-    # temp['avg_profit_rate_min'] = temp[['avg_profit_rate_x', 'avg_profit_rate_y']].min(axis=1)
-    # temp['avg_profit_rate_mean'] = temp[['avg_profit_rate_x', 'avg_profit_rate_y']].mean(axis=1)
-    # temp['avg_profit_rate_plus'] = temp['avg_profit_rate_x'] + temp['avg_profit_rate_y']
-    # temp['avg_profit_rate_mult'] = np.where(
-    #     (temp['avg_profit_rate_x'] < 0) & (temp['avg_profit_rate_y'] < 0),
-    #     # 条件：avg_profit_rate_x 和 avg_profit_rate_y 都小于 0
-    #     0,  # 如果条件为真，则赋值为 0
-    #     temp['avg_profit_rate_x'] * temp['avg_profit_rate_y']  # 如果条件为假，则进行正常的乘法运算
-    # )
-    #
-    # temp['reverse_avg_profit_rate_min'] = temp[['reverse_avg_profit_rate_x', 'reverse_avg_profit_rate_y']].min(axis=1)
-    # temp['reverse_avg_profit_rate_mean'] = temp[['reverse_avg_profit_rate_x', 'reverse_avg_profit_rate_y']].mean(axis=1)
-    # temp['reverse_avg_profit_rate_plus'] = temp['reverse_avg_profit_rate_x'] + temp['reverse_avg_profit_rate_y']
-    # temp['reverse_avg_profit_rate_mult'] = np.where(
-    #     (temp['reverse_avg_profit_rate_x'] < 0) & (temp['reverse_avg_profit_rate_y'] < 0),
-    #     # 条件：reverse_avg_profit_rate_x 和 reverse_avg_profit_rate_y 都小于 0
-    #     0,  # 如果条件为真，则赋值为 0
-    #     temp['reverse_avg_profit_rate_x'] * temp['reverse_avg_profit_rate_y']  # 如果条件为假，则进行正常的乘法运算
-    # )
-    # temp['net_profit_rate_min'] = temp[['net_profit_rate_x', 'net_profit_rate_y']].min(axis=1)
-    # temp['net_profit_rate_mean'] = temp[['net_profit_rate_x', 'net_profit_rate_y']].mean(axis=1)
-    # temp['net_profit_rate_plus'] = temp['net_profit_rate_x'] + temp['net_profit_rate_y']
-    # temp['net_profit_rate_mult'] = np.where(
-    #     (temp['net_profit_rate_x'] < 0) & (temp['net_profit_rate_y'] < 0),
-    #     # 条件：net_profit_rate_x 和 net_profit_rate_y 都小于 0
-    #     0,  # 如果条件为真，则赋值为 0
-    #     temp['net_profit_rate_x'] * temp['net_profit_rate_y']  # 如果条件为假，则进行正常的乘法运算
-    # )
-    # temp['reverse_net_profit_rate_min'] = temp[['reverse_net_profit_rate_x', 'reverse_net_profit_rate_y']].min(axis=1)
-    # temp['reverse_net_profit_rate_mean'] = temp[['reverse_net_profit_rate_x', 'reverse_net_profit_rate_y']].mean(axis=1)
-    # temp['reverse_net_profit_rate_plus'] = temp['reverse_net_profit_rate_x'] + temp['reverse_net_profit_rate_y']
-    # temp['reverse_net_profit_rate_mult'] = np.where(
-    #     (temp['reverse_net_profit_rate_x'] < 0) & (temp['reverse_net_profit_rate_y'] < 0),
-    #     # 条件：reverse_net_profit_rate_x 和 reverse_net_profit_rate_y 都小于 0
-    #     0,  # 如果条件为真，则赋值为 0
-    #     temp['reverse_net_profit_rate_x'] * temp['reverse_net_profit_rate_y']  # 如果条件为假，则进行正常的乘法运算
-    # )
-    #
-    # temp = temp[(temp['avg_profit_rate_min'] > 0) | (temp['reverse_avg_profit_rate_min'] > 0)]
-    # return temp
+    temp = pd.merge(df_list[0], df_list[1], on=['kai_side', 'kai_column', 'pin_column'], how='inner')
+    # 需要计算的字段前缀
+    fields = ['avg_profit_rate', 'net_profit_rate', 'max_balance']
+
+    # 遍历字段前缀，统一计算
+    for field in fields:
+        x_col = f"{field}_x"
+        y_col = f"{field}_y"
+
+        temp[f"{field}_min"] = temp[[x_col, y_col]].min(axis=1)
+        temp[f"{field}_mean"] = temp[[x_col, y_col]].mean(axis=1)
+        temp[f"{field}_plus"] = temp[x_col] + temp[y_col]
+        temp[f"{field}_mult"] = np.where(
+            (temp[x_col] < 0) & (temp[y_col] < 0),
+            0,  # 如果两个都小于 0，则赋值 0
+            temp[x_col] * temp[y_col]  # 否则正常相乘
+        )
+
+    temp = temp[(temp['avg_profit_rate_min'] > 0)]
+    return temp
+
+def debug():
+
+    good_df = pd.read_csv('temp/final_good.csv')
+    # debug
+    is_filter = True
+    df = pd.read_csv('kline_data/origin_data_1m_10000_SOL-USDT-SWAP.csv')
+    signal_cache = {}
+    statistic_dict_list = []
+    for index, row in good_df.iterrows():
+        long_column = row['kai_column']
+        short_column = row['pin_column']
+        kai_data_df, statistic_dict = get_detail_backtest_result(df, long_column, short_column, signal_cache, is_filter)
+        statistic_dict_list.append(statistic_dict)
+    statistic_df = pd.DataFrame(statistic_dict_list)
+    print(statistic_df)
 
 
 def example():
+    # debug()
     # choose_good_strategy()
     start_time = time.time()
 
     data_path_list = [
-        # 'kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv',
-        # 'kline_data/origin_data_1m_86000_BTC-USDT-SWAP.csv',
+        'kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv',
+        'kline_data/origin_data_1m_86000_BTC-USDT-SWAP.csv',
 
-        # 'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv',
+        'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv',
         'kline_data/origin_data_1m_86000_ETH-USDT-SWAP.csv',
 
         'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv',
