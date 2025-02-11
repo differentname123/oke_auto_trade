@@ -243,6 +243,41 @@ def get_detail_backtest_result(df, kai_column, pin_column, signal_cache, is_filt
     return kai_data_df, statistic_dict
 
 
+def calculate_failure_rates(df: pd.DataFrame, period_list: list) -> dict:
+    """
+    计算不同周期的失败率（收益和小于0的比例）。
+
+    参数：
+    df : pd.DataFrame
+        包含 'true_profit' 列的数据框。
+    period_list : list
+        需要计算的周期列表，例如 [1, 2]。
+
+    返回：
+    dict
+        以周期为键，失败率为值的字典。
+    """
+    failure_rates = {}
+    true_profit = df['true_profit'].values  # 转换为 NumPy 数组，加速计算
+    total_periods = len(true_profit)
+
+    for period in period_list:
+        if period > total_periods:
+            # failure_rates[period] = None  # 如果 period 超过数据长度，返回 None
+            break
+
+        # 计算滑动窗口和
+        rolling_sums = [sum(true_profit[i:i + period]) for i in range(total_periods - period + 1)]
+
+        # 计算失败次数（即滑动窗口和小于 0 的情况）
+        failure_count = sum(1 for x in rolling_sums if x < 0)
+
+        # 计算失败率
+        failure_rates[period] = failure_count / len(rolling_sums)
+
+    return failure_rates
+
+
 def get_detail_backtest_result_op(df, kai_column, pin_column, signal_cache, is_filter=True):
     """
     根据传入的信号列（开仓信号 kai_column 与平仓信号 pin_column），在原始 df 上动态生成信号，
@@ -294,6 +329,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, signal_cache, is_f
     # 过滤重复平仓时间的交易
     if is_filter:
         kai_data_df = kai_data_df.sort_values('timestamp').drop_duplicates('pin_time', keep='first')
+    result = calculate_failure_rates(kai_data_df, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
 
     # 计算统计指标
     trade_count = kai_data_df.shape[0]
@@ -354,6 +390,8 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, signal_cache, is_f
         'max_profit_start_time': max_profit_start_time,
         'max_profit_end_time': max_profit_end_time,
     }
+    for key, value in result.items():
+        statistic_dict[f'failure_rate_{key}'] = value
 
     return kai_data_df, statistic_dict
 
@@ -428,8 +466,8 @@ def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
     base_name = os.path.basename(data_path)
 
     start_period = 1
-    end_period = 2000
-    step = 2
+    end_period = 1000
+    step = 1
     is_filter = True
 
 
@@ -494,7 +532,7 @@ def optimal_leverage_opt(max_loss_rate, num_losses, max_profit_rate, num_profits
 
 def count_L():
     file_list = os.listdir('temp')
-    file_list = [file for file in file_list if 'True' in file and '1m' in file and '3000' in file and 'withL' not in file]
+    file_list = [file for file in file_list if 'True' in file and '1m' in file and '2000' in file and 'withL' not in file]
     for file in file_list:
         print(f'开始处理 {file}')
         out_file = file.replace('.csv', '_withL.csv')
@@ -522,7 +560,7 @@ def count_L():
 def choose_good_strategy():
     # df = pd.read_csv('temp/temp.csv')
     start_time = time.time()
-    # count_L()
+    count_L()
     # 找到temp下面所有包含False的文件
     file_list = os.listdir('temp')
     file_list = [file for file in file_list if 'True' in file and 'ETH' in file and '0' in file and '1m' in file and 'with' in file]
@@ -592,25 +630,25 @@ def example():
 
     data_path_list = [
         'kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv',
-        'kline_data/origin_data_1m_86000_BTC-USDT-SWAP.csv',
+        # 'kline_data/origin_data_1m_86000_BTC-USDT-SWAP.csv',
 
         'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv',
-        'kline_data/origin_data_1m_86000_ETH-USDT-SWAP.csv',
+        # 'kline_data/origin_data_1m_86000_ETH-USDT-SWAP.csv',
 
         'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv',
-        'kline_data/origin_data_1m_86000_SOL-USDT-SWAP.csv',
+        # 'kline_data/origin_data_1m_86000_SOL-USDT-SWAP.csv',
 
         'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv',
-        'kline_data/origin_data_1m_86000_TON-USDT-SWAP.csv',
+        # 'kline_data/origin_data_1m_86000_TON-USDT-SWAP.csv',
 
         'kline_data/origin_data_1m_10000000_DOGE-USDT-SWAP.csv',
-        'kline_data/origin_data_1m_86000_DOGE-USDT-SWAP.csv',
+        # 'kline_data/origin_data_1m_86000_DOGE-USDT-SWAP.csv',
 
         'kline_data/origin_data_1m_10000000_XRP-USDT-SWAP.csv',
-        'kline_data/origin_data_1m_86000_XRP-USDT-SWAP.csv',
+        # 'kline_data/origin_data_1m_86000_XRP-USDT-SWAP.csv',
 
         'kline_data/origin_data_1m_10000000_PEPE-USDT-SWAP.csv',
-        'kline_data/origin_data_1m_86000_PEPE-USDT-SWAP.csv'
+        # 'kline_data/origin_data_1m_86000_PEPE-USDT-SWAP.csv'
     ]
     for data_path in data_path_list:
         try:

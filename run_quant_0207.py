@@ -241,15 +241,20 @@ def choose_good_strategy():
     # count_L()
     # 找到temp下面所有包含False的文件
     file_list = os.listdir('temp')
-    file_list = [file for file in file_list if 'True' in file and INSTRUMENT in file and '0' in file and '1m' in file and 'with' not in file]
+    file_list = [file for file in file_list if 'True' in file and INSTRUMENT in file and '500' in file and '1m' in file and 'with' in file]
     df_list = []
     df_map = {}
     for file in file_list:
         file_key = file.split('_')[4]
         df = pd.read_csv(f'temp/{file}')
 
+        # 去除最大的偶然利润
+        df['net_profit_rate'] = df['net_profit_rate'] - 1 * df['max_profit']
+        df['avg_profit_rate'] = df['net_profit_rate'] / df['kai_count'] * 100
+        df['max_beilv'] = df['net_profit_rate'] / df['max_profit']
+
         df['filename'] = file.split('_')[5]
-        # df = df[(df['avg_profit_rate'] > 0)]
+        df = df[(df['avg_profit_rate'] > 0)]
         if file_key not in df_map:
             df_map[file_key] = []
         df['score'] = df['avg_profit_rate']
@@ -258,6 +263,10 @@ def choose_good_strategy():
                     df['hold_time_mean'] + 20) * 1000 * (df['trade_rate'] + 0.001)
         df['score3'] = df['avg_profit_rate'] * (df['trade_rate'] + 0.0001)
         df['score4'] = (df['trade_rate'] + 0.0001) / df['loss_rate']
+        loss_rate_max = df['loss_rate'].max()
+        loss_time_rate_max = df['loss_time_rate'].max()
+        avg_profit_rate_max = df['avg_profit_rate'].max()
+        df['loss_score'] = 10 * (loss_rate_max - df['loss_rate']) / loss_rate_max + (loss_time_rate_max - df['loss_time_rate']) / loss_time_rate_max - (avg_profit_rate_max - df['avg_profit_rate']) / avg_profit_rate_max
         df_map[file_key].append(df)
     for key in df_map:
         df = pd.concat(df_map[key])
@@ -265,7 +274,7 @@ def choose_good_strategy():
 
     temp = pd.merge(df_list[0], df_list[1], on=['kai_side', 'kai_column', 'pin_column'], how='inner')
     # 需要计算的字段前缀
-    fields = ['avg_profit_rate', 'net_profit_rate']
+    fields = ['avg_profit_rate', 'net_profit_rate', 'max_balance', 'max_beilv']
 
     # 遍历字段前缀，统一计算
     for field in fields:
@@ -275,6 +284,7 @@ def choose_good_strategy():
         temp[f"{field}_min"] = temp[[x_col, y_col]].min(axis=1)
         temp[f"{field}_mean"] = temp[[x_col, y_col]].mean(axis=1)
         temp[f"{field}_plus"] = temp[x_col] + temp[y_col]
+        temp[f"{field}_cha"] = temp[x_col] - temp[y_col]
         temp[f"{field}_mult"] = np.where(
             (temp[x_col] < 0) & (temp[y_col] < 0),
             0,  # 如果两个都小于 0，则赋值 0
@@ -286,6 +296,7 @@ def choose_good_strategy():
     return temp
 
 async def main():
+    sort_key = 'max_beilv_min'
     # good_strategy_df1 = pd.read_csv('temp/temp.csv')
     good_strategy_df = choose_good_strategy()
     # 筛选出kai_side为long的数据
@@ -294,14 +305,15 @@ async def main():
 
     # 将long_good_strategy_df按照net_profit_rate_mult降序排列
     long_good_select_df = select_best_rows_in_ranges(long_good_strategy_df, range_size=100,
-                                                     sort_key='avg_profit_rate_mult', range_key='kai_count_x')
+                                                     sort_key=sort_key, range_key='kai_count_x')
     # long_good_select_df['kai_column'] = '1_high_long'
     # long_good_select_df['pin_column'] = '1_low_short'
     short_good_select_df = select_best_rows_in_ranges(short_good_strategy_df, range_size=100,
-                                                      sort_key='avg_profit_rate_mult', range_key='kai_count_x')
+                                                      sort_key=sort_key, range_key='kai_count_x')
     # short_good_select_df['kai_column'] = '1_low_short'
     # short_good_select_df['pin_column'] = '1_high_long'
     final_good_df = pd.concat([long_good_select_df, short_good_select_df])
+    print(final_good_df[sort_key])
     final_good_df.to_csv('temp/final_good.csv', index=False)
     print(f'final_good_df shape: {final_good_df.shape[0]}')
     # 遍历final_good_df，将kai_column和pin_column一一对应
