@@ -19,27 +19,34 @@ from numba import njit
 
 
 def compute_signal(df, col_name):
-    """
-    根据列名动态计算信号
-    列名格式："{period}_{base}_{direction}"
-      对于多头信号：例如 "5_high_long"，
-         计算 price 用 high.shift(1).rolling(window=period).max()
-         信号为 df['high'] > price
-      对于空头信号：例如 "5_low_short"，
-         计算 price 用 low.shift(1).rolling(window=period).min()
-         信号为 df['low'] < price
-    返回 (signal_series, price_series)
-    """
     parts = col_name.split('_')
-    period = int(parts[0])
-    direction = parts[2]  # "long" 或 "short"
-    if direction == "long":
-        price_series = df['high'].shift(1).rolling(window=period).max()
-        signal_series = df['high'] > price_series
+    period = int(parts[1])
+    signal_type = parts[0]
+    direction = parts[3]  # "long" 或 "short"
+
+    if signal_type == 'peak':
+        if direction == "long":
+            price_series = df['high'].shift(1).rolling(window=period).max()
+            signal_series = df['high'] > price_series
+        else:
+            price_series = df['low'].shift(1).rolling(window=period).min()
+            signal_series = df['low'] < price_series
+        return signal_series, price_series
+
+    elif signal_type == 'continue':
+
+        if direction == "long":
+            rolling_check = df['chg'].rolling(window=period).apply(lambda x: (x > 0).all(), raw=True)
+        else:
+            rolling_check = df['chg'].rolling(window=period).apply(lambda x: (x < 0).all(), raw=True)
+        valid_count = df['chg'].rolling(window=period).count()  # 统计窗口内的有效值数量
+        signal_series = (rolling_check == 1) & (valid_count == period)  # 仅当窗口填满时才允许 True
+        price_series = df['close']  # 价格取 close
+        return signal_series, price_series
+
     else:
-        price_series = df['low'].shift(1).rolling(window=period).min()
-        signal_series = df['low'] < price_series
-    return signal_series, price_series
+        raise ValueError(f"未知的信号类型: {signal_type}")
+
 
 
 def calculate_max_sequence(kai_data_df):
@@ -53,14 +60,14 @@ def calculate_max_sequence(kai_data_df):
     temp_start_index = None
     end_index = None
     trade_count = 0  # 初始化交易计数器
-
+    max_sequence_length = 0
     for i, profit in enumerate(true_profit_series):
         if current_loss == 0:
             temp_start_index = kai_data_df.index[i]
-            trade_count = 0 # 在新的潜在亏损序列开始时，重置 trade_count (也可以不重置，在current_loss > 0 时重置更清晰)
+            trade_count = 0  # 在新的潜在亏损序列开始时，重置 trade_count (也可以不重置，在current_loss > 0 时重置更清晰)
 
         current_loss += profit
-        trade_count += 1 # 每次迭代都增加交易计数
+        trade_count += 1  # 每次迭代都增加交易计数
 
         if current_loss < max_loss:
             max_loss = current_loss
@@ -70,7 +77,7 @@ def calculate_max_sequence(kai_data_df):
 
         if current_loss > 0:
             current_loss = 0
-            trade_count = 0 # 当盈利出现时，重置亏损和交易计数
+            trade_count = 0  # 当盈利出现时，重置亏损和交易计数
 
     return max_loss, start_index, end_index, max_sequence_length
 
@@ -91,10 +98,10 @@ def calculate_max_profit(kai_data_df):
     for i, profit in enumerate(true_profit_series):
         if current_profit == 0:
             temp_start_index = kai_data_df.index[i]
-            trade_count = 0 # 在新的潜在盈利序列开始时，重置 trade_count (也可以不重置，在current_profit < 0 时重置更清晰)
+            trade_count = 0  # 在新的潜在盈利序列开始时，重置 trade_count (也可以不重置，在current_profit < 0 时重置更清晰)
 
         current_profit += profit
-        trade_count += 1 # 每次迭代都增加交易计数
+        trade_count += 1  # 每次迭代都增加交易计数
 
         if current_profit > max_profit:
             max_profit = current_profit
@@ -104,7 +111,7 @@ def calculate_max_profit(kai_data_df):
 
         if current_profit < 0:
             current_profit = 0
-            trade_count = 0 # 当亏损出现时，重置盈利和交易计数
+            trade_count = 0  # 当亏损出现时，重置盈利和交易计数
 
     return max_profit, start_index, end_index, max_sequence_length
 
@@ -160,7 +167,6 @@ def get_detail_backtest_result(df, kai_column, pin_column, signal_cache, is_filt
         kai_data_df['profit'] = ((kai_data_df['kai_price'] - kai_data_df['pin_price']) /
                                  kai_data_df['pin_price'] * 100).round(4)
     kai_data_df['true_profit'] = kai_data_df['profit'] - 0.07
-
 
     # 如果is_filter为True，则相同pin_time的交易只保留最早的一笔
     if is_filter:
@@ -348,7 +354,8 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, signal_cache, is_f
 
     # 计算最大连续盈利
     max_profit, max_profit_start_idx, max_profit_end_idx, profit_trade_count = calculate_max_profit(kai_data_df)
-    max_profit_start_time = kai_data_df.loc[max_profit_start_idx, 'timestamp'] if max_profit_start_idx is not None else None
+    max_profit_start_time = kai_data_df.loc[
+        max_profit_start_idx, 'timestamp'] if max_profit_start_idx is not None else None
     max_profit_end_time = kai_data_df.loc[max_profit_end_idx, 'timestamp'] if max_profit_end_idx is not None else None
     max_profit_hold_time = (max_profit_end_idx - max_profit_start_idx
                             if max_profit_start_idx is not None and max_profit_end_idx is not None else None)
@@ -395,6 +402,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, signal_cache, is_f
 
     return kai_data_df, statistic_dict
 
+
 def process_tasks(task_chunk, df, is_filter):
     """
     处理一块任务（每块任务包含 chunk_size 个任务）。
@@ -404,33 +412,57 @@ def process_tasks(task_chunk, df, is_filter):
     results = []
     signal_cache = {}  # 同一进程内对信号结果进行缓存
     for long_column, short_column in task_chunk:
+        # long_column = 'continue_10_high_long'
+        # short_column = 'continue_9_low_short'
         # 对应一次做「开仓」回测
         _, stat_long = get_detail_backtest_result_op(df, long_column, short_column, signal_cache, is_filter)
         results.append(stat_long)
         # 再做「开空」方向回测（此时互换信号）
         _, stat_short = get_detail_backtest_result_op(df, short_column, long_column, signal_cache, is_filter)
         results.append(stat_short)
-    print(f"处理 {len(task_chunk)*2} 个任务，耗时 {time.time()-start_time:.2f} 秒。")
+    print(f"处理 {len(task_chunk) * 2} 个任务，耗时 {time.time() - start_time:.2f} 秒。")
     return results
 
-def backtest_breakthrough_strategy(df, base_name, start_period, end_period, step, is_filter):
+
+def gen_peak_signal_name(start_period, end_period, step):
+    """
+    生成 peak 信号的列名列表。
+    :param start_period:
+    :param end_period:
+    :param step:
+    :return:
+    """
+    period_list = range(start_period, end_period, step)
+    long_columns = [f"peak_{period}_high_long" for period in period_list]
+    short_columns = [f"peak_{period}_low_short" for period in period_list]
+    key_name = f'peak_{start_period}_{end_period}_{step}'
+    return long_columns, short_columns, key_name
+
+def gen_continue_signal_name(start_period, end_period, step):
+    """"""
+    period_list = range(start_period, end_period, step)
+    long_columns = [f"continue_{period}_high_long" for period in period_list]
+    short_columns = [f"continue_{period}_low_short" for period in period_list]
+    key_name = f'continue_{start_period}_{end_period}_{step}'
+    return long_columns, short_columns, key_name
+
+def backtest_breakthrough_strategy(df, base_name, is_filter):
     """
     回测函数：基于原始数据 df 和指定周期范围，
     生成所有 (kai, pin) 信号对（kai 信号命名为 "{period}_high_long"，pin 信号命名为 "{period}_low_short"），
     使用多进程并行调用 process_tasks() 完成回测，并将统计结果保存到 CSV 文件。
     """
-
-
-    period_list = range(start_period, end_period, step)
-    long_columns = [f"{period}_high_long" for period in period_list]
-    short_columns = [f"{period}_low_short" for period in period_list]
+    peak_long_columns, peak_short_columns, peak_key_name = gen_peak_signal_name(1, 1000, 1)
+    continue_long_columns, continue_short_columns, continue_key_name = gen_continue_signal_name(1, 20, 1)
+    long_columns = peak_long_columns + continue_long_columns
+    short_columns = peak_short_columns + continue_short_columns
     task_list = list(product(long_columns, short_columns))
     big_chunk_size = 100000
     big_task_chunks = [task_list[i:i + big_chunk_size] for i in range(0, len(task_list), big_chunk_size)]
     print(f'共有 {len(task_list)} 个任务，分为 {len(big_task_chunks)} 大块。')
     for i, task_chunk in enumerate(big_task_chunks):
         # 将task_list打乱顺序
-        output_path = f"temp/statistic_{base_name}_start_period-{start_period}_end_period-{end_period}_step-{step}_is_filter-{is_filter}_part{i}.csv"
+        output_path = f"temp/statistic_{base_name}_{peak_key_name}_{continue_key_name}_is_filter-{is_filter}_part{i}.csv"
         if os.path.exists(output_path):
             print(f'已存在 {output_path}')
             continue
@@ -456,6 +488,7 @@ def backtest_breakthrough_strategy(df, base_name, start_period, end_period, step
         statistic_df.to_csv(output_path, index=False)
         print(f'结果已保存到 {output_path} 当前时间 {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}')
 
+
 def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
     """
     主函数：
@@ -464,12 +497,7 @@ def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
       3. 调用 backtest_breakthrough_strategy 进行回测
     """
     base_name = os.path.basename(data_path)
-
-    start_period = 1
-    end_period = 1000
-    step = 1
     is_filter = True
-
 
     # # debug
     # df = pd.read_csv(data_path)
@@ -479,13 +507,14 @@ def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
     # # df = df[-50000:]
     # get_detail_backtest_result(df, long_column, short_column, signal_cache, is_filter)
 
-
-
     df = pd.read_csv(data_path)
     needed_columns = ['timestamp', 'open', 'high', 'low', 'close']
     df = df[needed_columns]
-    print(f'开始回测 {base_name} ... 长度 {df.shape[0]} 当前时间 {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}')
-    backtest_breakthrough_strategy(df, base_name, start_period, end_period, step, is_filter)
+    # 计算每一行的涨跌幅
+    df['chg'] = df['close'].pct_change() * 100
+    print(
+        f'开始回测 {base_name} ... 长度 {df.shape[0]} 当前时间 {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}')
+    backtest_breakthrough_strategy(df, base_name, is_filter)
 
 
 def optimal_leverage_opt(max_loss_rate, num_losses, max_profit_rate, num_profits,
@@ -530,9 +559,11 @@ def optimal_leverage_opt(max_loss_rate, num_losses, max_profit_rate, num_profits
 
     return optimal_L, max_balance
 
+
 def count_L():
     file_list = os.listdir('temp')
-    file_list = [file for file in file_list if 'True' in file and '1m' in file and '2000' in file and 'withL' not in file]
+    file_list = [file for file in file_list if
+                 'True' in file and '1m' in file and '2000' in file and 'withL' not in file]
     for file in file_list:
         print(f'开始处理 {file}')
         out_file = file.replace('.csv', '_withL.csv')
@@ -557,13 +588,15 @@ def count_L():
         except Exception as e:
             pass
 
+
 def choose_good_strategy():
     # df = pd.read_csv('temp/temp.csv')
     start_time = time.time()
     count_L()
     # 找到temp下面所有包含False的文件
     file_list = os.listdir('temp')
-    file_list = [file for file in file_list if 'True' in file and 'ETH' in file and '0' in file and '1m' in file and 'with' in file]
+    file_list = [file for file in file_list if
+                 'True' in file and 'ETH' in file and '0' in file and '1m' in file and 'with' in file]
     df_list = []
     df_map = {}
     for file in file_list:
@@ -577,7 +610,7 @@ def choose_good_strategy():
         df['score'] = df['avg_profit_rate']
         df['score1'] = df['avg_profit_rate'] / (df['hold_time_mean'] + 20) * 1000
         df['score2'] = df['avg_profit_rate'] / (
-                    df['hold_time_mean'] + 20) * 1000 * (df['trade_rate'] + 0.001)
+                df['hold_time_mean'] + 20) * 1000 * (df['trade_rate'] + 0.001)
         df['score3'] = df['avg_profit_rate'] * (df['trade_rate'] + 0.0001)
         df_map[file_key].append(df)
     for key in df_map:
@@ -606,21 +639,221 @@ def choose_good_strategy():
     temp = temp[(temp['avg_profit_rate_min'] > 0)]
     return temp
 
+
+def choose_good_strategy_debug(inst_id='BTC'):
+    # df = pd.read_csv('temp/temp.csv')
+    # count_L()
+    # 找到temp下面所有包含False的文件
+    file_list = os.listdir('temp')
+    file_list = [file for file in file_list if 'True' in file and inst_id in file and '20' in file and '1m' in file and 'continue_' in file]
+    df_list = []
+    df_map = {}
+    for file in file_list:
+        file_key = file.split('_')[4]
+        df = pd.read_csv(f'temp/{file}')
+
+        # 去除最大的偶然利润
+        # df['net_profit_rate'] = df['net_profit_rate'] - 1 * df['max_profit']
+        # df['avg_profit_rate'] = df['net_profit_rate'] / df['kai_count'] * 100
+        df['max_beilv'] = df['net_profit_rate'] / df['max_profit']
+        # df['kai_period'] = df['kai_column'].apply(lambda x: int(x.split('_')[0]))
+        # df['pin_period'] = df['pin_column'].apply(lambda x: int(x.split('_')[0]))
+
+        df['filename'] = file.split('_')[5]
+        # df = df[(df['max_consecutive_loss'] > -50)]
+        df = df[(df['avg_profit_rate'] > 0)]
+        df = df[(df['hold_time_mean'] < 10000)]
+        # df = df[(df['max_beilv'] > 0)]
+        df = df[(df['kai_count'] > 10)]
+        # df = df[(df['pin_period'] < 50)]
+        if file_key not in df_map:
+            df_map[file_key] = []
+        df['score'] = df['avg_profit_rate']
+        df['score1'] = df['avg_profit_rate'] / (df['hold_time_mean'] + 20) * 1000
+        df['score2'] = df['avg_profit_rate'] / (
+                    df['hold_time_mean'] + 20) * 1000 * (df['trade_rate'] + 0.001)
+        df['score3'] = df['avg_profit_rate'] * (df['trade_rate'] + 0.0001)
+        df['score4'] = (df['trade_rate'] + 0.0001) / df['loss_rate']
+        loss_rate_max = df['loss_rate'].max()
+        loss_time_rate_max = df['loss_time_rate'].max()
+        avg_profit_rate_max = df['avg_profit_rate'].max()
+        max_beilv_max = df['max_beilv'].max()
+        # df['loss_score'] = 5 * (loss_rate_max - df['loss_rate']) / loss_rate_max + 1 * (loss_time_rate_max - df['loss_time_rate']) / loss_time_rate_max - 1 * (avg_profit_rate_max - df['avg_profit_rate']) / avg_profit_rate_max
+
+
+        # 找到所有包含failure_rate_的列，然后计算平均值
+        failure_rate_columns = [column for column in df.columns if 'failure_rate_' in column]
+        df['failure_rate_mean'] = df[failure_rate_columns].mean(axis=1)
+
+        df['loss_score'] = 1 - df['loss_rate']
+
+        df['beilv_score'] = 0 - (max_beilv_max - df['max_beilv']) / max_beilv_max - (avg_profit_rate_max - df['avg_profit_rate']) / avg_profit_rate_max
+        df_map[file_key].append(df)
+    for key in df_map:
+        df = pd.concat(df_map[key])
+        df_list.append(df)
+        return df
+
+    temp = pd.merge(df_list[0], df_list[1], on=['kai_side', 'kai_column', 'pin_column'], how='inner')
+    # 需要计算的字段前缀
+    fields = ['avg_profit_rate', 'net_profit_rate', 'max_beilv']
+
+    # 遍历字段前缀，统一计算
+    for field in fields:
+        x_col = f"{field}_x"
+        y_col = f"{field}_y"
+
+        temp[f"{field}_min"] = temp[[x_col, y_col]].min(axis=1)
+        temp[f"{field}_mean"] = temp[[x_col, y_col]].mean(axis=1)
+        temp[f"{field}_plus"] = temp[x_col] + temp[y_col]
+        temp[f"{field}_cha"] = temp[x_col] - temp[y_col]
+        temp[f"{field}_mult"] = np.where(
+            (temp[x_col] < 0) & (temp[y_col] < 0),
+            0,  # 如果两个都小于 0，则赋值 0
+            temp[x_col] * temp[y_col]  # 否则正常相乘
+        )
+
+    # temp = temp[(temp['avg_profit_rate_min'] > 0)]
+    # temp.to_csv('temp/temp.csv', index=False)
+    return temp
+
+
+def delete_rows_based_on_sort_key(result_df, sort_key, range_key):
+    """
+    删除 DataFrame 中的行，使得每一行的 sort_key 都是当前及后续行中最大的。
+
+    Args:
+        result_df: Pandas DataFrame，必须包含 'sort_key' 列。
+
+    Returns:
+        Pandas DataFrame: 处理后的 DataFrame，删除了符合条件的行。
+    """
+    if result_df.empty:
+        return result_df
+    # 将result_df按照range_key升序排列
+    result_df = result_df.sort_values(by=range_key, ascending=True)
+
+    # 逆序遍历，保留 sort_key 最大的行
+    max_sort_key = -float('inf')
+    keep_mask = []  # 记录哪些行需要保留
+
+    for sort_key_value in reversed(result_df[sort_key].values):  # .values 避免索引问题
+        if sort_key_value >= max_sort_key:
+            keep_mask.append(True)
+            max_sort_key = sort_key_value
+        else:
+            keep_mask.append(False)
+
+    # 由于是逆序遍历，最终的 keep_mask 需要反转
+    keep_mask.reverse()
+
+    return result_df[keep_mask].reset_index(drop=True)
+
+def select_best_rows_in_ranges(df, range_size, sort_key, range_key='total_count'):
+    """
+    从 DataFrame 中按照指定范围选择最佳行，范围由 range_key 确定，排序由 sort_key 决定。
+
+    Args:
+        df (pd.DataFrame): 输入的 DataFrame。
+        range_size (int): 每个范围的大小。
+        sort_key (str): 用于排序的列名。
+        range_key (str) : 用于确定范围的列名。
+
+    Returns:
+        pd.DataFrame: 包含每个范围内最佳行的 DataFrame。
+    """
+
+    # 确保输入的是 DataFrame
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("Input must be a pandas DataFrame.")
+
+    # 确保 range_size 是正整数
+    if not isinstance(range_size, int) or range_size <= 0:
+        raise ValueError("range_size must be a positive integer.")
+    # 找到range_key大于0的行
+    df = df[df[range_key] > 0]
+    df = delete_rows_based_on_sort_key(df, sort_key, range_key)
+    # 确保 sort_key 和 range_key 列存在于 DataFrame 中
+    if sort_key not in df.columns:
+        raise ValueError(f"Column '{sort_key}' not found in DataFrame.")
+    if range_key not in df.columns:
+        raise ValueError(f"Column '{range_key}' not found in DataFrame.")
+    # 只保留sort_key大于0的行
+    # df = df[df[sort_key] > 0]
+    if df.empty:
+        return df
+
+    # 计算 DataFrame 的最大值，用于确定范围的上限
+    max_value = df[range_key].max()
+    min_value = df[range_key].min()
+
+    # 初始化结果 DataFrame
+    result_df = pd.DataFrame()
+
+    # 循环遍历所有范围
+    for start in range(min_value, int(max_value) + range_size, range_size):
+        end = start + range_size
+
+        # 筛选出当前范围的行, 注意这里用 range_key
+        current_range_df = df[(df[range_key] >= start) & (df[range_key] < end)]
+
+        # 如果当前范围有行，则按照 sort_key 排序选择最佳行并添加到结果 DataFrame
+        if not current_range_df.empty:
+            best_row = current_range_df.sort_values(by=sort_key, ascending=False).iloc[0]
+            result_df = pd.concat([result_df, best_row.to_frame().T], ignore_index=True)
+    result_df = delete_rows_based_on_sort_key(result_df, sort_key, range_key)
+
+    return result_df
+
 def debug():
 
-    good_df = pd.read_csv('temp/final_good.csv')
+    # good_df = pd.read_csv('temp/final_good.csv')
+
+
     # debug
-    is_filter = True
-    df = pd.read_csv('kline_data/origin_data_1m_10000_SOL-USDT-SWAP.csv')
-    signal_cache = {}
-    statistic_dict_list = []
-    for index, row in good_df.iterrows():
-        long_column = row['kai_column']
-        short_column = row['pin_column']
-        kai_data_df, statistic_dict = get_detail_backtest_result(df, long_column, short_column, signal_cache, is_filter)
-        statistic_dict_list.append(statistic_dict)
-    statistic_df = pd.DataFrame(statistic_dict_list)
-    print(statistic_df)
+    sort_key = 'loss_score'
+    # sort_key = 'max_consecutive_loss'
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    for inst_id in inst_id_list:
+        origin_good_df = choose_good_strategy_debug(inst_id)
+        # 按照loss_score降序排列，选取前20行
+        # origin_good_df = origin_good_df[(origin_good_df['kai_side'] == 'short')]
+        good_df = origin_good_df.sort_values(sort_key, ascending=False)
+        #
+        # # 去除kai_column重复的行，只取第一行
+        # good_df = good_df.drop_duplicates('kai_column', keep='first')
+        # good_df = good_df.head(20)
+
+        long_good_strategy_df = good_df[good_df['kai_side'] == 'long']
+        short_good_strategy_df = good_df[good_df['kai_side'] == 'short']
+
+        # 将long_good_strategy_df按照net_profit_rate_mult降序排列
+        long_good_select_df = select_best_rows_in_ranges(long_good_strategy_df, range_size=100,
+                                                         sort_key=sort_key, range_key='kai_count')
+        short_good_select_df = select_best_rows_in_ranges(short_good_strategy_df, range_size=100,
+                                                          sort_key=sort_key, range_key='kai_count')
+        good_df = pd.concat([long_good_select_df, short_good_select_df])
+
+
+
+
+        is_filter = True
+        df = pd.read_csv(f'kline_data/origin_data_1m_50000_{inst_id}-USDT-SWAP.csv')
+        # 计算每一行的涨跌幅
+        df['chg'] = df['close'].pct_change() * 100
+        signal_cache = {}
+        statistic_dict_list = []
+        for index, row in good_df.iterrows():
+            long_column = row['kai_column']
+            short_column = row['pin_column']
+            # # long_column = '6_low_short'
+            # # short_column = '3_high_long'
+            # long_column = '20_high_long'
+            # short_column = '24_low_short'
+            kai_data_df, statistic_dict = get_detail_backtest_result_op(df, long_column, short_column, signal_cache, is_filter)
+            statistic_dict_list.append(statistic_dict)
+        statistic_df = pd.DataFrame(statistic_dict_list)
+        print(inst_id)
 
 
 def example():
