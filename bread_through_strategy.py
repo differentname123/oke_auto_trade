@@ -45,14 +45,14 @@ def compute_signal(df, col_name):
         price_series = df['close']  # 价格取 close
         return signal_series, price_series
     elif signal_type == 'abs':
-        abs_value = int(parts[2])
+        abs_value = float(parts[2])
         if direction == "long":
             # 找到不包含当前行的前period行中 low 的最小值
             min_low_series = df['low'].shift(1).rolling(window=period).min()
             # 计算该值上涨 abs_value% 后的价格
             target_price = min_low_series * (1 + abs_value / 100)
             # 如果当前行的 high 超过该价格，则发出信号
-            signal_series = df['high'] > target_price
+            signal_series = (df['high'].shift(1) <= target_price) & (df['high'] > target_price)
             price_series = target_price  # 价格设置为该价格
         else:  # direction == "short"
             # 找到不包含当前行的前period行中 high 的最大值
@@ -60,7 +60,7 @@ def compute_signal(df, col_name):
             # 计算该值下跌 abs_value% 后的价格
             target_price = max_high_series * (1 - abs_value / 100)
             # 如果当前行的 low 低于该价格，则发出信号
-            signal_series = df['low'] < target_price
+            signal_series = (df['low'].shift(1) >= target_price) & (df['low'] < target_price)
             price_series = target_price  # 价格设置为该价格
 
         return signal_series, price_series
@@ -337,7 +337,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, signal_cache, is_f
     kai_signal, kai_price_series = get_signal_and_price(kai_column)
     pin_signal, pin_price_series = get_signal_and_price(pin_column)
     # 如果信号为空，则直接返回
-    if kai_signal.sum() == 0 or pin_signal.sum() == 0:
+    if kai_signal.sum() < 20 or pin_signal.sum() < 20:
         return None, None
 
     # 筛选出对应的开仓和平仓数据行（建议开仓复制，平仓暂不复制以节省内存）
@@ -376,8 +376,8 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, signal_cache, is_f
     if is_filter:
         kai_data_df = kai_data_df.sort_values('timestamp').drop_duplicates('pin_time', keep='first')
 
-    # 计算失败率（假设 calculate_failure_rates 接收 DataFrame 与列表参数）
-    failure_rate_result = calculate_failure_rates(kai_data_df, list(range(1, 11)))
+    # # 计算失败率（假设 calculate_failure_rates 接收 DataFrame 与列表参数）
+    # failure_rate_result = calculate_failure_rates(kai_data_df, list(range(1, 11)))
 
     # 收集交易数及全局数据量
     trade_count = kai_data_df.shape[0]
@@ -449,12 +449,53 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, signal_cache, is_f
         'max_profit_end_time': max_profit_end_time,
     }
 
-    # 将失败率指标添加到统计字典中
-    for key, value in failure_rate_result.items():
-        statistic_dict[f'failure_rate_{key}'] = value
+    # # 将失败率指标添加到统计字典中
+    # for key, value in failure_rate_result.items():
+    #     statistic_dict[f'failure_rate_{key}'] = value
 
     return kai_data_df, statistic_dict
 
+def generate_numbers(start, end, number, even=True):
+    """
+    生成start到end之间的number个数字。
+
+    Args:
+        start: 区间起始值 (包含).
+        end: 区间结束值 (包含).
+        number: 生成数字的个数.
+        even: 是否均匀生成。True表示均匀生成，False表示非均匀（指数增长）生成。
+
+    Returns:
+        包含生成数字的列表，如果start > end或number <= 0，则返回空列表。
+    """
+    if start > end or number <= 0:
+        return []
+    if number == 1:
+        return [start] if start <= end else []
+
+    result = []
+    if even:
+        if number > 1:
+            step = (end - start) / (number - 1)
+            for i in range(number):
+                result.append(int(round(start + i * step)))
+        else:
+            result = [start]
+    else: # uneven, exponential-like
+        power = 2 # 可以调整power值来控制指数增长的程度
+        for i in range(number):
+            normalized_index = i / (number - 1) if number > 1 else 0
+            value = start + (end - start) * (normalized_index ** power)
+            result.append(int(round(value)))
+
+    # 确保生成的数字在[start, end]范围内，并去除重复值 (虽然按理说不会有重复，但以防万一)
+    final_result = []
+    last_val = None
+    for val in result:
+        if start <= val <= end and val != last_val:
+            final_result.append(val)
+            last_val = val
+    return final_result[:number]
 
 def process_tasks(task_chunk, df, is_filter):
     """
@@ -470,10 +511,10 @@ def process_tasks(task_chunk, df, is_filter):
         # 对应一次做「开仓」回测
         _, stat_long = get_detail_backtest_result_op(df, long_column, short_column, signal_cache, is_filter)
         results.append(stat_long)
-        # 再做「开空」方向回测（此时互换信号）
-        _, stat_short = get_detail_backtest_result_op(df, short_column, long_column, signal_cache, is_filter)
-        results.append(stat_short)
-    print(f"处理 {len(task_chunk) * 2} 个任务，耗时 {time.time() - start_time:.2f} 秒。")
+        # # 再做「开空」方向回测（此时互换信号）
+        # _, stat_short = get_detail_backtest_result_op(df, short_column, long_column, signal_cache, is_filter)
+        # results.append(stat_short)
+    print(f"处理 {len(task_chunk) * 1} 个任务，耗时 {time.time() - start_time:.2f} 秒。")
     return results
 
 
@@ -485,7 +526,7 @@ def gen_peak_signal_name(start_period, end_period, step):
     :param step:
     :return:
     """
-    period_list = range(start_period, end_period, step)
+    period_list = generate_numbers(start_period, end_period, step, even=False)
     long_columns = [f"peak_{period}_high_long" for period in period_list]
     short_columns = [f"peak_{period}_low_short" for period in period_list]
     key_name = f'peak_{start_period}_{end_period}_{step}'
@@ -501,8 +542,9 @@ def gen_continue_signal_name(start_period, end_period, step):
 
 def gen_abs_signal_name(start_period, end_period, step, start_period1, end_period1, step1):
     """"""
-    period_list = range(start_period, end_period, step)
+    period_list = generate_numbers(start_period, end_period, step, even=False)
     period_list1 = range(start_period1, end_period1, step1)
+    period_list1 = [x / 10 for x in period_list1]
     long_columns = [f"abs_{period}_{period1}_high_long" for period in period_list for period1 in period_list1 if period >= period1]
     short_columns = [f"abs_{period}_{period1}_low_short" for period in period_list for period1 in period_list1 if period >= period1]
     key_name = f'abs_{start_period}_{end_period}_{step}_{start_period1}_{end_period1}_{step1}'
@@ -514,12 +556,20 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     生成所有 (kai, pin) 信号对（kai 信号命名为 "{period}_high_long"，pin 信号命名为 "{period}_low_short"），
     使用多进程并行调用 process_tasks() 完成回测，并将统计结果保存到 CSV 文件。
     """
-    peak_long_columns, peak_short_columns, peak_key_name = gen_peak_signal_name(1, 1000, 1)
-    continue_long_columns, continue_short_columns, continue_key_name = gen_continue_signal_name(1, 20, 1)
-    abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 100, 2, 1, 10, 1)
+    peak_long_columns, peak_short_columns, peak_key_name = gen_peak_signal_name(1, 1000, 100)
+    continue_long_columns, continue_short_columns, continue_key_name = gen_continue_signal_name(1, 14, 1)
+    abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 1000, 30, 1, 15, 1)
     long_columns = peak_long_columns + continue_long_columns + abs_long_columns
     short_columns = peak_short_columns + continue_short_columns + abs_short_columns
-    task_list = list(product(long_columns, short_columns))
+    all_columns = long_columns + short_columns
+    print(f'共有 {len(all_columns)} 个信号列。')
+    # task_list = list(product(long_columns, short_columns))
+    task_list = list(product(all_columns, all_columns))
+    # 删除不包含abs的task
+    # task_list = [task for task in task_list if 'abs' in task[0] or 'abs' in task[1]]
+    # task_list = list(product(long_columns, long_columns))
+    # task_list.extend(list(product(short_columns, short_columns)))
+
     big_chunk_size = 100000
     big_task_chunks = [task_list[i:i + big_chunk_size] for i in range(0, len(task_list), big_chunk_size)]
     print(f'共有 {len(task_list)} 个任务，分为 {len(big_task_chunks)} 大块。')
@@ -1022,6 +1072,7 @@ def example():
             gen_breakthrough_signal(data_path)
             print(f'{data_path} 总耗时 {time.time() - start_time:.2f} 秒。')
         except Exception as e:
+            traceback.print_exc()
             print(f'处理 {data_path} 时出错：{e}')
 
 
