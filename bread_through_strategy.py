@@ -62,8 +62,44 @@ def compute_signal(df, col_name):
             # 如果当前行的 low 低于该价格，则发出信号
             signal_series = (df['low'].shift(1) >= target_price) & (df['low'] < target_price)
             price_series = target_price  # 价格设置为该价格
-
         return signal_series, price_series
+
+    elif signal_type == 'ma':
+        moving_avg = df['close'].shift(1).rolling(window=period).mean()  # 计算不包含当前行的前period行均值
+
+        if direction == "long":
+            signal_series = (df['high'].shift(1) <= moving_avg) & (df['high'] > moving_avg)
+        else:  # direction == "short"
+            signal_series = (df['low'].shift(1) >= moving_avg) & (df['low'] < moving_avg)
+
+        price_series = moving_avg  # 价格取均线值
+        return signal_series, price_series
+
+    elif signal_type == 'relate':
+        abs_value = float(parts[2])
+        if direction == "long":
+            # 计算前 period 行的最低价（不包含当前行）
+            min_low_series = df['low'].shift(1).rolling(window=period).min()
+            # 计算前 period 行的最高价（不包含当前行）
+            max_high_series = df['high'].shift(1).rolling(window=period).max()
+            # 计算目标价格：min + abs_value% * (max - min)
+            target_price = min_low_series + abs_value / 100 * (max_high_series - min_low_series)
+            # 生成信号：如果当前行的 high 上穿目标价格
+            signal_series = (df['high'].shift(1) <= target_price) & (df['high'] > target_price)
+            price_series = target_price  # 价格设置为目标价格
+
+        else:  # direction == "short"
+            # 计算前 period 行的最高价（不包含当前行）
+            max_high_series = df['high'].shift(1).rolling(window=period).max()
+            # 计算前 period 行的最低价（不包含当前行）
+            min_low_series = df['low'].shift(1).rolling(window=period).min()
+            # 计算目标价格：max - abs_value% * (max - min)
+            target_price = max_high_series - abs_value / 100 * (max_high_series - min_low_series)
+            # 生成信号：如果当前行的 low 下穿目标价格
+            signal_series = (df['low'].shift(1) >= target_price) & (df['low'] < target_price)
+            price_series = target_price  # 价格设置为目标价格
+        return signal_series, price_series
+
     else:
         raise ValueError(f"未知的信号类型: {signal_type}")
 
@@ -337,7 +373,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, signal_cache, is_f
     kai_signal, kai_price_series = get_signal_and_price(kai_column)
     pin_signal, pin_price_series = get_signal_and_price(pin_column)
     # 如果信号为空，则直接返回
-    if kai_signal.sum() < 20 or pin_signal.sum() < 20:
+    if kai_signal.sum() < 100 or pin_signal.sum() < 100:
         return None, None
 
     # 筛选出对应的开仓和平仓数据行（建议开仓复制，平仓暂不复制以节省内存）
@@ -471,7 +507,7 @@ def generate_numbers(start, end, number, even=True):
     if start > end or number <= 0:
         return []
     if number == 1:
-        return [start] if start <= end else []
+        return []
 
     result = []
     if even:
@@ -517,6 +553,20 @@ def process_tasks(task_chunk, df, is_filter):
     print(f"处理 {len(task_chunk) * 1} 个任务，耗时 {time.time() - start_time:.2f} 秒。")
     return results
 
+def gen_ma_signal_name(start_period, end_period, step):
+    """
+    生成 ma 信号的列名列表。
+    :param start_period:
+    :param end_period:
+    :param step:
+    :return:
+    """
+    period_list = generate_numbers(start_period, end_period, step, even=False)
+    long_columns = [f"ma_{period}_high_long" for period in period_list]
+    short_columns = [f"ma_{period}_low_short" for period in period_list]
+    key_name = f'ma_{start_period}_{end_period}_{step}'
+    return long_columns, short_columns, key_name
+
 
 def gen_peak_signal_name(start_period, end_period, step):
     """
@@ -550,17 +600,28 @@ def gen_abs_signal_name(start_period, end_period, step, start_period1, end_perio
     key_name = f'abs_{start_period}_{end_period}_{step}_{start_period1}_{end_period1}_{step1}'
     return long_columns, short_columns, key_name
 
+def gen_relate_signal_name(start_period, end_period, step, start_period1, end_period1, step1):
+    """"""
+    period_list = generate_numbers(start_period, end_period, step, even=False)
+    period_list1 = range(start_period1, end_period1, step1)
+    long_columns = [f"relate_{period}_{period1}_high_long" for period in period_list for period1 in period_list1 if period >= period1]
+    short_columns = [f"relate_{period}_{period1}_low_short" for period in period_list for period1 in period_list1 if period >= period1]
+    key_name = f'relate_{start_period}_{end_period}_{step}_{start_period1}_{end_period1}_{step1}'
+    return long_columns, short_columns, key_name
+
 def backtest_breakthrough_strategy(df, base_name, is_filter):
     """
     回测函数：基于原始数据 df 和指定周期范围，
     生成所有 (kai, pin) 信号对（kai 信号命名为 "{period}_high_long"，pin 信号命名为 "{period}_low_short"），
     使用多进程并行调用 process_tasks() 完成回测，并将统计结果保存到 CSV 文件。
     """
-    peak_long_columns, peak_short_columns, peak_key_name = gen_peak_signal_name(1, 1000, 100)
-    continue_long_columns, continue_short_columns, continue_key_name = gen_continue_signal_name(1, 14, 1)
-    abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 1000, 30, 1, 15, 1)
-    long_columns = peak_long_columns + continue_long_columns + abs_long_columns
-    short_columns = peak_short_columns + continue_short_columns + abs_short_columns
+    ma_long_columns, ma_short_columns, ma_key_name = gen_ma_signal_name(1, 3000, 100)
+    peak_long_columns, peak_short_columns, peak_key_name = gen_peak_signal_name(1, 1, 1)
+    continue_long_columns, continue_short_columns, continue_key_name = gen_continue_signal_name(1, 1, 1)
+    abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 1, 1, 1, 1, 1)
+    relate_long_columns, relate_short_columns, relate_key_name = gen_relate_signal_name(1, 500, 30, 1, 50, 10)
+    long_columns = peak_long_columns + continue_long_columns + abs_long_columns + ma_long_columns + relate_long_columns
+    short_columns = peak_short_columns + continue_short_columns + abs_short_columns + ma_short_columns + relate_short_columns
     all_columns = long_columns + short_columns
     print(f'共有 {len(all_columns)} 个信号列。')
     # task_list = list(product(long_columns, short_columns))
@@ -575,7 +636,7 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     print(f'共有 {len(task_list)} 个任务，分为 {len(big_task_chunks)} 大块。')
     for i, task_chunk in enumerate(big_task_chunks):
         # 将task_list打乱顺序
-        output_path = f"temp/statistic_{base_name}_{peak_key_name}_{continue_key_name}_{abs_key_name}is_filter-{is_filter}_part{i}.csv"
+        output_path = f"temp/statistic_{base_name}_{peak_key_name}_{continue_key_name}_{abs_key_name}_{ma_key_name}_{relate_key_name}_is_filter-{is_filter}_part{i}.csv"
         if os.path.exists(output_path):
             print(f'已存在 {output_path}')
             continue
