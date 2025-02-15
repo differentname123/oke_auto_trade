@@ -106,70 +106,55 @@ def compute_signal(df, col_name):
 
 
 def calculate_max_sequence(kai_data_df):
-    """
-    计算最大连续亏损（子序列的最小和）及对应的起始和结束索引。
-    """
-    true_profit_series = kai_data_df['true_profit']
-    max_loss = 0
-    current_loss = 0
-    start_index = None
-    temp_start_index = None
-    end_index = None
-    trade_count = 0  # 初始化交易计数器
-    max_sequence_length = 0
-    for i, profit in enumerate(true_profit_series):
-        if current_loss == 0:
-            temp_start_index = kai_data_df.index[i]
-            trade_count = 0  # 在新的潜在亏损序列开始时，重置 trade_count (也可以不重置，在current_loss > 0 时重置更清晰)
+    series = kai_data_df['true_profit'].to_numpy()
+    min_sum, cur_sum = 0, 0
+    start_idx, min_start, min_end = None, None, None
+    trade_count, max_trade_count = 0, 0
 
-        current_loss += profit
-        trade_count += 1  # 每次迭代都增加交易计数
+    for i, profit in enumerate(series):
+        if cur_sum == 0:
+            start_idx = i
+            trade_count = 0
 
-        if current_loss < max_loss:
-            max_loss = current_loss
-            start_index = temp_start_index
-            end_index = kai_data_df.index[i]
-            max_sequence_length = trade_count  # 直接使用 trade_count 更新最大子序列长度
+        cur_sum += profit
+        trade_count += 1
 
-        if current_loss > 0:
-            current_loss = 0
-            trade_count = 0  # 当盈利出现时，重置亏损和交易计数
+        if cur_sum < min_sum:
+            min_sum = cur_sum
+            min_start, min_end = start_idx, i
+            max_trade_count = trade_count
 
-    return max_loss, start_index, end_index, max_sequence_length
+        if cur_sum > 0:
+            cur_sum = 0
+            trade_count = 0
+
+    return min_sum, min_start, min_end, max_trade_count
 
 
 def calculate_max_profit(kai_data_df):
-    """
-    计算最大连续盈利（子序列的最大和）及对应的起始和结束索引。
-    """
-    true_profit_series = kai_data_df['true_profit']
-    max_profit = 0
-    current_profit = 0
-    start_index = None
-    temp_start_index = None
-    end_index = None
-    trade_count = 0  # 初始化交易计数器
-    max_sequence_length = 0
+    series = kai_data_df['true_profit'].to_numpy()
+    max_sum, cur_sum = 0, 0
+    start_idx, max_start, max_end = None, None, None
+    trade_count, max_trade_count = 0, 0
 
-    for i, profit in enumerate(true_profit_series):
-        if current_profit == 0:
-            temp_start_index = kai_data_df.index[i]
-            trade_count = 0  # 在新的潜在盈利序列开始时，重置 trade_count (也可以不重置，在current_profit < 0 时重置更清晰)
+    for i, profit in enumerate(series):
+        if cur_sum == 0:
+            start_idx = i
+            trade_count = 0
 
-        current_profit += profit
-        trade_count += 1  # 每次迭代都增加交易计数
+        cur_sum += profit
+        trade_count += 1
 
-        if current_profit > max_profit:
-            max_profit = current_profit
-            start_index = temp_start_index
-            end_index = kai_data_df.index[i]
-            max_sequence_length = trade_count  # 直接使用 trade_count 更新最大子序列长度
+        if cur_sum > max_sum:
+            max_sum = cur_sum
+            max_start, max_end = start_idx, i
+            max_trade_count = trade_count
 
-        if current_profit < 0:
-            current_profit = 0
-            trade_count = 0  # 当亏损出现时，重置盈利和交易计数
+        if cur_sum < 0:
+            cur_sum = 0
+            trade_count = 0
 
-    return max_profit, start_index, end_index, max_sequence_length
+    return max_sum, max_start, max_end, max_trade_count
 
 
 def get_detail_backtest_result(df, kai_column, pin_column, signal_cache, is_filter=True):
@@ -341,121 +326,88 @@ def calculate_failure_rates(df: pd.DataFrame, period_list: list) -> dict:
 
 
 def get_detail_backtest_result_op(df, kai_column, pin_column, signal_cache, is_filter=True):
-    """
-    根据传入的信号列（开仓信号 kai_column 与平仓信号 pin_column），在原始 df 上动态生成信号，
-    进行回测计算，并返回对应的明细 DataFrame 和统计信息（statistic_dict）。
-
-    参数:
-        df: 原始数据的 DataFrame，要求按时间索引排序，且包含 'timestamp' 列。
-        kai_column: 开仓信号所在的列名称。
-        pin_column: 平仓信号所在的列名称。
-        signal_cache: 字典，用于缓存信号及相关数据，避免重复计算。
-        is_filter: 是否过滤重复平仓时间的交易（默认 True）。
-
-    返回:
-        kai_data_df: 包含开仓和平仓、价格、收益率等信息的明细 DataFrame。
-        statistic_dict: 回测统计数据的字典，其中包含各种指标信息。
-    """
-
-    # 判断开仓方向
     kai_side = 'long' if 'long' in kai_column.lower() else 'short'
 
-    # 内部函数：从缓存中获取信号数据，否则计算并缓存
     def get_signal_and_price(column):
         if column in signal_cache:
             return signal_cache[column]
-        # 假设 compute_signal 函数返回 (signal_mask, price_series)
         signal_data = compute_signal(df, column)
         signal_cache[column] = signal_data
         return signal_data
 
-    # 获取开仓和平仓信号及对应价格序列
     kai_signal, kai_price_series = get_signal_and_price(kai_column)
     pin_signal, pin_price_series = get_signal_and_price(pin_column)
-    # 如果信号为空，则直接返回
+
     if kai_signal.sum() < 100 or pin_signal.sum() < 100:
         return None, None
 
-    # 筛选出对应的开仓和平仓数据行（建议开仓复制，平仓暂不复制以节省内存）
     kai_data_df = df.loc[kai_signal].copy()
     pin_data_df = df.loc[pin_signal]
 
-    # 添加价格字段，注意这里利用 numpy 数组确保索引对齐处理
-    kai_data_df['kai_price'] = np.asarray(kai_price_series[kai_signal])
-    pin_data_df = pin_data_df.assign(pin_price=np.asarray(pin_price_series[pin_signal]))
+    kai_data_df['kai_price'] = kai_price_series[kai_signal].to_numpy()
+    pin_data_df = pin_data_df.assign(pin_price=pin_price_series[pin_signal].to_numpy())
 
-    # 利用 searchsorted 找到每个开仓信号对应的平仓信号（平仓时间严格大于开仓时间）
-    # 注意：假设两个 DataFrame 均按时间索引排序
-    kai_data_df['pin_index'] = pin_data_df.index.searchsorted(kai_data_df.index, side='right')
-    valid_mask = kai_data_df['pin_index'] < len(pin_data_df)
-    kai_data_df = kai_data_df.loc[valid_mask].copy()  # 重新 copy 确保数据一致性
-    kai_data_df['kai_side'] = kai_side
+    pin_indices = pin_data_df.index.searchsorted(kai_data_df.index, side='right')
+    valid_mask = pin_indices < len(pin_data_df)
+    kai_data_df = kai_data_df.loc[valid_mask]
 
-    # 根据计算出的索引，找到匹配的平仓数据
-    pin_indices = kai_data_df['pin_index'].to_numpy()
-    matched_pin = pin_data_df.iloc[pin_indices]
-    kai_data_df['pin_price'] = np.asarray(matched_pin['pin_price'])
-    kai_data_df['pin_time'] = np.asarray(matched_pin['timestamp'])
-    kai_data_df['hold_time'] = matched_pin.index.to_numpy() - kai_data_df.index.to_numpy()
+    matched_pin = pin_data_df.iloc[pin_indices[valid_mask]]
+    kai_data_df = kai_data_df.assign(
+        pin_price=matched_pin['pin_price'].to_numpy(),
+        pin_time=matched_pin['timestamp'].to_numpy(),
+        hold_time=(matched_pin.index.to_numpy() - kai_data_df.index.to_numpy())
+    )
 
-    # 计算收益率（向量化计算）
-    if kai_side == 'long':
-        profit = (kai_data_df['pin_price'] - kai_data_df['kai_price']) / kai_data_df['kai_price'] * 100
-    else:
-        profit = (kai_data_df['kai_price'] - kai_data_df['pin_price']) / kai_data_df['pin_price'] * 100
-    kai_data_df['profit'] = profit.round(4)
+    price_diff = kai_data_df['pin_price'] - kai_data_df['kai_price']
+    kai_data_df['profit'] = (price_diff / kai_data_df['kai_price'] * 100).round(4) if kai_side == 'long' else \
+                            (-price_diff / kai_data_df['pin_price'] * 100).round(4)
 
-    # 考虑交易成本（此处固定每笔 0.07 的成本）
     kai_data_df['true_profit'] = kai_data_df['profit'] - 0.07
 
-    # 若需要过滤重复平仓时间的交易，则按 'timestamp' 排序后去重
     if is_filter:
         kai_data_df = kai_data_df.sort_values('timestamp').drop_duplicates('pin_time', keep='first')
 
-    # # 计算失败率（假设 calculate_failure_rates 接收 DataFrame 与列表参数）
-    # failure_rate_result = calculate_failure_rates(kai_data_df, list(range(1, 11)))
-
-    # 收集交易数及全局数据量
-    trade_count = kai_data_df.shape[0]
-    total_count = df.shape[0]
+    trade_count = len(kai_data_df)
+    total_count = len(df)
     profit_sum = kai_data_df['profit'].sum()
 
     max_single_profit = kai_data_df['true_profit'].max()
     min_single_profit = kai_data_df['true_profit'].min()
 
     true_profit_std = kai_data_df['true_profit'].std()
-    true_profit_mean = kai_data_df['true_profit'].mean() if trade_count > 0 else 0
-    true_profit_mean = round(true_profit_mean * 100, 4)
+    true_profit_mean = kai_data_df['true_profit'].mean() * 100 if trade_count > 0 else 0
 
-    # 计算最大连续亏损相关指标（假设 calculate_max_sequence 返回：loss, start_idx, end_idx, count ）
     max_loss, max_loss_start_idx, max_loss_end_idx, loss_trade_count = calculate_max_sequence(kai_data_df)
-    max_loss_start_time = kai_data_df.loc[max_loss_start_idx, 'timestamp'] if max_loss_start_idx is not None else None
-    max_loss_end_time = kai_data_df.loc[max_loss_end_idx, 'timestamp'] if max_loss_end_idx is not None else None
-    max_loss_hold_time = (max_loss_end_idx - max_loss_start_idx) if (
-                max_loss_start_idx is not None and max_loss_end_idx is not None) else None
-
-    # 计算最大连续盈利相关指标（假设 calculate_max_profit 返回：profit, start_idx, end_idx, count ）
     max_profit, max_profit_start_idx, max_profit_end_idx, profit_trade_count = calculate_max_profit(kai_data_df)
-    max_profit_start_time = kai_data_df.loc[
-        max_profit_start_idx, 'timestamp'] if max_profit_start_idx is not None else None
-    max_profit_end_time = kai_data_df.loc[max_profit_end_idx, 'timestamp'] if max_profit_end_idx is not None else None
-    max_profit_hold_time = (max_profit_end_idx - max_profit_start_idx) if (
-                max_profit_start_idx is not None and max_profit_end_idx is not None) else None
 
-    # 根据 true_profit 划分盈利和亏损交易
+    # 修正 max_loss 相关时间计算
+    if max_loss_start_idx is not None and max_loss_end_idx is not None:
+        max_loss_start_time = kai_data_df.iloc[max_loss_start_idx]['timestamp']
+        max_loss_end_time = kai_data_df.iloc[max_loss_end_idx]['timestamp']
+        max_loss_hold_time = kai_data_df.index[max_loss_end_idx] - kai_data_df.index[max_loss_start_idx]
+    else:
+        max_loss_start_time, max_loss_end_time, max_loss_hold_time = None, None, None
+
+    # 修正 max_profit 相关时间计算
+    if max_profit_start_idx is not None and max_profit_end_idx is not None:
+        max_profit_start_time = kai_data_df.iloc[max_profit_start_idx]['timestamp']
+        max_profit_end_time = kai_data_df.iloc[max_profit_end_idx]['timestamp']
+        max_profit_hold_time = kai_data_df.index[max_profit_end_idx] - kai_data_df.index[max_profit_start_idx]
+    else:
+        max_profit_start_time, max_profit_end_time, max_profit_hold_time = None, None, None
+
+
     profit_df = kai_data_df[kai_data_df['true_profit'] > 0]
     loss_df = kai_data_df[kai_data_df['true_profit'] < 0]
-    net_profit_rate = kai_data_df['true_profit'].sum()
 
-    loss_rate = (loss_df.shape[0] / trade_count) if trade_count > 0 else 0
+    loss_rate = loss_df.shape[0] / trade_count if trade_count > 0 else 0
     loss_time = loss_df['hold_time'].sum() if not loss_df.empty else 0
     profit_time = profit_df['hold_time'].sum() if not profit_df.empty else 0
-    loss_time_rate = (loss_time / (loss_time + profit_time)) if (loss_time + profit_time) > 0 else 0
+    loss_time_rate = loss_time / (loss_time + profit_time) if (loss_time + profit_time) > 0 else 0
 
     trade_rate = round(100 * trade_count / total_count, 4) if total_count > 0 else 0
     hold_time_mean = kai_data_df['hold_time'].mean() if trade_count > 0 else 0
 
-    # 汇总所有统计指标到字典
     statistic_dict = {
         'kai_side': kai_side,
         'kai_column': kai_column,
@@ -470,8 +422,8 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, signal_cache, is_f
         'max_profit': max_single_profit,
         'min_profit': min_single_profit,
         'cost_rate': trade_count * 0.07,
-        'net_profit_rate': net_profit_rate,
-        'avg_profit_rate': true_profit_mean,
+        'net_profit_rate': kai_data_df['true_profit'].sum(),
+        'avg_profit_rate': round(true_profit_mean, 4),
         'true_profit_std': true_profit_std,
         'max_consecutive_loss': round(max_loss, 4),
         'max_loss_trade_count': loss_trade_count,
@@ -484,10 +436,6 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, signal_cache, is_f
         'max_profit_start_time': max_profit_start_time,
         'max_profit_end_time': max_profit_end_time,
     }
-
-    # # 将失败率指标添加到统计字典中
-    # for key, value in failure_rate_result.items():
-    #     statistic_dict[f'failure_rate_{key}'] = value
 
     return kai_data_df, statistic_dict
 
@@ -615,11 +563,11 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     生成所有 (kai, pin) 信号对（kai 信号命名为 "{period}_high_long"，pin 信号命名为 "{period}_low_short"），
     使用多进程并行调用 process_tasks() 完成回测，并将统计结果保存到 CSV 文件。
     """
-    ma_long_columns, ma_short_columns, ma_key_name = gen_ma_signal_name(1, 3000, 100)
-    peak_long_columns, peak_short_columns, peak_key_name = gen_peak_signal_name(1, 1, 1)
-    continue_long_columns, continue_short_columns, continue_key_name = gen_continue_signal_name(1, 1, 1)
-    abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 1, 1, 1, 1, 1)
-    relate_long_columns, relate_short_columns, relate_key_name = gen_relate_signal_name(1, 500, 30, 1, 50, 10)
+    ma_long_columns, ma_short_columns, ma_key_name = gen_ma_signal_name(1, 2500, 50)
+    peak_long_columns, peak_short_columns, peak_key_name = gen_peak_signal_name(1, 2500, 50)
+    continue_long_columns, continue_short_columns, continue_key_name = gen_continue_signal_name(1, 15, 1)
+    abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 2500, 50, 1, 20, 2)
+    relate_long_columns, relate_short_columns, relate_key_name = gen_relate_signal_name(1, 2000, 40, 10, 40, 10)
     long_columns = peak_long_columns + continue_long_columns + abs_long_columns + ma_long_columns + relate_long_columns
     short_columns = peak_short_columns + continue_short_columns + abs_short_columns + ma_short_columns + relate_short_columns
     all_columns = long_columns + short_columns
@@ -649,7 +597,11 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
         print(f'共有 {len(task_chunk)} 个任务，分为 {len(task_chunks)} 块。')
 
         # # debug
-        # result = process_tasks(task_chunks[0], df, is_filter)
+        # start_time = time.time()
+        # statistic_dict_list = process_tasks(task_chunks[0], df, is_filter)
+        # result = [x for x in statistic_dict_list if x is not None]
+        # result_df = pd.DataFrame(result)
+        # print(f'单块任务耗时 {time.time() - start_time:.2f} 秒。')
 
         statistic_dict_list = []
         pool_processes = max(1, multiprocessing.cpu_count())
