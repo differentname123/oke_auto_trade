@@ -487,6 +487,9 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, signal_cache, is_f
     kai_data_df['kai_price'] = kai_price_series[kai_signal].to_numpy()
     pin_data_df = pin_data_df.assign(pin_price=pin_price_series[pin_signal].to_numpy())
 
+    # 删除kai_data_df中timestamp在pin_data_df中timestamp一样的数据
+    kai_data_df = kai_data_df[~kai_data_df.index.isin(pin_data_df.index)]
+
     pin_indices = pin_data_df.index.searchsorted(kai_data_df.index, side='right')
     valid_mask = pin_indices < len(pin_data_df)
     kai_data_df = kai_data_df.loc[valid_mask]
@@ -829,7 +832,7 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
 
         statistic_dict_list = []
         pool_processes = max(1, multiprocessing.cpu_count())
-        with multiprocessing.Pool(processes=pool_processes - 10) as pool:
+        with multiprocessing.Pool(processes=pool_processes) as pool:
             results = pool.starmap(process_tasks, [(chunk, df, is_filter) for chunk in task_chunks])
         for res in results:
             statistic_dict_list.extend(res)
@@ -1038,6 +1041,7 @@ def choose_good_strategy_debug(inst_id='BTC'):
         # df['pin_period'] = df['pin_column'].apply(lambda x: int(x.split('_')[0]))
 
         df['filename'] = file.split('_')[5]
+        df['pin_side'] = df['pin_column'].apply(lambda x: x.split('_')[-1])
         # 删除kai_column和pin_column中不包含 ma的行
         # df = df[(df['kai_column'].str.contains('ma')) & (df['pin_column'].str.contains('ma'))]
         # 删除kai_column和pin_column中包含 abs的行
@@ -1046,11 +1050,12 @@ def choose_good_strategy_debug(inst_id='BTC'):
 
         # df = df[(df['true_profit_std'] < 10)]
         # df = df[(df['max_consecutive_loss'] > -50)]
-        df = df[(df['avg_profit_rate'] > 10)]
+        df = df[(df['pin_side'] != df['kai_side'])]
+        df = df[(df['avg_profit_rate'] > 1)]
         # df = df[(df['hold_time_mean'] < 10000)]
         # df = df[(df['max_beilv'] > 1)]
         # df = df[(df['loss_beilv'] > 1)]
-        df = df[(df['kai_count'] > 500)]
+        df = df[(df['kai_count'] > 100)]
         # df = df[(df['pin_period'] < 50)]
         if file_key not in df_map:
             df_map[file_key] = []
@@ -1276,6 +1281,8 @@ def debug():
         # good_df = pd.read_csv('temp/final_good.csv')
 
         origin_good_df = choose_good_strategy_debug(inst_id)
+
+
         # # # 获取origin_good_df中不重复的kai_column与pin_column的值
         # # kai_column_list = origin_good_df['kai_column'].unique()
         # # pin_column_list = origin_good_df['pin_column'].unique()
@@ -1307,7 +1314,7 @@ def debug():
 
         is_filter = True
         is_detail = False
-        df = pd.read_csv(f'kline_data/origin_data_1m_2000_{inst_id}-USDT-SWAP.csv')
+        df = pd.read_csv(f'kline_data/origin_data_1m_50000_{inst_id}-USDT-SWAP.csv')
         # 计算每一行的涨跌幅
         df['chg'] = df['close'].pct_change() * 100
         signal_cache = {}

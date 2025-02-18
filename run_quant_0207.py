@@ -85,7 +85,6 @@ async def fetch_new_data(strategy_df):
             if current_minute is None or now.minute != current_minute:
                 print(f"🕐 {now.strftime('%H:%M')} 触发数据更新...")
                 await asyncio.sleep(9)
-                current_minute = now.minute  # 更新当前分钟
                 attempt = 0
                 while attempt < max_attempts:
                     df = newest_data.get_newest_data()  # 获取最新数据
@@ -102,6 +101,7 @@ async def fetch_new_data(strategy_df):
 
                         print(f"📈 更新开多仓价格映射：{kai_high_price_map} 📉 更新开空仓价格映射：{kai_low_price_map} 📈 更新平多仓价格映射：{pin_high_price_map} 📉 更新平空仓价格映射：{pin_low_price_map}")
                         previous_timestamp = latest_timestamp
+                        current_minute = now.minute  # 更新当前分钟
                         break  # 数据已更新，跳出循环
                     else:
                         print(f"⚠️ 数据未变化，尝试重新获取 ({attempt + 1}/{max_attempts})...")
@@ -122,7 +122,7 @@ async def fetch_new_data(strategy_df):
 async def websocket_listener(kai_pin_map):
     default_size = min_count_map[INSTRUMENT]
     """ 监听 WebSocket 实时数据，并对比 high_price_map 和 low_price_map """
-    global kai_high_price_map, kai_low_price_map, pin_high_price_map, pin_low_price_map, order_detail_map
+    global kai_high_price_map, kai_low_price_map, pin_high_price_map, pin_low_price_map, order_detail_map, current_minute
     async with websockets.connect(OKX_WS_URL) as ws:
         print("✅ 已连接到 OKX WebSocket")
 
@@ -144,16 +144,14 @@ async def websocket_listener(kai_pin_map):
                     for trade in data["data"]:
                         price = float(trade["px"])  # 最新成交价格
                         if price != pre_price:
-                            # 获取当前时间精确到分钟
-                            current_time = datetime.datetime.now().strftime('%H:%M')
                             for key, high_price in kai_high_price_map.items():
                                 if price >= high_price:
                                     # 要求key 不在order_detail_map中，避免重复下单
                                     if key not in order_detail_map:
                                         result = place_order(INSTRUMENT, "buy", default_size)  # 以最优价格开多 0.01 BTC
                                         if result:
-                                            order_detail_map[key] = {'price': price, 'side': 'buy', 'pin_side':'sell', 'time': current_time, 'size': default_size}
-                                            print(f"📈 开多仓 {key} 成交，价格：{price}，时间：{datetime.datetime.now()}")
+                                            order_detail_map[key] = {'price': price, 'side': 'buy', 'pin_side':'sell', 'time': current_minute, 'size': default_size}
+                                            print(f"📈 开仓 {key} 成交，价格：{price}，时间：{datetime.datetime.now()}")
 
 
                             for key, low_price in kai_low_price_map.items():
@@ -161,8 +159,8 @@ async def websocket_listener(kai_pin_map):
                                     if key not in order_detail_map:
                                         result = place_order(INSTRUMENT, "sell", default_size)
                                         if result:
-                                            order_detail_map[key] = {'price': price, 'side': 'sell', 'pin_side':'buy', 'time': current_time, 'size': default_size}
-                                            print(f"📉 开空仓 {key} 成交，价格：{price}，时间：{datetime.datetime.now()}")
+                                            order_detail_map[key] = {'price': price, 'side': 'sell', 'pin_side':'buy', 'time': current_minute, 'size': default_size}
+                                            print(f"📉 开仓 {key} 成交，价格：{price}，时间：{datetime.datetime.now()}")
 
 
                             # 如果order_detail_map中有数据，说明有订单成交
@@ -171,11 +169,12 @@ async def websocket_listener(kai_pin_map):
 
                                 for kai_key, order_detail in list(order_detail_map.items()):  # 用 list() 避免字典修改问题
                                     order_time = order_detail['time']
-                                    if current_time == order_time:
+                                    if current_minute == order_time:
                                         continue
                                     pin_key = kai_pin_map.get(kai_key)  # 避免 KeyError
                                     if not pin_key:
                                         continue  # 如果 key 不存在，则跳过
+                                    kai_price = order_detail['price']
 
                                     # 检查是否需要平仓
                                     if pin_key in pin_high_price_map:
@@ -186,7 +185,7 @@ async def websocket_listener(kai_pin_map):
                                             if result:
                                                 keys_to_remove.append(kai_key)  # 先记录 key，稍后删除
                                                 print(
-                                                    f"📈 【平空仓】 {order_detail['pin_side']} 成交，价格：{price}，时间：{datetime.datetime.now()}")
+                                                    f"📈 【平仓】{pin_key} {order_detail['pin_side']} 成交，价格：{price}，开仓价格 {kai_price} kai_key {kai_key} pin_key {pin_key} order_time {order_time} current_minute {current_minute} 时间：{datetime.datetime.now()}")
 
                                     elif pin_key in pin_low_price_map:
                                         pin_price = pin_low_price_map[pin_key]
@@ -196,7 +195,7 @@ async def websocket_listener(kai_pin_map):
                                             if result:
                                                 keys_to_remove.append(kai_key)  # 先记录 key，稍后删除
                                                 print(
-                                                    f"📉 【平多仓】 {order_detail['pin_side']} 成交，价格：{price}，时间：{datetime.datetime.now()}")
+                                                    f"📉 【平仓】{pin_key} {order_detail['pin_side']} 成交，价格：{price}，开仓价格 {kai_price} kai_key {kai_key} pin_key {pin_key} order_time {order_time} current_minute {current_minute} 时间：{datetime.datetime.now()}")
 
                                 # 在循环结束后删除已平仓的订单
                                 for key in keys_to_remove:
@@ -330,7 +329,7 @@ def choose_good_strategy(inst_id='BTC'):
         # df = df[(df['hold_time_mean'] < 10000)]
         # df = df[(df['max_beilv'] > 1)]
         # df = df[(df['loss_beilv'] > 1)]
-        df = df[(df['kai_count'] > 500)]
+        df = df[(df['kai_count'] > 1000)]
         # df = df[(df['pin_period'] < 50)]
         if file_key not in df_map:
             df_map[file_key] = []
@@ -387,7 +386,7 @@ async def main():
     range_key = 'kai_count'
     sort_key = 'avg_profit_rate'
     sort_key = 'score'
-    range_size = 100
+    range_size = 1000
     # # good_strategy_df1 = pd.read_csv('temp/temp.csv')
     good_strategy_df = choose_good_strategy(INSTRUMENT)
     # 筛选出kai_side为long的数据
