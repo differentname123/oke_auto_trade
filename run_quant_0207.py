@@ -144,13 +144,15 @@ async def websocket_listener(kai_pin_map):
                     for trade in data["data"]:
                         price = float(trade["px"])  # 最新成交价格
                         if price != pre_price:
+                            # 获取当前时间精确到分钟
+                            current_time = datetime.datetime.now().strftime('%H:%M')
                             for key, high_price in kai_high_price_map.items():
                                 if price >= high_price:
                                     # 要求key 不在order_detail_map中，避免重复下单
                                     if key not in order_detail_map:
                                         result = place_order(INSTRUMENT, "buy", default_size)  # 以最优价格开多 0.01 BTC
                                         if result:
-                                            order_detail_map[key] = {'price': price, 'side': 'buy', 'pin_side':'sell', 'time': datetime.datetime.now(), 'size': default_size}
+                                            order_detail_map[key] = {'price': price, 'side': 'buy', 'pin_side':'sell', 'time': current_time, 'size': default_size}
                                             print(f"📈 开多仓 {key} 成交，价格：{price}，时间：{datetime.datetime.now()}")
 
 
@@ -159,7 +161,7 @@ async def websocket_listener(kai_pin_map):
                                     if key not in order_detail_map:
                                         result = place_order(INSTRUMENT, "sell", default_size)
                                         if result:
-                                            order_detail_map[key] = {'price': price, 'side': 'sell', 'pin_side':'buy', 'time': datetime.datetime.now(), 'size': default_size}
+                                            order_detail_map[key] = {'price': price, 'side': 'sell', 'pin_side':'buy', 'time': current_time, 'size': default_size}
                                             print(f"📉 开空仓 {key} 成交，价格：{price}，时间：{datetime.datetime.now()}")
 
 
@@ -168,6 +170,9 @@ async def websocket_listener(kai_pin_map):
                                 keys_to_remove = []  # 存储需要删除的键，避免循环中修改字典
 
                                 for kai_key, order_detail in list(order_detail_map.items()):  # 用 list() 避免字典修改问题
+                                    order_time = order_detail['time']
+                                    if current_time == order_time:
+                                        continue
                                     pin_key = kai_pin_map.get(kai_key)  # 避免 KeyError
                                     if not pin_key:
                                         continue  # 如果 key 不存在，则跳过
