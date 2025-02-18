@@ -829,7 +829,7 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
 
         statistic_dict_list = []
         pool_processes = max(1, multiprocessing.cpu_count())
-        with multiprocessing.Pool(processes=pool_processes) as pool:
+        with multiprocessing.Pool(processes=pool_processes - 10) as pool:
             results = pool.starmap(process_tasks, [(chunk, df, is_filter) for chunk in task_chunks])
         for res in results:
             statistic_dict_list.extend(res)
@@ -1046,11 +1046,11 @@ def choose_good_strategy_debug(inst_id='BTC'):
 
         # df = df[(df['true_profit_std'] < 10)]
         # df = df[(df['max_consecutive_loss'] > -50)]
-        df = df[(df['avg_profit_rate'] > 0)]
+        df = df[(df['avg_profit_rate'] > 10)]
         # df = df[(df['hold_time_mean'] < 10000)]
         # df = df[(df['max_beilv'] > 1)]
         # df = df[(df['loss_beilv'] > 1)]
-        # df = df[(df['kai_count'] > 100)]
+        df = df[(df['kai_count'] > 500)]
         # df = df[(df['pin_period'] < 50)]
         if file_key not in df_map:
             df_map[file_key] = []
@@ -1253,15 +1253,18 @@ def debug():
 
 
     # origin_good_df_list = []
-    # inst_id_list = ['BTC', 'ETH']
+    # inst_id_list = ['BTC', 'ETH', 'SOL', 'TON']
     # for inst_id in inst_id_list:
     #     origin_good_df = choose_good_strategy_debug(inst_id)
     #     origin_good_df_list.append(origin_good_df)
+    # all_df = pd.concat(origin_good_df_list)
+    # all_df = pd.read_csv('temp/all.csv')
     # merged_df, temp_df = merge_dataframes(origin_good_df_list)
     # origin_good_df = pd.read_csv('temp/temp.csv')
     # sort_key = gen_score(origin_good_df, 'kai_count')
 
     # debug
+    statistic_df_list = []
     range_key = 'kai_count'
     sort_key = 'avg_profit_rate'
     sort_key = 'score'
@@ -1269,18 +1272,24 @@ def debug():
     # sort_key = 'max_consecutive_loss'
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     for inst_id in inst_id_list:
+        # origin_good_df = pd.read_csv('temp/all.csv')
+        # good_df = pd.read_csv('temp/final_good.csv')
 
         origin_good_df = choose_good_strategy_debug(inst_id)
-        # # 获取origin_good_df中不重复的kai_column与pin_column的值
-        # kai_column_list = origin_good_df['kai_column'].unique()
-        # pin_column_list = origin_good_df['pin_column'].unique()
-        # all_column_list = list(set(kai_column_list) | set(pin_column_list))
-        # origin_good_df = pd.read_csv('temp/temp.csv')
-        # origin_good_df.to_csv('temp/final_good.csv', index=False)
-        # 按照loss_score降序排列，选取前20行
-        # peak_1_high_long
-        # abs_1_0.4_high_long
-        # origin_good_df = origin_good_df[(origin_good_df['kai_side'] == 'short')]
+        # # # 获取origin_good_df中不重复的kai_column与pin_column的值
+        # # kai_column_list = origin_good_df['kai_column'].unique()
+        # # pin_column_list = origin_good_df['pin_column'].unique()
+        # # all_column_list = list(set(kai_column_list) | set(pin_column_list))
+        # # origin_good_df = pd.read_csv('temp/temp.csv')
+        # # origin_good_df.to_csv('temp/final_good.csv', index=False)
+        # # 按照loss_score降序排列，选取前20行
+        # # peak_1_high_long
+        # # abs_1_0.4_high_long
+        # # origin_good_df = origin_good_df[(origin_good_df['kai_side'] == 'short')]
+
+
+        # kai_column和pin_column相同的时候取第一行
+        origin_good_df = origin_good_df.drop_duplicates(subset=['kai_column', 'pin_column'], keep='first')
         good_df = origin_good_df.sort_values(sort_key, ascending=False)
         long_good_strategy_df = good_df[good_df['kai_side'] == 'long']
         short_good_strategy_df = good_df[good_df['kai_side'] == 'short']
@@ -1291,12 +1300,14 @@ def debug():
         short_good_select_df = select_best_rows_in_ranges(short_good_strategy_df, range_size=range_size,
                                                           sort_key=sort_key, range_key=range_key)
         good_df = pd.concat([long_good_select_df, short_good_select_df])
-
-
+        # good_df = good_df.sort_values(by=sort_key, ascending=True)
+        # good_df = good_df.drop_duplicates(subset=['kai_column', 'kai_side'], keep='first')
+        good_df.to_csv('temp/final_good.csv', index=False)
 
 
         is_filter = True
-        df = pd.read_csv(f'kline_data/origin_data_1m_50000_{inst_id}-USDT-SWAP.csv')
+        is_detail = False
+        df = pd.read_csv(f'kline_data/origin_data_1m_2000_{inst_id}-USDT-SWAP.csv')
         # 计算每一行的涨跌幅
         df['chg'] = df['close'].pct_change() * 100
         signal_cache = {}
@@ -1306,11 +1317,11 @@ def debug():
         for index, row in good_df.iterrows():
             long_column = row['kai_column']
             short_column = row['pin_column']
-            # # long_column = '6_low_short'
-            # # short_column = '3_high_long'
+            # long_column = 'peak_1_high_long'
+            # short_column = 'abs_1_0.5_high_long'
             # long_column = 'macross_3_1_high_long'
             # short_column = 'macross_89_61_high_long'
-            kai_data_df, statistic_dict = get_detail_backtest_result_op(df, long_column, short_column, signal_cache, is_filter, False)
+            kai_data_df, statistic_dict = get_detail_backtest_result_op(df, long_column, short_column, signal_cache, is_filter, is_detail)
             # 为每一行添加统计数据，需要修改到原始数据中
             # 直接修改 `good_df` 中的相应列
             good_df.at[index, 'kai_count_new'] = statistic_dict['kai_count']
@@ -1320,11 +1331,26 @@ def debug():
             good_df.at[index, 'avg_profit_rate_new'] = statistic_dict['avg_profit_rate']
             # good_df.at[index, 'max_profit_new'] = statistic_dict['max_profit']
             # good_df.at[index, 'min_profit_new'] = statistic_dict['min_profit']
+            if is_detail:
+                good_df.at[index, 'max_optimal_value'] = statistic_dict['max_optimal_value']
+                good_df.at[index, 'max_optimal_profit'] = statistic_dict['max_optimal_profit']
+                good_df.at[index, 'max_optimal_loss_rate'] = statistic_dict['max_optimal_loss_rate']
+                good_df.at[index, 'min_optimal_value'] = statistic_dict['min_optimal_value']
+                good_df.at[index, 'min_optimal_profit'] = statistic_dict['min_optimal_profit']
+                good_df.at[index, 'min_optimal_loss_rate'] = statistic_dict['min_optimal_loss_rate']
 
             statistic_dict_list.append(statistic_dict)
+        if is_detail:
+            good_df['max_optimal_profit_cha'] = good_df['max_optimal_profit'] - good_df['net_profit_rate_new']
+            good_df['max_optimal_profit_rate'] = good_df['max_optimal_profit_cha'] / good_df['kai_count_new']
+            good_df['min_optimal_profit_cha'] = good_df['min_optimal_profit'] - good_df['net_profit_rate_new']
+            good_df['min_optimal_profit_rate'] = good_df['min_optimal_profit_cha'] / good_df['kai_count_new']
         statistic_df = pd.DataFrame(statistic_dict_list)
+        statistic_df_list.append(statistic_df)
         print(f'耗时 {time.time() - start_time:.2f} 秒。')
         print(inst_id)
+    merged_df, temp_df = merge_dataframes(statistic_df_list)
+    print()
 
 
 def example():

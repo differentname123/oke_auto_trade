@@ -1,5 +1,6 @@
 import asyncio
 import os
+import traceback
 
 import numpy as np
 import pandas as pd
@@ -10,13 +11,13 @@ import datetime
 from trade_common import LatestDataManager, place_order
 
 # WebSocket 服务器地址
-# OKX_WS_URL = "wss://ws.okx.com:8443/ws/v5/public"
+OKX_WS_URL = "wss://ws.okx.com:8443/ws/v5/public"
 
-OKX_WS_URL = "wss://wspap.okx.com:8443/ws/v5/public"
+# OKX_WS_URL = "wss://wspap.okx.com:8443/ws/v5/public"
 
 # 订阅的交易对
 INSTRUMENT = "BTC-USDT-SWAP"
-
+min_count_map= {"BTC-USDT-SWAP":0.01,"ETH-USDT-SWAP":0.01,"SOL-USDT-SWAP":0.01,"TON-USDT-SWAP":1}
 # 初始化价格映射
 kai_high_price_map = {}
 kai_low_price_map = {}
@@ -31,42 +32,95 @@ kai_pin_map = {}
 # 记录当前分钟
 current_minute = None
 
-def update_price_map(strategy_df, df, target_column='kai_column'):
+def gen_signal_price(df, col_name):
+    """
+    生成信号价格
+    :param df:
+    :param column:
+    :return:
+    """
+    parts = col_name.split('_')
+    period = int(parts[1])
+    signal_type = parts[0]
+    direction = parts[-1]  # "long" 或 "short"
+    if signal_type == "peak":
+        if direction == "long":
+            target_price = df['high'].tail(period).max()
+        elif direction == "short":
+            target_price = df['low'].tail(period).min()
+    elif signal_type == "abs":
+        abs_value = float(parts[2])
+        if direction == "long":
+            target_price = df['low'].tail(period).min()
+            target_price = target_price * (1 + abs_value / 100)
+        elif direction == "short":
+            target_price = df['high'].tail(period).max()
+            target_price = target_price * (1 - abs_value / 100)
+    else:
+        target_price = None
+        print(f"❌ 未知信号类型：{signal_type}")
+    return target_price
+
+def  update_price_map(strategy_df, df, target_column='kai_column'):
     kai_column_list = strategy_df[target_column].unique().tolist()
     high_price_map = {}
     low_price_map = {}
     for kai_column in kai_column_list:
-        period = int(kai_column.split('_')[0])
-        price_side = kai_column.split('_')[1]
+        price_side = kai_column.split('_')[-2]
         if price_side == 'high':
-            # 获取df最近period个数据的最高价
-            max_price = df['high'].tail(period).max()
-            high_price_map[kai_column] = max_price
+            high_price_map[kai_column] = gen_signal_price(df, kai_column)
         else:
-            # 获取df最近period个数据的最低价
-            min_price = df['low'].tail(period).min()
-            low_price_map[kai_column] = min_price
+            low_price_map[kai_column] = gen_signal_price(df, kai_column)
     return high_price_map, low_price_map
 
 async def fetch_new_data(strategy_df):
     """ 每分钟获取最新数据并更新 high_price_map 和 low_price_map """
     global kai_high_price_map, kai_low_price_map,pin_high_price_map, pin_low_price_map, current_minute, order_detail_map
     newest_data = LatestDataManager(100, INSTRUMENT)
-
+    max_attempts = 50
+    previous_timestamp = None
     while True:
-        now = datetime.datetime.now()
-        if current_minute is None or now.minute != current_minute:
-            print(f"🕐 {now.strftime('%H:%M')} 触发数据更新...")
-            current_minute = now.minute  # 更新当前分钟
-            df = newest_data.get_newest_data()  # 获取最新数据
-            kai_high_price_map, kai_low_price_map = update_price_map(strategy_df, df)  # 更新映射
-            pin_high_price_map, pin_low_price_map = update_price_map(strategy_df, df, target_column='pin_column')
-            print(f"📈 更新开仓价格映射：{kai_high_price_map} 📉 更新开仓价格映射：{kai_low_price_map}")
+        try:
+            now = datetime.datetime.now()
+            if current_minute is None or now.minute != current_minute:
+                print(f"🕐 {now.strftime('%H:%M')} 触发数据更新...")
+                await asyncio.sleep(9)
+                current_minute = now.minute  # 更新当前分钟
+                attempt = 0
+                while attempt < max_attempts:
+                    df = newest_data.get_newest_data()  # 获取最新数据
 
-        await asyncio.sleep(1)  # 每秒检查一次当前分钟
+                    # 获取当前 df 最后一行的 timestamp
+                    latest_timestamp = df.iloc[-1]['timestamp'] if not df.empty else None
+
+                    if previous_timestamp is None or latest_timestamp != previous_timestamp:
+                        print(f"✅ 数据已更新，最新 timestamp: {latest_timestamp}")
+
+                        # 更新映射
+                        kai_high_price_map, kai_low_price_map = update_price_map(strategy_df, df)
+                        pin_high_price_map, pin_low_price_map = update_price_map(strategy_df, df, target_column='pin_column')
+
+                        print(f"📈 更新开多仓价格映射：{kai_high_price_map} 📉 更新开空仓价格映射：{kai_low_price_map} 📈 更新平多仓价格映射：{pin_high_price_map} 📉 更新平空仓价格映射：{pin_low_price_map}")
+                        previous_timestamp = latest_timestamp
+                        break  # 数据已更新，跳出循环
+                    else:
+                        print(f"⚠️ 数据未变化，尝试重新获取 ({attempt + 1}/{max_attempts})...")
+                        attempt += 1
+
+
+                if attempt == max_attempts:
+                    print("❌ 3 次尝试后数据仍未更新，跳过此轮更新。")
+
+            await asyncio.sleep(1)  # 每秒检查一次当前分钟
+        except Exception as e:
+            kai_high_price_map = {}
+            kai_low_price_map = {}
+            pin_high_price_map = {}
+            pin_low_price_map = {}
+            traceback.print_exc()
 
 async def websocket_listener(kai_pin_map):
-    default_size = 10
+    default_size = min_count_map[INSTRUMENT]
     """ 监听 WebSocket 实时数据，并对比 high_price_map 和 low_price_map """
     global kai_high_price_map, kai_low_price_map, pin_high_price_map, pin_low_price_map, order_detail_map
     async with websockets.connect(OKX_WS_URL) as ws:
@@ -210,7 +264,7 @@ def select_best_rows_in_ranges(df, range_size, sort_key, range_key='total_count'
     if range_key not in df.columns:
         raise ValueError(f"Column '{range_key}' not found in DataFrame.")
     # 只保留sort_key大于0的行
-    df = df[df[sort_key] > 0]
+    # df = df[df[sort_key] > 0]
     if df.empty:
         return df
 
@@ -267,11 +321,11 @@ def choose_good_strategy(inst_id='BTC'):
 
         # df = df[(df['true_profit_std'] < 10)]
         # df = df[(df['max_consecutive_loss'] > -50)]
-        df = df[(df['avg_profit_rate'] > 1)]
+        df = df[(df['avg_profit_rate'] > 10)]
         # df = df[(df['hold_time_mean'] < 10000)]
         # df = df[(df['max_beilv'] > 1)]
         # df = df[(df['loss_beilv'] > 1)]
-        df = df[(df['kai_count'] > 1000)]
+        df = df[(df['kai_count'] > 500)]
         # df = df[(df['pin_period'] < 50)]
         if file_key not in df_map:
             df_map[file_key] = []
@@ -325,25 +379,29 @@ def choose_good_strategy(inst_id='BTC'):
     return temp
 
 async def main():
-    # range_key = 'kai_count'
-    # sort_key = 'avg_profit_rate'
-    # sort_key = 'score'
-    # range_size = 100
+    range_key = 'kai_count'
+    sort_key = 'avg_profit_rate'
+    sort_key = 'score'
+    range_size = 100
     # # good_strategy_df1 = pd.read_csv('temp/temp.csv')
-    # good_strategy_df = choose_good_strategy(INSTRUMENT)
-    # # 筛选出kai_side为long的数据
-    # long_good_strategy_df = good_strategy_df[good_strategy_df['kai_side'] == 'long']
-    # short_good_strategy_df = good_strategy_df[good_strategy_df['kai_side'] == 'short']
-    #
-    # long_good_select_df = select_best_rows_in_ranges(long_good_strategy_df, range_size=range_size,
-    #                                                  sort_key=sort_key, range_key=range_key)
-    # short_good_select_df = select_best_rows_in_ranges(short_good_strategy_df, range_size=range_size,
-    #                                                   sort_key=sort_key, range_key=range_key)
-    # final_good_df = pd.concat([long_good_select_df, short_good_select_df])
-    # print(final_good_df[sort_key])
+    good_strategy_df = choose_good_strategy(INSTRUMENT)
+    # 筛选出kai_side为long的数据
+    long_good_strategy_df = good_strategy_df[good_strategy_df['kai_side'] == 'long']
+    short_good_strategy_df = good_strategy_df[good_strategy_df['kai_side'] == 'short']
+
+    long_good_select_df = select_best_rows_in_ranges(long_good_strategy_df, range_size=range_size,
+                                                     sort_key=sort_key, range_key=range_key)
+    short_good_select_df = select_best_rows_in_ranges(short_good_strategy_df, range_size=range_size,
+                                                      sort_key=sort_key, range_key=range_key)
+    final_good_df = pd.concat([long_good_select_df, short_good_select_df])
+    # 如果kai_column和kai_side相同,保留range_key最大的
+    final_good_df = final_good_df.sort_values(by=sort_key, ascending=True)
+    final_good_df = final_good_df.drop_duplicates(subset=['kai_column', 'kai_side'], keep='first')
+
+    print(final_good_df[sort_key])
     # final_good_df.to_csv('temp/final_good.csv', index=False)
 
-    final_good_df = pd.read_csv('temp/final_good.csv')
+    # final_good_df = pd.read_csv('temp/final_good.csv')
     print(f'final_good_df shape: {final_good_df.shape[0]}')
     # 遍历final_good_df，将kai_column和pin_column一一对应
     for index, row in final_good_df.iterrows():

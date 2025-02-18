@@ -11,7 +11,7 @@ from common_utils import get_config
 os.environ['HTTP_PROXY'] = 'http://127.0.0.1:7890'
 os.environ['HTTPS_PROXY'] = 'http://127.0.0.1:7890'
 
-flag = "1"  # 实盘: 0, 模拟盘: 1
+flag = "0"  # 实盘: 0, 模拟盘: 1
 
 # API 初始化
 if flag == "1":
@@ -35,7 +35,7 @@ class LatestDataManager:
         self.data_df = get_train_data(max_candles=self.capacity, inst_id=self.inst_id)
 
     def get_newest_data(self):
-        recent_data_df = get_train_data(max_candles=self.max_single_size, is_newest=True, inst_id=self.inst_id)
+        recent_data_df = get_train_data(max_candles=self.max_single_size, is_newest=False, inst_id=self.inst_id)
         # 判断recent_data_df第一个时间戳（timestamp）是否在data_df中
         if recent_data_df['timestamp'].iloc[0] in self.data_df['timestamp'].values:
             print('历史数据在最新数据中，更新数据')
@@ -259,7 +259,7 @@ def place_order(inst_id, side, size, trade_action="open"):
         # 调用 OKX 下单 API
         order = tradeAPI.place_order(**order_params)
 
-        print(f"✅ {trade_action.upper()} {side.upper()} 市价单下单成功：", order)
+        # print(f"✅ {trade_action.upper()} {side.upper()} 市价单下单成功：", order)
         if 'fail' not in order:
             return True
     except Exception as e:
