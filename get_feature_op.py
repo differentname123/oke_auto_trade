@@ -1947,7 +1947,7 @@ def download_data():
     if not os.path.exists(backtest_path):
         os.makedirs(backtest_path)
     bar_list = ['1m']
-    max_candles_list = [2000]
+    max_candles_list = [1000]
     for max_candles in max_candles_list:
         for bar in bar_list:
             for inst_id in inst_id_list:

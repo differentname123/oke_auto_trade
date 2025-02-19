@@ -136,7 +136,6 @@ def compute_signal(df, col_name):
         raise ValueError(f"未知的信号类型: {signal_type}")
 
 
-
 def calculate_max_sequence(kai_data_df):
     series = kai_data_df['true_profit'].to_numpy()
     min_sum, cur_sum = 0, 0
@@ -371,6 +370,7 @@ def compute_low_min_range(low_array, start_pos, end_pos):
         out[i] = m
     return out
 
+
 @njit
 def compute_high_max_range(high_array, start_pos, end_pos):
     n = start_pos.shape[0]
@@ -465,9 +465,11 @@ def optimize_parameters(df, tp_range=None, sl_range=None):
         'min_optimal_loss_rate': best_sl_loss_rate
     }
 
+
 def get_detail_backtest_result_op(df, kai_column, pin_column, signal_cache, is_filter=True, is_detail=False):
     kai_side = 'long' if 'long' in kai_column.lower() else 'short'
     temp_dict = {}
+
     def get_signal_and_price(column):
         if column in signal_cache:
             return signal_cache[column]
@@ -488,7 +490,16 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, signal_cache, is_f
     pin_data_df = pin_data_df.assign(pin_price=pin_price_series[pin_signal].to_numpy())
 
     # 删除kai_data_df中timestamp在pin_data_df中timestamp一样的数据
-    kai_data_df = kai_data_df[~kai_data_df.index.isin(pin_data_df.index)]
+    # kai_data_df = kai_data_df[kai_data_df.index.isin(pin_data_df.index)]
+
+    # 找到kai_data_df和pin_data_df相同index的数据
+    same_df = kai_data_df[kai_data_df.index.isin(pin_data_df.index)]
+    pin_count = pin_data_df.shape[0]
+    kai_count = kai_data_df.shape[0]
+    same_count = same_df.shape[0]
+    same_count_rate = round(100 * same_count / min(pin_count, kai_count), 4)
+    if same_count_rate > 50:
+        return None, None
 
     pin_indices = pin_data_df.index.searchsorted(kai_data_df.index, side='right')
     valid_mask = pin_indices < len(pin_data_df)
@@ -501,13 +512,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, signal_cache, is_f
         hold_time=(matched_pin.index.to_numpy() - kai_data_df.index.to_numpy())
     )
 
-    price_diff = kai_data_df['pin_price'] - kai_data_df['kai_price']
-    if kai_side == 'long':
-        kai_data_df['profit'] = (price_diff / kai_data_df['kai_price'] * 100).round(4)
-    else:
-        kai_data_df['profit'] = (-price_diff / kai_data_df['pin_price'] * 100).round(4)
 
-    kai_data_df['true_profit'] = kai_data_df['profit'] - 0.07
 
     if is_detail:
         # 优化细节计算部分：利用 NumPy + Numba 加速区间最值查询
@@ -532,16 +537,34 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, signal_cache, is_f
         kai_data_df['high_max'] = high_max_arr
 
         if kai_side == 'long':
-            kai_data_df['max_true_profit'] = ((kai_data_df['high_max'] - kai_data_df['kai_price']) / kai_data_df['kai_price'] * 100 - 0.07).round(4)
-            kai_data_df['min_true_profit'] = ((kai_data_df['low_min'] - kai_data_df['kai_price']) / kai_data_df['kai_price'] * 100 - 0.07).round(4)
+            kai_data_df['max_true_profit'] = ((kai_data_df['high_max'] - kai_data_df['kai_price']) / kai_data_df[
+                'kai_price'] * 100 - 0.07).round(4)
+            kai_data_df['min_true_profit'] = ((kai_data_df['low_min'] - kai_data_df['kai_price']) / kai_data_df[
+                'kai_price'] * 100 - 0.07).round(4)
         else:
-            kai_data_df['max_true_profit'] = ((kai_data_df['kai_price'] - kai_data_df['low_min']) / kai_data_df['kai_price'] * 100 - 0.07).round(4)
-            kai_data_df['min_true_profit'] = ((kai_data_df['kai_price'] - kai_data_df['high_max']) / kai_data_df['kai_price'] * 100 - 0.07).round(4)
-
-
+            kai_data_df['max_true_profit'] = ((kai_data_df['kai_price'] - kai_data_df['low_min']) / kai_data_df[
+                'kai_price'] * 100 - 0.07).round(4)
+            kai_data_df['min_true_profit'] = ((kai_data_df['kai_price'] - kai_data_df['high_max']) / kai_data_df[
+                'kai_price'] * 100 - 0.07).round(4)
 
     if is_filter:
         kai_data_df = kai_data_df.sort_values('timestamp').drop_duplicates('pin_time', keep='first')
+
+    # 创建一个映射 `pin_time -> pin_price`
+    pin_price_map = kai_data_df.set_index('pin_time')['pin_price'].to_dict()
+
+    # 用向量化的方式更新 kai_price
+    mapped_prices = kai_data_df['timestamp'].map(pin_price_map)
+    kai_data_df['kai_price'] = mapped_prices.combine_first(kai_data_df['kai_price'])
+
+    price_diff = kai_data_df['pin_price'] - kai_data_df['kai_price']
+    if kai_side == 'long':
+        kai_data_df['profit'] = (price_diff / kai_data_df['kai_price'] * 100).round(4)
+    else:
+        kai_data_df['profit'] = (-price_diff / kai_data_df['pin_price'] * 100).round(4)
+
+    kai_data_df['true_profit'] = kai_data_df['profit'] - 0.07
+
     trade_count = len(kai_data_df)
     total_count = len(df)
     profit_sum = kai_data_df['profit'].sum()
@@ -612,9 +635,12 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, signal_cache, is_f
         'max_profit_hold_time': max_profit_hold_time,
         'max_profit_start_time': max_profit_start_time,
         'max_profit_end_time': max_profit_end_time,
+        'same_count': same_count,
+        'same_count_rate': same_count_rate
     }
     statistic_dict.update(temp_dict)
     return kai_data_df, statistic_dict
+
 
 def generate_numbers(start, end, number, even=True):
     """
@@ -642,8 +668,8 @@ def generate_numbers(start, end, number, even=True):
                 result.append(int(round(start + i * step)))
         else:
             result = [start]
-    else: # uneven, exponential-like
-        power = 2 # 可以调整power值来控制指数增长的程度
+    else:  # uneven, exponential-like
+        power = 2  # 可以调整power值来控制指数增长的程度
         for i in range(number):
             normalized_index = i / (number - 1) if number > 1 else 0
             value = start + (end - start) * (normalized_index ** power)
@@ -657,6 +683,7 @@ def generate_numbers(start, end, number, even=True):
             final_result.append(val)
             last_val = val
     return final_result[:number]
+
 
 def process_tasks(task_chunk, df, is_filter):
     """
@@ -678,6 +705,7 @@ def process_tasks(task_chunk, df, is_filter):
     print(f"处理 {len(task_chunk) * 1} 个任务，耗时 {time.time() - start_time:.2f} 秒。")
     return results
 
+
 def gen_ma_signal_name(start_period, end_period, step):
     """
     生成 ma 信号的列名列表。
@@ -693,6 +721,7 @@ def gen_ma_signal_name(start_period, end_period, step):
     print(f"ma一共生成 {len(long_columns)} 个信号列名。参数为：{start_period}, {end_period}, {step}")
     return long_columns, short_columns, key_name
 
+
 def gen_rsi_signal_name(start_period, end_period, step):
     """
     生成 rsi 信号的列名列表。
@@ -703,8 +732,10 @@ def gen_rsi_signal_name(start_period, end_period, step):
     """
     period_list = generate_numbers(start_period, end_period, step, even=False)
     temp_list = [10, 20, 30, 40, 50, 60, 70, 80, 90]
-    long_columns = [f"rsi_{period}_{overbought}_{100 - overbought}_high_long" for period in period_list for overbought in temp_list]
-    short_columns = [f"rsi_{period}_{overbought}_{100 - overbought}_low_short" for period in period_list for overbought in temp_list]
+    long_columns = [f"rsi_{period}_{overbought}_{100 - overbought}_high_long" for period in period_list for overbought
+                    in temp_list]
+    short_columns = [f"rsi_{period}_{overbought}_{100 - overbought}_low_short" for period in period_list for overbought
+                     in temp_list]
     key_name = f'rsi_{start_period}_{end_period}_{step}'
     print(f"rsi一共生成 {len(long_columns)} 个信号列名。参数为：{start_period}, {end_period}, {step}")
     return long_columns, short_columns, key_name
@@ -725,6 +756,7 @@ def gen_peak_signal_name(start_period, end_period, step):
     print(f"peak一共生成 {len(long_columns)} 个信号列名。参数为：{start_period}, {end_period}, {step}")
     return long_columns, short_columns, key_name
 
+
 def gen_continue_signal_name(start_period, end_period, step):
     """"""
     period_list = range(start_period, end_period, step)
@@ -734,26 +766,35 @@ def gen_continue_signal_name(start_period, end_period, step):
     print(f"continue一共生成 {len(long_columns)} 个信号列名。参数为：{start_period}, {end_period}, {step}")
     return long_columns, short_columns, key_name
 
+
 def gen_abs_signal_name(start_period, end_period, step, start_period1, end_period1, step1):
     """"""
     period_list = generate_numbers(start_period, end_period, step, even=False)
     period_list1 = range(start_period1, end_period1, step1)
     period_list1 = [x / 10 for x in period_list1]
-    long_columns = [f"abs_{period}_{period1}_high_long" for period in period_list for period1 in period_list1 if period >= period1]
-    short_columns = [f"abs_{period}_{period1}_low_short" for period in period_list for period1 in period_list1 if period >= period1]
+    long_columns = [f"abs_{period}_{period1}_high_long" for period in period_list for period1 in period_list1 if
+                    period >= period1]
+    short_columns = [f"abs_{period}_{period1}_low_short" for period in period_list for period1 in period_list1 if
+                     period >= period1]
     key_name = f'abs_{start_period}_{end_period}_{step}_{start_period1}_{end_period1}_{step1}'
-    print(f"abs一共生成 {len(long_columns)} 个信号列名。参数为：{start_period}, {end_period}, {step}, {start_period1}, {end_period1}, {step1}")
+    print(
+        f"abs一共生成 {len(long_columns)} 个信号列名。参数为：{start_period}, {end_period}, {step}, {start_period1}, {end_period1}, {step1}")
     return long_columns, short_columns, key_name
+
 
 def gen_relate_signal_name(start_period, end_period, step, start_period1, end_period1, step1):
     """"""
     period_list = generate_numbers(start_period, end_period, step, even=False)
     period_list1 = generate_numbers(start_period1, end_period1, step1, even=False)
-    long_columns = [f"relate_{period}_{period1}_high_long" for period in period_list for period1 in period_list1 if period >= period1]
-    short_columns = [f"relate_{period}_{period1}_low_short" for period in period_list for period1 in period_list1 if period >= period1]
+    long_columns = [f"relate_{period}_{period1}_high_long" for period in period_list for period1 in period_list1 if
+                    period >= period1]
+    short_columns = [f"relate_{period}_{period1}_low_short" for period in period_list for period1 in period_list1 if
+                     period >= period1]
     key_name = f'relate_{start_period}_{end_period}_{step}_{start_period1}_{end_period1}_{step1}'
-    print(f"relate一共生成 {len(long_columns)} 个信号列名。参数为：{start_period}, {end_period}, {step}, {start_period1}, {end_period1}, {step1}")
+    print(
+        f"relate一共生成 {len(long_columns)} 个信号列名。参数为：{start_period}, {end_period}, {step}, {start_period1}, {end_period1}, {step1}")
     return long_columns, short_columns, key_name
+
 
 def gen_macross_signal_name(start_period, end_period, step, start_period1, end_period1, step1):
     """"""
@@ -762,8 +803,10 @@ def gen_macross_signal_name(start_period, end_period, step, start_period1, end_p
     long_columns = [f"macross_{period}_{period1}_high_long" for period in period_list for period1 in period_list1]
     short_columns = [f"macross_{period}_{period1}_low_short" for period in period_list for period1 in period_list1]
     key_name = f'macross_{start_period}_{end_period}_{step}_{start_period1}_{end_period1}_{step1}'
-    print(f"macross一共生成 {len(long_columns)} 个信号列名。参数为：{start_period}, {end_period}, {step}, {start_period1}, {end_period1}, {step1}")
+    print(
+        f"macross一共生成 {len(long_columns)} 个信号列名。参数为：{start_period}, {end_period}, {step}, {start_period1}, {end_period1}, {step1}")
     return long_columns, short_columns, key_name
+
 
 def backtest_breakthrough_strategy(df, base_name, is_filter):
     """
@@ -779,7 +822,6 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     peak_long_columns, peak_short_columns, peak_key_name = gen_peak_signal_name(1, 200, 20)
     rsi_long_columns, rsi_short_columns, rsi_key_name = gen_rsi_signal_name(1, 200, 10)
     abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 1000, 30, 1, 20, 1)
-
 
     if len(ma_long_columns) > 0:
         key_name += f'{ma_key_name}_'
@@ -1018,12 +1060,15 @@ def add_reverse(df):
     df = df[new_cols]
     return df
 
+
 def choose_good_strategy_debug(inst_id='BTC'):
     # df = pd.read_csv('temp/temp.csv')
     # count_L()
     # 找到temp下面所有包含False的文件
     file_list = os.listdir('temp')
-    file_list = [file for file in file_list if 'True' in file and inst_id in file and 'csv_ma_1_20_5_rsi_1_200_10_peak_1_200_20_continue_1_14_1_abs_1_1000_30_1_20_1_relate_1_50_5_10_40_10_macross_1_50_5_1_50_5_is_filter-Tru' in file and '1m' in file and 'peak_1_2500_50_continue_1_15_1_abs_1_2500_50_1_20_2_ma_1_2500_50_relate_1_2000_40_10_40_10_is_filter-Tru' not in file]
+    file_list = [file for file in file_list if
+                 'True' in file and inst_id in file and 'csv_ma_1_20_5_rsi_1_200_10_peak_1_200_20_continue_1_14_1_abs_1_1000_30_1_20_1_relate_1_50_5_10_40_10_macross_1_50_5_1_50_5_is_filter-Tru' in file and '1m' in file and 'peak_1_2500_50_continue_1_15_1_abs_1_2500_50_1_20_2_ma_1_2500_50_relate_1_2000_40_10_40_10_is_filter-Tru' not in file]
+    # file_list = file_list[0:1]
     df_list = []
     df_map = {}
     for file in file_list:
@@ -1041,28 +1086,29 @@ def choose_good_strategy_debug(inst_id='BTC'):
         # df['pin_period'] = df['pin_column'].apply(lambda x: int(x.split('_')[0]))
 
         df['filename'] = file.split('_')[5]
-        df['pin_side'] = df['pin_column'].apply(lambda x: x.split('_')[-1])
+        # df['pin_side'] = df['pin_column'].apply(lambda x: x.split('_')[-1])
         # 删除kai_column和pin_column中不包含 ma的行
         # df = df[(df['kai_column'].str.contains('ma')) & (df['pin_column'].str.contains('ma'))]
         # 删除kai_column和pin_column中包含 abs的行
         # df = df[~(df['kai_column'].str.contains('abs')) & ~(df['pin_column'].str.contains('abs'))]
 
-
         # df = df[(df['true_profit_std'] < 10)]
         # df = df[(df['max_consecutive_loss'] > -50)]
-        df = df[(df['pin_side'] != df['kai_side'])]
-        df = df[(df['avg_profit_rate'] > 1)]
-        # df = df[(df['hold_time_mean'] < 10000)]
+        # df = df[(df['pin_side'] != df['kai_side'])]
+        df = df[(df['avg_profit_rate'] > 10)]
+        # df = df[(df['hold_time_mean'] < 1000)]
         # df = df[(df['max_beilv'] > 1)]
         # df = df[(df['loss_beilv'] > 1)]
-        df = df[(df['kai_count'] > 100)]
+        df = df[(df['kai_count'] > 500)]
         # df = df[(df['pin_period'] < 50)]
         if file_key not in df_map:
             df_map[file_key] = []
-        df['score'] = df['avg_profit_rate'] / df['true_profit_std']
+        temp_value = 1
+        df['score'] = df['avg_profit_rate'] / (df['true_profit_std'] + temp_value) / (
+                    df['true_profit_std'] + temp_value)
         df['score1'] = df['avg_profit_rate'] / (df['hold_time_mean'] + 20) * 1000
         df['score2'] = df['avg_profit_rate'] / (
-                    df['hold_time_mean'] + 20) * 1000 * (df['trade_rate'] + 0.001)
+                df['hold_time_mean'] + 20) * 1000 * (df['trade_rate'] + 0.001)
         df['score3'] = df['avg_profit_rate'] * (df['trade_rate'] + 0.0001)
         df['score4'] = (df['trade_rate'] + 0.0001) / df['loss_rate']
         loss_rate_max = df['loss_rate'].max()
@@ -1071,14 +1117,14 @@ def choose_good_strategy_debug(inst_id='BTC'):
         max_beilv_max = df['max_beilv'].max()
         # df['loss_score'] = 5 * (loss_rate_max - df['loss_rate']) / loss_rate_max + 1 * (loss_time_rate_max - df['loss_time_rate']) / loss_time_rate_max - 1 * (avg_profit_rate_max - df['avg_profit_rate']) / avg_profit_rate_max
 
-
         # 找到所有包含failure_rate_的列，然后计算平均值
         failure_rate_columns = [column for column in df.columns if 'failure_rate_' in column]
         df['failure_rate_mean'] = df[failure_rate_columns].mean(axis=1)
 
         df['loss_score'] = 1 - df['loss_rate']
 
-        df['beilv_score'] = 0 - (max_beilv_max - df['max_beilv']) / max_beilv_max - (avg_profit_rate_max - df['avg_profit_rate']) / avg_profit_rate_max
+        df['beilv_score'] = 0 - (max_beilv_max - df['max_beilv']) / max_beilv_max - (
+                    avg_profit_rate_max - df['avg_profit_rate']) / avg_profit_rate_max
         df_map[file_key].append(df)
     for key in df_map:
         df = pd.concat(df_map[key])
@@ -1139,6 +1185,7 @@ def delete_rows_based_on_sort_key(result_df, sort_key, range_key):
     keep_mask.reverse()
 
     return result_df[keep_mask].reset_index(drop=True)
+
 
 def select_best_rows_in_ranges(df, range_size, sort_key, range_key='total_count'):
     """
@@ -1203,7 +1250,7 @@ def merge_dataframes(df_list):
 
     # 以第一个 DataFrame 为基准
     merged_df = df_list[0]
-    #生成一个空的DataFrame
+    # 生成一个空的DataFrame
     temp_df = pd.DataFrame()
 
     # 遍历后续 DataFrame 进行合并
@@ -1246,16 +1293,17 @@ def merge_dataframes(df_list):
     merged_df = merged_df[columns]
     return merged_df, temp_df
 
+
 def gen_score(origin_good_df, key_name):
     origin_good_df[f'{key_name}_cha'] = origin_good_df[f'{key_name}_max'] - origin_good_df[f'{key_name}_min']
-    origin_good_df[f'{key_name}_cha_ratio'] = origin_good_df[f'{key_name}_cha'] / origin_good_df[f'{key_name}_max'] * 100
+    origin_good_df[f'{key_name}_cha_ratio'] = origin_good_df[f'{key_name}_cha'] / origin_good_df[
+        f'{key_name}_max'] * 100
     origin_good_df[f'{key_name}_score'] = 1 - origin_good_df[f'{key_name}_cha_ratio']
     return f'{key_name}_score'
 
+
 def debug():
-
     # good_df = pd.read_csv('temp/final_good.csv')
-
 
     # origin_good_df_list = []
     # inst_id_list = ['BTC', 'ETH', 'SOL', 'TON']
@@ -1273,7 +1321,7 @@ def debug():
     range_key = 'kai_count'
     sort_key = 'avg_profit_rate'
     sort_key = 'score'
-    range_size = 1
+    range_size = 100
     # sort_key = 'max_consecutive_loss'
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     for inst_id in inst_id_list:
@@ -1281,7 +1329,6 @@ def debug():
         # good_df = pd.read_csv('temp/final_good.csv')
 
         origin_good_df = choose_good_strategy_debug(inst_id)
-
 
         # # # 获取origin_good_df中不重复的kai_column与pin_column的值
         # # kai_column_list = origin_good_df['kai_column'].unique()
@@ -1293,7 +1340,6 @@ def debug():
         # # peak_1_high_long
         # # abs_1_0.4_high_long
         # # origin_good_df = origin_good_df[(origin_good_df['kai_side'] == 'short')]
-
 
         # kai_column和pin_column相同的时候取第一行
         origin_good_df = origin_good_df.drop_duplicates(subset=['kai_column', 'pin_column'], keep='first')
@@ -1309,12 +1355,11 @@ def debug():
         good_df = pd.concat([long_good_select_df, short_good_select_df])
         # good_df = good_df.sort_values(by=sort_key, ascending=True)
         # good_df = good_df.drop_duplicates(subset=['kai_column', 'kai_side'], keep='first')
-        good_df.to_csv('temp/final_good.csv', index=False)
-
+        # good_df.to_csv('temp/final_good.csv', index=False)
 
         is_filter = True
         is_detail = False
-        df = pd.read_csv(f'kline_data/origin_data_1m_50000_{inst_id}-USDT-SWAP.csv')
+        df = pd.read_csv(f'kline_data/origin_data_1m_10000000_{inst_id}-USDT-SWAP.csv')
         # 计算每一行的涨跌幅
         df['chg'] = df['close'].pct_change() * 100
         signal_cache = {}
@@ -1324,11 +1369,12 @@ def debug():
         for index, row in good_df.iterrows():
             long_column = row['kai_column']
             short_column = row['pin_column']
-            # long_column = 'peak_1_high_long'
-            # short_column = 'abs_1_0.5_high_long'
-            # long_column = 'macross_3_1_high_long'
-            # short_column = 'macross_89_61_high_long'
-            kai_data_df, statistic_dict = get_detail_backtest_result_op(df, long_column, short_column, signal_cache, is_filter, is_detail)
+            # long_column = 'abs_1_0.1_high_long'
+            # short_column = 'abs_2_0.6_high_long'
+            # long_column = 'relate_50_10_high_long'
+            # short_column = 'abs_202_0.1_low_short'
+            kai_data_df, statistic_dict = get_detail_backtest_result_op(df, long_column, short_column, signal_cache,
+                                                                        is_filter, is_detail)
             # 为每一行添加统计数据，需要修改到原始数据中
             # 直接修改 `good_df` 中的相应列
             good_df.at[index, 'kai_count_new'] = statistic_dict['kai_count']
@@ -1336,6 +1382,7 @@ def debug():
             good_df.at[index, 'hold_time_mean_new'] = statistic_dict['hold_time_mean']
             good_df.at[index, 'net_profit_rate_new'] = statistic_dict['net_profit_rate']
             good_df.at[index, 'avg_profit_rate_new'] = statistic_dict['avg_profit_rate']
+            good_df.at[index, 'same_count_new'] = statistic_dict['same_count']
             # good_df.at[index, 'max_profit_new'] = statistic_dict['max_profit']
             # good_df.at[index, 'min_profit_new'] = statistic_dict['min_profit']
             if is_detail:
@@ -1355,6 +1402,15 @@ def debug():
         statistic_df = pd.DataFrame(statistic_dict_list)
         statistic_df_list.append(statistic_df)
         print(f'耗时 {time.time() - start_time:.2f} 秒。')
+        # 获取good_df的kai_column的分布情况
+        kai_value = good_df['kai_column'].value_counts()
+        pin_value = good_df['pin_column'].value_counts()
+        # 为good_df新增两列，分别为kai_column的分布情况和pin_column的分布情况
+        good_df['kai_value'] = good_df['kai_column'].apply(lambda x: kai_value[x])
+        good_df['pin_value'] = good_df['pin_column'].apply(lambda x: pin_value[x])
+        good_df['value_score'] = good_df['kai_value'] + good_df['pin_value']
+        good_df['value_score1'] = good_df['kai_value'] * good_df['pin_value']
+
         print(inst_id)
     merged_df, temp_df = merge_dataframes(statistic_df_list)
     print()
