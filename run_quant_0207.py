@@ -16,7 +16,7 @@ OKX_WS_URL = "wss://ws.okx.com:8443/ws/v5/public"
 # OKX_WS_URL = "wss://wspap.okx.com:8443/ws/v5/public"
 
 # 订阅的交易对
-INSTRUMENT = "BTC-USDT-SWAP"
+INSTRUMENT = "SOL-USDT-SWAP"
 min_count_map= {"BTC-USDT-SWAP":0.01,"ETH-USDT-SWAP":0.01,"SOL-USDT-SWAP":0.01,"TON-USDT-SWAP":1}
 # 初始化价格映射
 kai_high_price_map = {}
@@ -43,6 +43,7 @@ def gen_signal_price(df, col_name):
     period = int(parts[1])
     signal_type = parts[0]
     direction = parts[-1]  # "long" 或 "short"
+    target_price = None
     if signal_type == "peak":
         if direction == "long":
             target_price = df['high'].tail(period).max()
@@ -53,9 +54,15 @@ def gen_signal_price(df, col_name):
         if direction == "long":
             target_price = df['low'].tail(period).min()
             target_price = target_price * (1 + abs_value / 100)
+            # 判断df的最后一行数据的high是否小于target_price
+            if df['high'].tail(1).values[0] > target_price:
+                target_price = None
         elif direction == "short":
             target_price = df['high'].tail(period).max()
             target_price = target_price * (1 - abs_value / 100)
+            # 判断df的最后一行数据的low是否大于target_price
+            if df['low'].tail(1).values[0] < target_price:
+                target_price = None
     else:
         target_price = None
         print(f"❌ 未知信号类型：{signal_type}")
@@ -68,15 +75,19 @@ def  update_price_map(strategy_df, df, target_column='kai_column'):
     for kai_column in kai_column_list:
         price_side = kai_column.split('_')[-2]
         if price_side == 'high':
-            high_price_map[kai_column] = gen_signal_price(df, kai_column)
+            target_price = gen_signal_price(df, kai_column)
+            if target_price:
+                high_price_map[kai_column] = target_price
         else:
-            low_price_map[kai_column] = gen_signal_price(df, kai_column)
+            target_price = gen_signal_price(df, kai_column)
+            if target_price:
+                low_price_map[kai_column] = target_price
     return high_price_map, low_price_map
 
-async def fetch_new_data(strategy_df):
+async def fetch_new_data(strategy_df, max_period):
     """ 每分钟获取最新数据并更新 high_price_map 和 low_price_map """
-    global kai_high_price_map, kai_low_price_map,pin_high_price_map, pin_low_price_map, current_minute, order_detail_map
-    newest_data = LatestDataManager(100, INSTRUMENT)
+    global kai_high_price_map, kai_low_price_map,pin_high_price_map, pin_low_price_map, current_minute, order_detail_map, price
+    newest_data = LatestDataManager(max_period, INSTRUMENT)
     max_attempts = 50
     previous_timestamp = None
     while True:
@@ -93,7 +104,7 @@ async def fetch_new_data(strategy_df):
                     latest_timestamp = df.iloc[-1]['timestamp'] if not df.empty else None
 
                     if previous_timestamp is None or latest_timestamp != previous_timestamp:
-                        print(f"✅ 数据已更新，最新 timestamp: {latest_timestamp}")
+                        print(f"✅ 数据已更新，最新 timestamp: {latest_timestamp} 实时最新价格 {price}")
 
                         # 更新映射
                         kai_high_price_map, kai_low_price_map = update_price_map(strategy_df, df)
@@ -119,93 +130,128 @@ async def fetch_new_data(strategy_df):
             pin_low_price_map = {}
             traceback.print_exc()
 
+async def subscribe_channel(ws, inst_id):
+    """
+    订阅指定交易对的最新成交数据
+    """
+    subscribe_msg = {
+        "op": "subscribe",
+        "args": [{"channel": "trades", "instId": inst_id}]
+    }
+    await ws.send(json.dumps(subscribe_msg))
+    print(f"📡 已订阅 {inst_id} 实时成交数据")
+
+
+def process_open_orders(price, default_size):
+    """
+    根据最新成交价判断是否需要开仓（买多或卖空）
+    """
+    # 检查高价策略（买多）
+    for key, high_price in kai_high_price_map.items():
+        if price >= high_price and key not in order_detail_map:
+            result = place_order(INSTRUMENT, "buy", default_size)
+            if result:
+                order_detail_map[key] = {
+                    'price': price,
+                    'side': 'buy',
+                    'pin_side': 'sell',
+                    'time': current_minute,
+                    'size': default_size
+                }
+                print(f"📈 开仓 {key} 成交，价格：{price}，时间：{datetime.datetime.now()}")
+
+    # 检查低价策略（卖空）
+    for key, low_price in kai_low_price_map.items():
+        if price <= low_price and key not in order_detail_map:
+            result = place_order(INSTRUMENT, "sell", default_size)
+            if result:
+                order_detail_map[key] = {
+                    'price': price,
+                    'side': 'sell',
+                    'pin_side': 'buy',
+                    'time': current_minute,
+                    'size': default_size
+                }
+                print(f"📉 开仓 {key} 成交，价格：{price}，时间：{datetime.datetime.now()}")
+
+
+def process_close_orders(price, kai_pin_map):
+    """
+    根据最新成交价判断是否需要平仓
+    """
+    keys_to_remove = []  # 暂存需要移除的订单 key
+    for kai_key, order_detail in list(order_detail_map.items()):
+        # 如果该订单是在当前分钟下的单则跳过平仓检测
+        if current_minute == order_detail['time']:
+            continue
+
+        pin_key = kai_pin_map.get(kai_key)
+        if not pin_key:
+            continue
+
+        kai_price = order_detail['price']
+        # 根据平仓阈值判断是否平仓（高价平仓逻辑）
+        if pin_key in pin_high_price_map and price >= pin_high_price_map[pin_key]:
+            result = place_order(INSTRUMENT, order_detail['pin_side'], order_detail['size'], trade_action="close")
+            if result:
+                keys_to_remove.append(kai_key)
+                print(f"📈 【平仓】{pin_key} {order_detail['pin_side']} 成交，价格：{price}，开仓价格 {kai_price} "
+                      f"kai_key {kai_key} pin_key {pin_key} order_time {order_detail['time']} "
+                      f"current_minute {current_minute} 时间：{datetime.datetime.now()}")
+        # 低价平仓逻辑
+        elif pin_key in pin_low_price_map and price <= pin_low_price_map[pin_key]:
+            result = place_order(INSTRUMENT, order_detail['pin_side'], order_detail['size'], trade_action="close")
+            if result:
+                keys_to_remove.append(kai_key)
+                print(f"📉 【平仓】{pin_key} {order_detail['pin_side']} 成交，价格：{price}，开仓价格 {kai_price} "
+                      f"kai_key {kai_key} pin_key {pin_key} order_time {order_detail['time']} "
+                      f"current_minute {current_minute} 时间：{datetime.datetime.now()}")
+
+    # 移除已经平仓完成的订单
+    for key in keys_to_remove:
+        order_detail_map.pop(key, None)
+
+
 async def websocket_listener(kai_pin_map):
+    """
+    监听 OKX WebSocket 实时数据，处理开仓和平仓逻辑
+    """
     default_size = min_count_map[INSTRUMENT]
-    """ 监听 WebSocket 实时数据，并对比 high_price_map 和 low_price_map """
-    global kai_high_price_map, kai_low_price_map, pin_high_price_map, pin_low_price_map, order_detail_map, current_minute
-    async with websockets.connect(OKX_WS_URL) as ws:
-        print("✅ 已连接到 OKX WebSocket")
+    global kai_high_price_map, kai_low_price_map, pin_high_price_map, pin_low_price_map, order_detail_map, current_minute, price
 
-        # 订阅 BTC-USDT-SWAP 的最新成交数据
-        subscribe_msg = {
-            "op": "subscribe",
-            "args": [{"channel": "trades", "instId": INSTRUMENT}]
-        }
-        await ws.send(json.dumps(subscribe_msg))
-        print(f"📡 已订阅 {INSTRUMENT} 实时成交数据")
-        pre_price = 0
-        # 持续监听 WebSocket 消息
-        while True:
-            try:
-                response = await ws.recv()
-                data = json.loads(response)
+    while True:
+        try:
+            async with websockets.connect(OKX_WS_URL) as ws:
+                print("✅ 已连接到 OKX WebSocket")
+                await subscribe_channel(ws, INSTRUMENT)
+                pre_price = 0.0
 
-                if "data" in data:
-                    for trade in data["data"]:
-                        price = float(trade["px"])  # 最新成交价格
-                        if price != pre_price:
-                            for key, high_price in kai_high_price_map.items():
-                                if price >= high_price:
-                                    # 要求key 不在order_detail_map中，避免重复下单
-                                    if key not in order_detail_map:
-                                        result = place_order(INSTRUMENT, "buy", default_size)  # 以最优价格开多 0.01 BTC
-                                        if result:
-                                            order_detail_map[key] = {'price': price, 'side': 'buy', 'pin_side':'sell', 'time': current_minute, 'size': default_size}
-                                            print(f"📈 开仓 {key} 成交，价格：{price}，时间：{datetime.datetime.now()}")
+                # 持续监听 WebSocket 消息
+                while True:
+                    try:
+                        response = await ws.recv()
+                        data = json.loads(response)
 
+                        if "data" not in data:
+                            continue
 
-                            for key, low_price in kai_low_price_map.items():
-                                if price <= low_price:
-                                    if key not in order_detail_map:
-                                        result = place_order(INSTRUMENT, "sell", default_size)
-                                        if result:
-                                            order_detail_map[key] = {'price': price, 'side': 'sell', 'pin_side':'buy', 'time': current_minute, 'size': default_size}
-                                            print(f"📉 开仓 {key} 成交，价格：{price}，时间：{datetime.datetime.now()}")
+                        for trade in data["data"]:
+                            price = float(trade["px"])
+                            # 只在价格发生变化时处理下单、平仓逻辑
+                            if price == pre_price:
+                                continue
 
+                            process_open_orders(price, default_size)
+                            process_close_orders(price, kai_pin_map)
 
-                            # 如果order_detail_map中有数据，说明有订单成交
-                            if order_detail_map:
-                                keys_to_remove = []  # 存储需要删除的键，避免循环中修改字典
+                            pre_price = price
 
-                                for kai_key, order_detail in list(order_detail_map.items()):  # 用 list() 避免字典修改问题
-                                    order_time = order_detail['time']
-                                    if current_minute == order_time:
-                                        continue
-                                    pin_key = kai_pin_map.get(kai_key)  # 避免 KeyError
-                                    if not pin_key:
-                                        continue  # 如果 key 不存在，则跳过
-                                    kai_price = order_detail['price']
+                    except websockets.exceptions.ConnectionClosed:
+                        print("🔴 WebSocket 连接断开，正在重连...")
+                        break
 
-                                    # 检查是否需要平仓
-                                    if pin_key in pin_high_price_map:
-                                        pin_price = pin_high_price_map[pin_key]
-                                        if price >= pin_price:
-                                            result = place_order(INSTRUMENT, order_detail['pin_side'],
-                                                                 order_detail['size'], trade_action="close")
-                                            if result:
-                                                keys_to_remove.append(kai_key)  # 先记录 key，稍后删除
-                                                print(
-                                                    f"📈 【平仓】{pin_key} {order_detail['pin_side']} 成交，价格：{price}，开仓价格 {kai_price} kai_key {kai_key} pin_key {pin_key} order_time {order_time} current_minute {current_minute} 时间：{datetime.datetime.now()}")
-
-                                    elif pin_key in pin_low_price_map:
-                                        pin_price = pin_low_price_map[pin_key]
-                                        if price <= pin_price:
-                                            result = place_order(INSTRUMENT, order_detail['pin_side'],
-                                                                 order_detail['size'], trade_action="close")
-                                            if result:
-                                                keys_to_remove.append(kai_key)  # 先记录 key，稍后删除
-                                                print(
-                                                    f"📉 【平仓】{pin_key} {order_detail['pin_side']} 成交，价格：{price}，开仓价格 {kai_price} kai_key {kai_key} pin_key {pin_key} order_time {order_time} current_minute {current_minute} 时间：{datetime.datetime.now()}")
-
-                                # 在循环结束后删除已平仓的订单
-                                for key in keys_to_remove:
-                                    order_detail_map.pop(key, None)  # 使用 pop(key, None) 避免 KeyError
-                        pre_price = price
-
-            except websockets.exceptions.ConnectionClosed:
-                print("🔴 WebSocket 连接断开，正在重连...")
-                break
-
+        except Exception as e:
+            traceback.print_exc()
 
 def delete_rows_based_on_sort_key(result_df, sort_key, range_key):
     """
@@ -294,12 +340,13 @@ def select_best_rows_in_ranges(df, range_size, sort_key, range_key='total_count'
 
     return result_df
 
-def choose_good_strategy(inst_id='BTC'):
+def choose_good_strategy_debug(inst_id='BTC'):
     # df = pd.read_csv('temp/temp.csv')
     # count_L()
     # 找到temp下面所有包含False的文件
     file_list = os.listdir('temp')
     file_list = [file for file in file_list if 'True' in file and inst_id in file and 'csv_ma_1_20_5_rsi_1_200_10_peak_1_200_20_continue_1_14_1_abs_1_1000_30_1_20_1_relate_1_50_5_10_40_10_macross_1_50_5_1_50_5_is_filter-Tru' in file and '1m' in file and 'peak_1_2500_50_continue_1_15_1_abs_1_2500_50_1_20_2_ma_1_2500_50_relate_1_2000_40_10_40_10_is_filter-Tru' not in file]
+    # file_list = file_list[0:1]
     df_list = []
     df_map = {}
     for file in file_list:
@@ -317,42 +364,46 @@ def choose_good_strategy(inst_id='BTC'):
         # df['pin_period'] = df['pin_column'].apply(lambda x: int(x.split('_')[0]))
 
         df['filename'] = file.split('_')[5]
+        # df['pin_side'] = df['pin_column'].apply(lambda x: x.split('_')[-1])
         # 删除kai_column和pin_column中不包含 ma的行
         # df = df[(df['kai_column'].str.contains('ma')) & (df['pin_column'].str.contains('ma'))]
         # 删除kai_column和pin_column中包含 abs的行
         # df = df[~(df['kai_column'].str.contains('abs')) & ~(df['pin_column'].str.contains('abs'))]
 
-
         # df = df[(df['true_profit_std'] < 10)]
-        # df = df[(df['max_consecutive_loss'] > -50)]
-        df = df[(df['avg_profit_rate'] > 10)]
-        # df = df[(df['hold_time_mean'] < 10000)]
+        # df = df[(df['max_consecutive_loss'] > -40)]
+        # df = df[(df['pin_side'] != df['kai_side'])]
+        df = df[(df['avg_profit_rate'] > 20)]
+        # df = df[(df['hold_time_mean'] < 1000)]
         # df = df[(df['max_beilv'] > 1)]
         # df = df[(df['loss_beilv'] > 1)]
         df = df[(df['kai_count'] > 1000)]
+        df = df[(df['same_count_rate'] < 1)]
         # df = df[(df['pin_period'] < 50)]
         if file_key not in df_map:
             df_map[file_key] = []
-        df['score'] = df['avg_profit_rate'] / df['true_profit_std']
-        df['score1'] = df['avg_profit_rate'] / (df['hold_time_mean'] + 20) * 1000
-        df['score2'] = df['avg_profit_rate'] / (
-                    df['hold_time_mean'] + 20) * 1000 * (df['trade_rate'] + 0.001)
-        df['score3'] = df['avg_profit_rate'] * (df['trade_rate'] + 0.0001)
-        df['score4'] = (df['trade_rate'] + 0.0001) / df['loss_rate']
-        loss_rate_max = df['loss_rate'].max()
-        loss_time_rate_max = df['loss_time_rate'].max()
-        avg_profit_rate_max = df['avg_profit_rate'].max()
-        max_beilv_max = df['max_beilv'].max()
+        temp_value = 1
+        df['score'] = df['avg_profit_rate'] / (df['true_profit_std'] + temp_value) / (df['true_profit_std'] + temp_value)
+        # df['score'] = df['max_consecutive_loss']
+        # df['score1'] = df['avg_profit_rate'] / (df['hold_time_mean'] + 20) * 1000
+        # df['score2'] = df['avg_profit_rate'] / (
+        #         df['hold_time_mean'] + 20) * 1000 * (df['trade_rate'] + 0.001)
+        # df['score3'] = df['avg_profit_rate'] * (df['trade_rate'] + 0.0001)
+        # df['score4'] = (df['trade_rate'] + 0.0001) / df['loss_rate']
+        # loss_rate_max = df['loss_rate'].max()
+        # loss_time_rate_max = df['loss_time_rate'].max()
+        # avg_profit_rate_max = df['avg_profit_rate'].max()
+        # max_beilv_max = df['max_beilv'].max()
         # df['loss_score'] = 5 * (loss_rate_max - df['loss_rate']) / loss_rate_max + 1 * (loss_time_rate_max - df['loss_time_rate']) / loss_time_rate_max - 1 * (avg_profit_rate_max - df['avg_profit_rate']) / avg_profit_rate_max
 
-
-        # 找到所有包含failure_rate_的列，然后计算平均值
-        failure_rate_columns = [column for column in df.columns if 'failure_rate_' in column]
-        df['failure_rate_mean'] = df[failure_rate_columns].mean(axis=1)
-
-        df['loss_score'] = 1 - df['loss_rate']
-
-        df['beilv_score'] = 0 - (max_beilv_max - df['max_beilv']) / max_beilv_max - (avg_profit_rate_max - df['avg_profit_rate']) / avg_profit_rate_max
+        # # 找到所有包含failure_rate_的列，然后计算平均值
+        # failure_rate_columns = [column for column in df.columns if 'failure_rate_' in column]
+        # df['failure_rate_mean'] = df[failure_rate_columns].mean(axis=1)
+        #
+        # df['loss_score'] = 1 - df['loss_rate']
+        #
+        # df['beilv_score'] = 0 - (max_beilv_max - df['max_beilv']) / max_beilv_max - (
+        #             avg_profit_rate_max - df['avg_profit_rate']) / avg_profit_rate_max
         df_map[file_key].append(df)
     for key in df_map:
         df = pd.concat(df_map[key])
@@ -386,9 +437,9 @@ async def main():
     range_key = 'kai_count'
     sort_key = 'avg_profit_rate'
     sort_key = 'score'
-    range_size = 1000
+    range_size = 100
     # # good_strategy_df1 = pd.read_csv('temp/temp.csv')
-    good_strategy_df = choose_good_strategy(INSTRUMENT)
+    good_strategy_df = choose_good_strategy_debug(INSTRUMENT)
     # 筛选出kai_side为long的数据
     long_good_strategy_df = good_strategy_df[good_strategy_df['kai_side'] == 'long']
     short_good_strategy_df = good_strategy_df[good_strategy_df['kai_side'] == 'short']
@@ -407,15 +458,24 @@ async def main():
 
     # final_good_df = pd.read_csv('temp/final_good.csv')
     print(f'final_good_df shape: {final_good_df.shape[0]}')
+    period_list = []
     # 遍历final_good_df，将kai_column和pin_column一一对应
     for index, row in final_good_df.iterrows():
         kai_column = row['kai_column']
+        kai_period = int(kai_column.split('_')[1])
+        period_list.append(kai_period)
         pin_column = row['pin_column']
+        pin_period = int(pin_column.split('_')[1])
         kai_pin_map[kai_column] = pin_column
+        period_list.append(pin_period)
 
+    # 获取最大的period_list
+    max_period = max(period_list)
+    # 向上取整，大小为100的倍数
+    max_period = int(np.ceil(max_period / 100) * 100)
     """ 启动 WebSocket 监听和定时任务 """
     await asyncio.gather(
-        fetch_new_data(final_good_df),  # 定时更新数据
+        fetch_new_data(final_good_df, max_period),  # 定时更新数据
         websocket_listener(kai_pin_map)  # 监听实时数据
     )
 

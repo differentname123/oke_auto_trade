@@ -497,8 +497,8 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, signal_cache, is_f
     pin_count = pin_data_df.shape[0]
     kai_count = kai_data_df.shape[0]
     same_count = same_df.shape[0]
-    same_count_rate = round(100 * same_count / min(pin_count, kai_count), 4)
-    if same_count_rate > 50:
+    same_count_rate = round(100 * same_count / min(pin_count, kai_count) if min(pin_count, kai_count)!=0 else 0, 4)
+    if same_count_rate > 5:
         return None, None
 
     pin_indices = pin_data_df.index.searchsorted(kai_data_df.index, side='right')
@@ -815,13 +815,15 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     使用多进程并行调用 process_tasks() 完成回测，并将统计结果保存到 CSV 文件。
     """
     key_name = ''
-    macross_long_columns, macross_short_columns, macross_key_name = gen_macross_signal_name(1, 50, 5, 1, 50, 5)
-    ma_long_columns, ma_short_columns, ma_key_name = gen_ma_signal_name(1, 20, 5)
-    relate_long_columns, relate_short_columns, relate_key_name = gen_relate_signal_name(1, 50, 5, 10, 40, 10)
-    continue_long_columns, continue_short_columns, continue_key_name = gen_continue_signal_name(1, 14, 1)
-    peak_long_columns, peak_short_columns, peak_key_name = gen_peak_signal_name(1, 200, 20)
-    rsi_long_columns, rsi_short_columns, rsi_key_name = gen_rsi_signal_name(1, 200, 10)
-    abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 1000, 30, 1, 20, 1)
+    macross_long_columns, macross_short_columns, macross_key_name = gen_macross_signal_name(1, 1, 1, 1, 1, 1)
+    ma_long_columns, ma_short_columns, ma_key_name = gen_ma_signal_name(1, 1, 1)
+    relate_long_columns, relate_short_columns, relate_key_name = gen_relate_signal_name(1, 1, 1, 1, 1, 1)
+    continue_long_columns, continue_short_columns, continue_key_name = gen_continue_signal_name(1, 1, 1)
+    peak_long_columns, peak_short_columns, peak_key_name = gen_peak_signal_name(1, 1, 1)
+    rsi_long_columns, rsi_short_columns, rsi_key_name = gen_rsi_signal_name(1, 1, 1)
+
+
+    abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 2000, 50, 1, 20, 1)
 
     if len(ma_long_columns) > 0:
         key_name += f'{ma_key_name}_'
@@ -841,8 +843,9 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     short_columns = peak_short_columns + continue_short_columns + abs_short_columns + ma_short_columns + relate_short_columns + macross_short_columns + rsi_short_columns
     all_columns = long_columns + short_columns
     print(f'共有 {len(all_columns)} 个信号列。')
-    # task_list = list(product(long_columns, short_columns))
-    task_list = list(product(all_columns, all_columns))
+    task_list = list(product(long_columns, short_columns))
+    task_list.extend(list(product(short_columns, long_columns)))
+    # task_list = list(product(all_columns, all_columns))
     # 删除不包含abs的task
     # task_list = [task for task in task_list if 'abs' in task[0] or 'abs' in task[1]]
     # task_list = list(product(long_columns, long_columns))
@@ -1066,8 +1069,7 @@ def choose_good_strategy_debug(inst_id='BTC'):
     # count_L()
     # 找到temp下面所有包含False的文件
     file_list = os.listdir('temp')
-    file_list = [file for file in file_list if
-                 'True' in file and inst_id in file and 'csv_ma_1_20_5_rsi_1_200_10_peak_1_200_20_continue_1_14_1_abs_1_1000_30_1_20_1_relate_1_50_5_10_40_10_macross_1_50_5_1_50_5_is_filter-Tru' in file and '1m' in file and 'peak_1_2500_50_continue_1_15_1_abs_1_2500_50_1_20_2_ma_1_2500_50_relate_1_2000_40_10_40_10_is_filter-Tru' not in file]
+    file_list = [file for file in file_list if 'True' in file and inst_id in file and 'csv_ma_1_20_5_rsi_1_200_10_peak_1_200_20_continue_1_14_1_abs_1_1000_30_1_20_1_relate_1_50_5_10_40_10_macross_1_50_5_1_50_5_is_filter-Tru' in file and '1m' in file and 'peak_1_2500_50_continue_1_15_1_abs_1_2500_50_1_20_2_ma_1_2500_50_relate_1_2000_40_10_40_10_is_filter-Tru' not in file]
     # file_list = file_list[0:1]
     df_list = []
     df_map = {}
@@ -1093,38 +1095,39 @@ def choose_good_strategy_debug(inst_id='BTC'):
         # df = df[~(df['kai_column'].str.contains('abs')) & ~(df['pin_column'].str.contains('abs'))]
 
         # df = df[(df['true_profit_std'] < 10)]
-        # df = df[(df['max_consecutive_loss'] > -50)]
+        # df = df[(df['max_consecutive_loss'] > -40)]
         # df = df[(df['pin_side'] != df['kai_side'])]
-        df = df[(df['avg_profit_rate'] > 10)]
+        df = df[(df['avg_profit_rate'] > 20)]
         # df = df[(df['hold_time_mean'] < 1000)]
         # df = df[(df['max_beilv'] > 1)]
         # df = df[(df['loss_beilv'] > 1)]
         df = df[(df['kai_count'] > 500)]
+        df = df[(df['same_count_rate'] < 1)]
         # df = df[(df['pin_period'] < 50)]
         if file_key not in df_map:
             df_map[file_key] = []
         temp_value = 1
-        df['score'] = df['avg_profit_rate'] / (df['true_profit_std'] + temp_value) / (
-                    df['true_profit_std'] + temp_value)
-        df['score1'] = df['avg_profit_rate'] / (df['hold_time_mean'] + 20) * 1000
-        df['score2'] = df['avg_profit_rate'] / (
-                df['hold_time_mean'] + 20) * 1000 * (df['trade_rate'] + 0.001)
-        df['score3'] = df['avg_profit_rate'] * (df['trade_rate'] + 0.0001)
-        df['score4'] = (df['trade_rate'] + 0.0001) / df['loss_rate']
-        loss_rate_max = df['loss_rate'].max()
-        loss_time_rate_max = df['loss_time_rate'].max()
-        avg_profit_rate_max = df['avg_profit_rate'].max()
-        max_beilv_max = df['max_beilv'].max()
+        df['score'] = df['avg_profit_rate'] / (df['true_profit_std'] + temp_value) / (df['true_profit_std'] + temp_value)
+        # df['score'] = df['max_consecutive_loss']
+        # df['score1'] = df['avg_profit_rate'] / (df['hold_time_mean'] + 20) * 1000
+        # df['score2'] = df['avg_profit_rate'] / (
+        #         df['hold_time_mean'] + 20) * 1000 * (df['trade_rate'] + 0.001)
+        # df['score3'] = df['avg_profit_rate'] * (df['trade_rate'] + 0.0001)
+        # df['score4'] = (df['trade_rate'] + 0.0001) / df['loss_rate']
+        # loss_rate_max = df['loss_rate'].max()
+        # loss_time_rate_max = df['loss_time_rate'].max()
+        # avg_profit_rate_max = df['avg_profit_rate'].max()
+        # max_beilv_max = df['max_beilv'].max()
         # df['loss_score'] = 5 * (loss_rate_max - df['loss_rate']) / loss_rate_max + 1 * (loss_time_rate_max - df['loss_time_rate']) / loss_time_rate_max - 1 * (avg_profit_rate_max - df['avg_profit_rate']) / avg_profit_rate_max
 
-        # 找到所有包含failure_rate_的列，然后计算平均值
-        failure_rate_columns = [column for column in df.columns if 'failure_rate_' in column]
-        df['failure_rate_mean'] = df[failure_rate_columns].mean(axis=1)
-
-        df['loss_score'] = 1 - df['loss_rate']
-
-        df['beilv_score'] = 0 - (max_beilv_max - df['max_beilv']) / max_beilv_max - (
-                    avg_profit_rate_max - df['avg_profit_rate']) / avg_profit_rate_max
+        # # 找到所有包含failure_rate_的列，然后计算平均值
+        # failure_rate_columns = [column for column in df.columns if 'failure_rate_' in column]
+        # df['failure_rate_mean'] = df[failure_rate_columns].mean(axis=1)
+        #
+        # df['loss_score'] = 1 - df['loss_rate']
+        #
+        # df['beilv_score'] = 0 - (max_beilv_max - df['max_beilv']) / max_beilv_max - (
+        #             avg_profit_rate_max - df['avg_profit_rate']) / avg_profit_rate_max
         df_map[file_key].append(df)
     for key in df_map:
         df = pd.concat(df_map[key])
@@ -1321,7 +1324,7 @@ def debug():
     range_key = 'kai_count'
     sort_key = 'avg_profit_rate'
     sort_key = 'score'
-    range_size = 100
+    range_size = 1
     # sort_key = 'max_consecutive_loss'
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     for inst_id in inst_id_list:
@@ -1359,7 +1362,7 @@ def debug():
 
         is_filter = True
         is_detail = False
-        df = pd.read_csv(f'kline_data/origin_data_1m_10000000_{inst_id}-USDT-SWAP.csv')
+        df = pd.read_csv(f'kline_data/origin_data_1m_50000_{inst_id}-USDT-SWAP.csv')
         # 计算每一行的涨跌幅
         df['chg'] = df['close'].pct_change() * 100
         signal_cache = {}
