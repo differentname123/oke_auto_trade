@@ -1,13 +1,6 @@
 """
 突破策略的信号生成以及回测（优化版）
-
-优化说明：
-1. 只加载原始的必要数据（timestamp, open, high, low, close），不提前生成所有周期的信号。
-2. 在 process_tasks() 内，根据每个任务（信号的 pair）按需计算对应的突破信号，
-   并采用 signal_cache 以避免同一信号的重复计算，从而降低内存占用。
-3. 保持功能不变，回测结果与原始代码一致。
 """
-
 import multiprocessing
 import os
 import time
@@ -785,7 +778,7 @@ def gen_abs_signal_name(start_period, end_period, step, start_period1, end_perio
 def gen_relate_signal_name(start_period, end_period, step, start_period1, end_period1, step1):
     """"""
     period_list = generate_numbers(start_period, end_period, step, even=False)
-    period_list1 = generate_numbers(start_period1, end_period1, step1, even=False)
+    period_list1 = range(start_period1, end_period1, step1)
     long_columns = [f"relate_{period}_{period1}_high_long" for period in period_list for period1 in period_list1 if
                     period >= period1]
     short_columns = [f"relate_{period}_{period1}_low_short" for period in period_list for period1 in period_list1 if
@@ -817,13 +810,26 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     key_name = ''
     macross_long_columns, macross_short_columns, macross_key_name = gen_macross_signal_name(1, 1, 1, 1, 1, 1)
     ma_long_columns, ma_short_columns, ma_key_name = gen_ma_signal_name(1, 1, 1)
-    relate_long_columns, relate_short_columns, relate_key_name = gen_relate_signal_name(1, 1, 1, 1, 1, 1)
+
+
+    relate_long_columns, relate_short_columns, relate_key_name = gen_relate_signal_name(1, 1000, 30, 1, 100, 6)
+
+
+    # continue_long_columns, continue_short_columns, continue_key_name = gen_continue_signal_name(1, 20, 1)
     continue_long_columns, continue_short_columns, continue_key_name = gen_continue_signal_name(1, 1, 1)
+
+
+    # peak_long_columns, peak_short_columns, peak_key_name = gen_peak_signal_name(1, 3000, 300)
     peak_long_columns, peak_short_columns, peak_key_name = gen_peak_signal_name(1, 1, 1)
+
+
+    # rsi_long_columns, rsi_short_columns, rsi_key_name = gen_rsi_signal_name(1, 1000, 40)
     rsi_long_columns, rsi_short_columns, rsi_key_name = gen_rsi_signal_name(1, 1, 1)
 
 
-    abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 2000, 50, 1, 20, 1)
+    # abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 1000, 30, 1, 30, 1)
+    abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 1, 1, 1, 1, 1)
+
 
     if len(ma_long_columns) > 0:
         key_name += f'{ma_key_name}_'

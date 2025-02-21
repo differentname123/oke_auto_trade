@@ -17,7 +17,7 @@ OKX_WS_URL = "wss://ws.okx.com:8443/ws/v5/public"
 
 # 订阅的交易对
 INSTRUMENT = "SOL-USDT-SWAP"
-min_count_map= {"BTC-USDT-SWAP":0.01,"ETH-USDT-SWAP":0.01,"SOL-USDT-SWAP":0.01,"TON-USDT-SWAP":1}
+min_count_map= {"BTC-USDT-SWAP":0.01,"ETH-USDT-SWAP":0.01,"SOL-USDT-SWAP":0.1,"TON-USDT-SWAP":1}
 # 初始化价格映射
 kai_high_price_map = {}
 kai_low_price_map = {}
