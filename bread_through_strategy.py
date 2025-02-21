@@ -808,91 +808,81 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     使用多进程并行调用 process_tasks() 完成回测，并将统计结果保存到 CSV 文件。
     """
     key_name = ''
-    macross_long_columns, macross_short_columns, macross_key_name = gen_macross_signal_name(1, 1, 1, 1, 1, 1)
-    ma_long_columns, ma_short_columns, ma_key_name = gen_ma_signal_name(1, 1, 1)
+    column_list = []
+    continue_long_columns, continue_short_columns, continue_key_name = gen_continue_signal_name(1, 20, 1)
+    column_list.append((continue_long_columns, continue_short_columns, continue_key_name))
+
+    macross_long_columns, macross_short_columns, macross_key_name = gen_macross_signal_name(1, 1000, 20, 1, 1000, 20)
+    column_list.append((macross_long_columns, macross_short_columns, macross_key_name))
+
+
+    ma_long_columns, ma_short_columns, ma_key_name = gen_ma_signal_name(1, 3000, 300)
+    column_list.append((ma_long_columns, ma_short_columns, ma_key_name))
 
 
     relate_long_columns, relate_short_columns, relate_key_name = gen_relate_signal_name(1, 1000, 30, 1, 100, 6)
+    column_list.append((relate_long_columns, relate_short_columns, relate_key_name))
 
 
-    # continue_long_columns, continue_short_columns, continue_key_name = gen_continue_signal_name(1, 20, 1)
-    continue_long_columns, continue_short_columns, continue_key_name = gen_continue_signal_name(1, 1, 1)
 
 
-    # peak_long_columns, peak_short_columns, peak_key_name = gen_peak_signal_name(1, 3000, 300)
-    peak_long_columns, peak_short_columns, peak_key_name = gen_peak_signal_name(1, 1, 1)
 
 
-    # rsi_long_columns, rsi_short_columns, rsi_key_name = gen_rsi_signal_name(1, 1000, 40)
-    rsi_long_columns, rsi_short_columns, rsi_key_name = gen_rsi_signal_name(1, 1, 1)
+    peak_long_columns, peak_short_columns, peak_key_name = gen_peak_signal_name(1, 3000, 300)
+    column_list.append((peak_long_columns, peak_short_columns, peak_key_name))
 
 
-    # abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 1000, 30, 1, 30, 1)
-    abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 1, 1, 1, 1, 1)
+    rsi_long_columns, rsi_short_columns, rsi_key_name = gen_rsi_signal_name(1, 1000, 40)
+    column_list.append((rsi_long_columns, rsi_short_columns, rsi_key_name))
 
 
-    if len(ma_long_columns) > 0:
-        key_name += f'{ma_key_name}_'
-    if len(rsi_long_columns) > 0:
-        key_name += f'{rsi_key_name}_'
-    if len(peak_long_columns) > 0:
-        key_name += f'{peak_key_name}_'
-    if len(continue_long_columns) > 0:
-        key_name += f'{continue_key_name}_'
-    if len(abs_long_columns) > 0:
-        key_name += f'{abs_key_name}_'
-    if len(relate_long_columns) > 0:
-        key_name += f'{relate_key_name}_'
-    if len(macross_long_columns) > 0:
-        key_name += f'{macross_key_name}_'
-    long_columns = peak_long_columns + continue_long_columns + abs_long_columns + ma_long_columns + relate_long_columns + macross_long_columns + rsi_long_columns
-    short_columns = peak_short_columns + continue_short_columns + abs_short_columns + ma_short_columns + relate_short_columns + macross_short_columns + rsi_short_columns
-    all_columns = long_columns + short_columns
-    print(f'共有 {len(all_columns)} 个信号列。')
-    task_list = list(product(long_columns, short_columns))
-    task_list.extend(list(product(short_columns, long_columns)))
-    # task_list = list(product(all_columns, all_columns))
-    # 删除不包含abs的task
-    # task_list = [task for task in task_list if 'abs' in task[0] or 'abs' in task[1]]
-    # task_list = list(product(long_columns, long_columns))
-    # task_list.extend(list(product(short_columns, short_columns)))
+    abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 1000, 30, 1, 30, 1)
+    column_list.append((abs_long_columns, abs_short_columns, abs_key_name))
 
-    big_chunk_size = 100000
-    big_task_chunks = [task_list[i:i + big_chunk_size] for i in range(0, len(task_list), big_chunk_size)]
-    print(f'共有 {len(task_list)} 个任务，分为 {len(big_task_chunks)} 大块。')
-    for i, task_chunk in enumerate(big_task_chunks):
-        # 将task_list打乱顺序
-        output_path = f"temp/statistic_{base_name}_{key_name}is_filter-{is_filter}_part{i}.csv"
-        if os.path.exists(output_path):
-            print(f'已存在 {output_path}')
-            continue
-        task_chunk = task_chunk.copy()
-        np.random.shuffle(task_chunk)
+    for column_pair in column_list:
+        long_columns, short_columns, key_name = column_pair
+        all_columns = long_columns + short_columns
+        task_list = list(product(all_columns, all_columns))
+        # task_list = list(product(long_columns, short_columns))
+        # task_list.extend(list(product(short_columns, long_columns)))
+        # task_list = list(product(long_columns, long_columns))
+        # task_list.extend(list(product(short_columns, short_columns)))
 
-        # 将任务分块，每块包含一定数量的任务
-        chunk_size = 100
-        task_chunks = [task_chunk[i:i + chunk_size] for i in range(0, len(task_chunk), chunk_size)]
-        print(f'共有 {len(task_chunk)} 个任务，分为 {len(task_chunks)} 块。当前 {output_path} 。')
+        big_chunk_size = 100000
+        big_task_chunks = [task_list[i:i + big_chunk_size] for i in range(0, len(task_list), big_chunk_size)]
+        print(f'共有 {len(task_list)} 个任务，分为 {len(big_task_chunks)} 大块。')
+        for i, task_chunk in enumerate(big_task_chunks):
+            # 将task_list打乱顺序
+            output_path = f"temp/statistic_{base_name}_{key_name}_is_filter-{is_filter}_part{i}.csv"
+            if os.path.exists(output_path):
+                print(f'已存在 {output_path}')
+                continue
+            task_chunk = task_chunk.copy()
+            np.random.shuffle(task_chunk)
 
-        # # debug
-        # start_time = time.time()
-        # statistic_dict_list = process_tasks(task_chunks[0], df, is_filter)
-        # result = [x for x in statistic_dict_list if x is not None]
-        # result_df = pd.DataFrame(result)
-        # print(f'单块任务耗时 {time.time() - start_time:.2f} 秒。')
+            # 将任务分块，每块包含一定数量的任务
+            chunk_size = 100
+            task_chunks = [task_chunk[i:i + chunk_size] for i in range(0, len(task_chunk), chunk_size)]
+            print(f'共有 {len(task_chunk)} 个任务，分为 {len(task_chunks)} 块。当前 {output_path} 。')
 
-        statistic_dict_list = []
-        pool_processes = max(1, multiprocessing.cpu_count())
-        with multiprocessing.Pool(processes=pool_processes) as pool:
-            results = pool.starmap(process_tasks, [(chunk, df, is_filter) for chunk in task_chunks])
-        for res in results:
-            statistic_dict_list.extend(res)
-        # 去除空值
-        statistic_dict_list = [x for x in statistic_dict_list if x is not None]
+            # # debug
+            # start_time = time.time()
+            # statistic_dict_list = process_tasks(task_chunks[0], df, is_filter)
+            # result = [x for x in statistic_dict_list if x is not None]
+            # result_df = pd.DataFrame(result)
+            # print(f'单块任务耗时 {time.time() - start_time:.2f} 秒。')
 
-        statistic_df = pd.DataFrame(statistic_dict_list)
-        statistic_df.to_csv(output_path, index=False)
-        print(f'结果已保存到 {output_path} 当前时间 {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}')
+            statistic_dict_list = []
+            pool_processes = max(1, multiprocessing.cpu_count())
+            with multiprocessing.Pool(processes=pool_processes) as pool:
+                results = pool.starmap(process_tasks, [(chunk, df, is_filter) for chunk in task_chunks])
+            for res in results:
+                statistic_dict_list.extend(res)
+            statistic_dict_list = [x for x in statistic_dict_list if x is not None]
+
+            statistic_df = pd.DataFrame(statistic_dict_list)
+            statistic_df.to_csv(output_path, index=False)
+            print(f'结果已保存到 {output_path} 当前时间 {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}')
 
 
 def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
