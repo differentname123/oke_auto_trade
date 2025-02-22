@@ -623,6 +623,9 @@ def get_detail_backtest_result_op(total_months, df, kai_column, pin_column, sign
     active_month_ratio = active_months / total_months if total_months else 0
     monthly_net_profit_std = float(monthly_agg['sum'].std())
     monthly_avg_profit_std = float(monthly_agg['mean'].std())
+    monthly_net_profit_min = monthly_agg['sum'].min()
+    # 统计小于0的比例
+    monthly_loss_rate = (monthly_agg['sum'] < 0).sum() / active_months if active_months else 0
 
     hold_time_std = kai_data_df['hold_time'].std()
 
@@ -677,6 +680,8 @@ def get_detail_backtest_result_op(total_months, df, kai_column, pin_column, sign
         'same_count_rate': same_count_rate,
         'monthly_trade_std': monthly_trade_std,
         'active_month_ratio': active_month_ratio,
+        'monthly_loss_rate':monthly_loss_rate,
+        'monthly_net_profit_min' : monthly_net_profit_min,
         'monthly_net_profit_std': monthly_net_profit_std,
         'monthly_avg_profit_std': monthly_avg_profit_std,
         'top_profit_ratio': top_profit_ratio,
@@ -1146,13 +1151,13 @@ def choose_good_strategy_debug(inst_id='BTC'):
         # df = df[(df['true_profit_std'] < 10)]
         # df = df[(df['max_consecutive_loss'] > -40)]
         # df = df[(df['pin_side'] != df['kai_side'])]
-        df = df[(df['avg_profit_rate'] > 20)]
+        df = df[(df['avg_profit_rate'] > 10)]
         # df = df[(df['score'] > 2)]
         # df = df[(df['avg_profit_rate'] > 20)]
         # df = df[(df['hold_time_mean'] < 1000)]
         # df = df[(df['max_beilv'] > 5)]
         # df = df[(df['loss_beilv'] > 1)]
-        df = df[(df['kai_count'] > 1000)]
+        df = df[(df['kai_count'] > 100)]
         df = df[(df['same_count_rate'] < 1)]
         # df = df[(df['pin_period'] < 50)]
         if file_key not in df_map:
