@@ -475,7 +475,7 @@ def get_detail_backtest_result_op(total_months, df, kai_column, pin_column, sign
     kai_signal, kai_price_series = get_signal_and_price(kai_column)
     pin_signal, pin_price_series = get_signal_and_price(pin_column)
 
-    if kai_signal.sum() < 100 or pin_signal.sum() < 100:
+    if kai_signal.sum() < 0 or pin_signal.sum() < 0:
         return None, None
 
     # 从 df 中取出符合条件的数据，并预先拷贝数据
@@ -498,7 +498,7 @@ def get_detail_backtest_result_op(total_months, df, kai_column, pin_column, sign
         same_count_rate = 0
     else:
         same_count_rate = round(100 * same_count / min(pin_count, kai_count), 4)
-    if same_count_rate > 5:
+    if same_count_rate > 500:
         return None, None
 
     # 对 kai_data_df 中每个时间点，找到 pin_data_df 中最接近右侧的匹配项
@@ -1121,7 +1121,7 @@ def choose_good_strategy_debug(inst_id='BTC'):
     # count_L()
     # 找到temp下面所有包含False的文件
     file_list = os.listdir('temp')
-    file_list = [file for file in file_list if 'True' in file and inst_id in file and '_ma_1_20_5_rsi_1_200_10_peak_1_200_20_continue_1_14_1_abs_1_1000_30_1_20_1_relate_1_50_5_10_40_10_macross_1_50_5_1_50_5_is_filter-' in file]
+    file_list = [file for file in file_list if 'True' in file and inst_id in file and 'csv_rsi_1_1000_40_is_filter-True_part' in file]
     # file_list = file_list[0:1]
     df_list = []
     df_map = {}
@@ -1137,7 +1137,7 @@ def choose_good_strategy_debug(inst_id='BTC'):
         temp_value = 1
         df['score'] = df['avg_profit_rate'] / (df['true_profit_std'] + temp_value) / (df['true_profit_std'] + temp_value)
 
-        # df = add_reverse(df)
+        df = add_reverse(df)
         # df['kai_period'] = df['kai_column'].apply(lambda x: int(x.split('_')[0]))
         # df['pin_period'] = df['pin_column'].apply(lambda x: int(x.split('_')[0]))
 
@@ -1157,7 +1157,7 @@ def choose_good_strategy_debug(inst_id='BTC'):
         # df = df[(df['hold_time_mean'] < 1000)]
         # df = df[(df['max_beilv'] > 5)]
         # df = df[(df['loss_beilv'] > 1)]
-        df = df[(df['kai_count'] > 100)]
+        # df = df[(df['kai_count'] > 100)]
         df = df[(df['same_count_rate'] < 1)]
         # df = df[(df['pin_period'] < 50)]
         if file_key not in df_map:
@@ -1380,7 +1380,7 @@ def debug():
     sort_key = 'score'
     range_size = 100
     # sort_key = 'max_consecutive_loss'
-    inst_id_list = ['SOL', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     for inst_id in inst_id_list:
         # origin_good_df = pd.read_csv('temp/all.csv')
         # good_df = pd.read_csv('temp/final_good.csv')
@@ -1416,20 +1416,10 @@ def debug():
 
         is_filter = True
         is_detail = False
-        df = pd.read_csv(f'kline_data/origin_data_1m_10000000_{inst_id}-USDT-SWAP.csv')
+        df = pd.read_csv(f'kline_data/origin_data_1m_50000_{inst_id}-USDT-SWAP.csv')
         # 计算每一行的涨跌幅
         df['chg'] = df['close'].pct_change() * 100
         df['timestamp'] = pd.to_datetime(df['timestamp'])
-        # 总月份数根据 df 的 timestamp 列计算
-        df_trade_dates = df['timestamp']
-        df_monthly = df_trade_dates.dt.to_period('M')
-        min_df_month = df_monthly.min()
-        max_df_month = df_monthly.max()
-        # 删除min_df_month和max_df_month这两个月份的数据
-        df = df[(df_monthly != min_df_month) & (df_monthly != max_df_month)]
-
-
-        total_months = (max_df_month.year - min_df_month.year) * 12 + (max_df_month.month - min_df_month.month) + 1 - 2
         signal_cache = {}
         statistic_dict_list = []
         good_df = good_df.reset_index(drop=True)
@@ -1441,7 +1431,7 @@ def debug():
             # short_column = 'abs_2_0.6_high_long'
             # long_column = 'relate_50_10_high_long'
             # short_column = 'abs_202_0.1_low_short'
-            kai_data_df, statistic_dict = get_detail_backtest_result_op(total_months, df, long_column, short_column, signal_cache,
+            kai_data_df, statistic_dict = get_detail_backtest_result_op(22, df, long_column, short_column, signal_cache,
                                                                         is_filter, is_detail)
             # 为每一行添加统计数据，需要修改到原始数据中
             # 直接修改 `good_df` 中的相应列
