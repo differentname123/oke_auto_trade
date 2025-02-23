@@ -266,7 +266,7 @@ def optimize_parameters(df, tp_range=None, sl_range=None):
     }
 
 
-def get_detail_backtest_result_op(total_months, df, kai_column, pin_column, signal_cache, is_filter=True, is_detail=False):
+def get_detail_backtest_result_op(df, kai_column, pin_column, signal_cache, is_filter=True, is_detail=False):
     """
     根据传入信号名获取详细回测结果：
       - 使用 signal_cache 避免重复计算
@@ -274,7 +274,7 @@ def get_detail_backtest_result_op(total_months, df, kai_column, pin_column, sign
     """
     kai_side = 'long' if 'long' in kai_column.lower() else 'short'
     temp_dict = {}
-
+    total_months = 22
     def get_signal_and_price(column):
         if column in signal_cache:
             return signal_cache[column]
@@ -301,7 +301,7 @@ def get_detail_backtest_result_op(total_months, df, kai_column, pin_column, sign
     pin_count = len(pin_data_df)
     kai_count = len(kai_data_df)
     same_count_rate = round(100 * same_count / min(pin_count, kai_count), 4) if min(pin_count, kai_count) > 0 else 0
-    if same_count_rate > 5:
+    if same_count_rate > 1:
         return None, None
 
     # 对 kai_data_df 中每个时间点，找到 pin_data_df 中最接近右侧的匹配项
@@ -349,7 +349,8 @@ def get_detail_backtest_result_op(total_months, df, kai_column, pin_column, sign
     # 根据 pin_time 映射更新 kai_price
     pin_price_map = kai_data_df.set_index('pin_time')['pin_price']
     mapped_prices = kai_data_df['timestamp'].map(pin_price_map)
-    kai_data_df['kai_price'] = mapped_prices.combine_first(kai_data_df['kai_price'])
+    if same_count > 0 and not mapped_prices.isna().all():
+        kai_data_df['kai_price'] = mapped_prices.combine_first(kai_data_df['kai_price'])
 
     # 向量化计算收益率
     if kai_side == 'long':
@@ -413,6 +414,7 @@ def get_detail_backtest_result_op(total_months, df, kai_column, pin_column, sign
     monthly_net_profit_std = float(monthly_agg['sum'].std())
     monthly_avg_profit_std = float(monthly_agg['mean'].std())
     monthly_net_profit_min = monthly_agg['sum'].min()
+    monthly_net_profit_max = monthly_agg['sum'].max()
     monthly_loss_rate = (monthly_agg['sum'] < 0).sum() / active_months if active_months else 0
 
     hold_time_std = kai_data_df['hold_time'].std()
@@ -465,14 +467,15 @@ def get_detail_backtest_result_op(total_months, df, kai_column, pin_column, sign
         'max_profit_end_time': max_profit_end_time,
         'same_count': same_count,
         'same_count_rate': same_count_rate,
-        'monthly_trade_std': monthly_trade_std,
-        'active_month_ratio': active_month_ratio,
-        'monthly_loss_rate': monthly_loss_rate,
-        'monthly_net_profit_min': monthly_net_profit_min,
-        'monthly_net_profit_std': monthly_net_profit_std,
-        'monthly_avg_profit_std': monthly_avg_profit_std,
-        'top_profit_ratio': top_profit_ratio,
-        'top_loss_ratio': top_loss_ratio
+        'monthly_trade_std': round(monthly_trade_std, 4),
+        'active_month_ratio': round(active_month_ratio, 4),
+        'monthly_loss_rate': round(monthly_loss_rate, 4),
+        'monthly_net_profit_min': round(monthly_net_profit_min, 4),
+        'monthly_net_profit_max': round(monthly_net_profit_max, 4),
+        'monthly_net_profit_std': round(monthly_net_profit_std, 4),
+        'monthly_avg_profit_std': round(monthly_avg_profit_std, 4),
+        'top_profit_ratio': round(top_profit_ratio, 4),
+        'top_loss_ratio': round(top_loss_ratio, 4)
     }
     statistic_dict.update(temp_dict)
     return kai_data_df, statistic_dict
@@ -516,7 +519,7 @@ def process_tasks(task_chunk, df, is_filter):
     results = []
     signal_cache = {}  # 每个进程内部缓存
     for long_column, short_column in task_chunk:
-        _, stat_long = get_detail_backtest_result_op(df.shape[0] // 30, df, long_column, short_column, signal_cache, is_filter)
+        _, stat_long = get_detail_backtest_result_op(df, long_column, short_column, signal_cache, is_filter)
         results.append(stat_long)
     print(f"处理 {len(task_chunk)} 个任务，耗时 {time.time() - start_time:.2f} 秒。")
     return results
@@ -589,6 +592,12 @@ def gen_macross_signal_name(start_period, end_period, step, start_period1, end_p
     print(f"macross一共生成 {len(long_columns)} 个信号列名。参数为：{start_period}, {end_period}, {step}, {start_period1}, {end_period1}, {step1}")
     return long_columns, short_columns, key_name
 
+def worker_func(args):
+    """
+    用于在进程池中的包装函数，使得参数可以打包传递。
+    """
+    chunk, df, is_filter = args
+    return process_tasks(chunk, df, is_filter)
 
 def backtest_breakthrough_strategy(df, base_name, is_filter):
     """
@@ -615,47 +624,75 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     rsi_long_columns, rsi_short_columns, rsi_key_name = gen_rsi_signal_name(1, 1000, 40)
     column_list.append((rsi_long_columns, rsi_short_columns, rsi_key_name))
 
-    abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 1000, 30, 1, 30, 1)
+    abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 1000, 20, 1, 25, 1)
     column_list.append((abs_long_columns, abs_short_columns, abs_key_name))
-
+    # 将column_list按照第一个元素的长度升序排列
+    column_list = sorted(column_list, key=lambda x: len(x[0]))
+    all_columns = []
+    key_name = ''
     for column_pair in column_list:
-        long_columns, short_columns, key_name = column_pair
-        all_columns = long_columns + short_columns
-        task_list = list(product(all_columns, all_columns))
+        long_columns, short_columns, temp_key_name = column_pair
+        temp = long_columns + short_columns
+        key_name += temp_key_name + '_'
+        all_columns.extend(temp)
 
-        big_chunk_size = 100000
-        big_task_chunks = [task_list[i:i + big_chunk_size] for i in range(0, len(task_list), big_chunk_size)]
-        print(f'共有 {len(task_list)} 个任务，分为 {len(big_task_chunks)} 大块。')
+    task_list = list(product(all_columns, all_columns))
+
+    # # 删除x[0].split('_')[0] == x[1].split('_')[0]的信号对
+    # task_list = [x for x in task_list if x[0].split('_')[0] != x[1].split('_')[0]]
+
+    # === 大块划分（每大块包含 100,000 个任务） ===
+    big_chunk_size = 100_000
+    big_task_chunks = [task_list[i:i + big_chunk_size] for i in range(0, len(task_list), big_chunk_size)]
+    print(f'共有 {len(task_list)} 个任务，分为 {len(big_task_chunks)} 大块。')
+
+    # 我们获取 CPU 核数来设置进程数
+    pool_processes = max(1, multiprocessing.cpu_count())
+
+    # 创建进程池一次并在后续大块的处理过程中复用
+    with multiprocessing.Pool(processes=pool_processes) as pool:
+        # 对于每个大块依次处理
         for i, task_chunk in enumerate(big_task_chunks):
-            output_path = f"temp/statistic_{base_name}_{key_name}_is_filter-{is_filter}_part{i}.csv"
+            output_path = os.path.join('temp', f"statistic_{base_name}_{key_name}_is_filter-{is_filter}part{i}.csv")
             if os.path.exists(output_path):
                 print(f'已存在 {output_path}')
                 continue
-            task_chunk = task_chunk.copy()
+
+            # 复制并打乱任务顺序
+            task_chunk = list(task_chunk)  # 复制一份
             np.random.shuffle(task_chunk)
-            pool_processes = max(1, multiprocessing.cpu_count())
-            chunk_size = big_chunk_size / pool_processes / 5
-            # 将chunk_size向上取整
-            chunk_size = int(np.ceil(chunk_size))
-            task_chunks = [task_chunk[i:i + chunk_size] for i in range(0, len(task_chunk), chunk_size)]
-            print(f'共有 {len(task_chunk)} 个任务，分为 {len(task_chunks)} 块。当前 {output_path} 。')
 
+            # === 小块划分 ===
+            # 根据当前大块任务数、CPU核数与经验因子 15 计算每个小块的容量
+            chunk_size = int(np.ceil(len(task_chunk) / (pool_processes * 15)))
+            chunk_size = max(50, chunk_size)  # 保证每块至少 50 个任务
+            task_chunks = [task_chunk[j:j + chunk_size] for j in range(0, len(task_chunk), chunk_size)]
 
-            # # debug
-            # start_time = time.time()
-            # statistic_dict_list = process_tasks(task_chunks[0], df, is_filter)
-            # result = [x for x in statistic_dict_list if x is not None]
-            # result_df = pd.DataFrame(result)
-            # # result_df.to_csv('temp/temp.csv', index=False)
-            # print(f'单块任务耗时 {time.time() - start_time:.2f} 秒。')
+            print(
+                f'当前处理文件: {output_path}\n'
+                f'共有 {len(task_chunk)} 个任务，分为 {len(task_chunks)} 块，'
+                f'单个块任务大小约为 {len(task_chunks[0])}。'
+            )
 
+            # debug
+            start_time = time.time()
+            statistic_dict_list = process_tasks(task_chunks[0], df, is_filter)
+            result = [x for x in statistic_dict_list if x is not None]
+            result_df = pd.DataFrame(result)
+            print(f'单块任务耗时 {time.time() - start_time:.2f} 秒。')
+
+            # 为进程函数准备参数列表，每个元素为 (子任务块, df, is_filter)
+            tasks_args = [(chunk, df, is_filter) for chunk in task_chunks]
+
+            # 使用 imap_unordered 动态调度任务：
             statistic_dict_list = []
+            for result in pool.imap_unordered(worker_func, tasks_args, chunksize=1):
+                statistic_dict_list.extend(result)
 
-            with multiprocessing.Pool(processes=pool_processes) as pool:
-                results = pool.starmap(process_tasks, [(chunk, df, is_filter) for chunk in task_chunks])
-            for res in results:
-                statistic_dict_list.extend(res)
+            # 如有必要，过滤掉返回结果中的 None 值
             statistic_dict_list = [x for x in statistic_dict_list if x is not None]
+
+            # 将结果转换为 DataFrame 并保存成 CSV 文件
             statistic_df = pd.DataFrame(statistic_dict_list)
             statistic_df.to_csv(output_path, index=False)
             print(f'结果已保存到 {output_path} 当前时间 {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}')
@@ -673,11 +710,11 @@ def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
     needed_columns = ['timestamp', 'open', 'high', 'low', 'close']
     df = df[needed_columns]
     df['chg'] = df['close'].pct_change() * 100
-    # df['close'] = df['close'].astype('float32')
-    # df['high'] = df['high'].astype('float32')
-    # df['low'] = df['low'].astype('float32')
-    # df['open'] = df['open'].astype('float32')
-    # df['chg'] = df['chg'].astype('float32')
+    df['close'] = df['close'].astype('float32')
+    df['high'] = df['high'].astype('float32')
+    df['low'] = df['low'].astype('float32')
+    df['open'] = df['open'].astype('float32')
+    df['chg'] = df['chg'].astype('float32')
 
 
     df['timestamp'] = pd.to_datetime(df['timestamp'])
