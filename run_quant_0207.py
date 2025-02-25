@@ -16,7 +16,7 @@ OKX_WS_URL = "wss://ws.okx.com:8443/ws/v5/public"
 # OKX_WS_URL = "wss://wspap.okx.com:8443/ws/v5/public"
 
 # 订阅的交易对
-INSTRUMENT = "SOL-USDT-SWAP"
+INSTRUMENT = "BTC-USDT-SWAP"
 min_count_map= {"BTC-USDT-SWAP":0.01,"ETH-USDT-SWAP":0.01,"SOL-USDT-SWAP":0.1,"TON-USDT-SWAP":1}
 # 初始化价格映射
 kai_high_price_map = {}
@@ -345,7 +345,7 @@ def choose_good_strategy_debug(inst_id='BTC'):
     # count_L()
     # 找到temp下面所有包含False的文件
     file_list = os.listdir('temp')
-    file_list = [file for file in file_list if 'True' in file and inst_id in file and 'csv_ma_1_20_5_rsi_1_200_10_peak_1_200_20_continue_1_14_1_abs_1_1000_30_1_20_1_relate_1_50_5_10_40_10_macross_1_50_5_1_50_5_is_filter-Tru' in file and '1m' in file and 'peak_1_2500_50_continue_1_15_1_abs_1_2500_50_1_20_2_ma_1_2500_50_relate_1_2000_40_10_40_10_is_filter-Tru' not in file]
+    file_list = [file for file in file_list if 'True' in file and inst_id in file]
     # file_list = file_list[0:1]
     df_list = []
     df_map = {}
@@ -358,6 +358,9 @@ def choose_good_strategy_debug(inst_id='BTC'):
         # df['avg_profit_rate'] = df['net_profit_rate'] / df['kai_count'] * 100
         df['max_beilv'] = df['net_profit_rate'] / df['max_profit']
         df['loss_beilv'] = -df['net_profit_rate'] / df['max_consecutive_loss']
+        temp_value = 1
+        # df['score'] = (df['true_profit_std']) / df['avg_profit_rate'] * 100
+
 
         # df = add_reverse(df)
         # df['kai_period'] = df['kai_column'].apply(lambda x: int(x.split('_')[0]))
@@ -368,22 +371,30 @@ def choose_good_strategy_debug(inst_id='BTC'):
         # 删除kai_column和pin_column中不包含 ma的行
         # df = df[(df['kai_column'].str.contains('ma')) & (df['pin_column'].str.contains('ma'))]
         # 删除kai_column和pin_column中包含 abs的行
-        # df = df[~(df['kai_column'].str.contains('abs')) & ~(df['pin_column'].str.contains('abs'))]
+        df = df[(df['kai_column'].str.contains('abs')) & (df['pin_column'].str.contains('abs'))]
 
         # df = df[(df['true_profit_std'] < 10)]
-        # df = df[(df['max_consecutive_loss'] > -40)]
+        # df = df[(df['max_consecutive_loss'] > -10)]
         # df = df[(df['pin_side'] != df['kai_side'])]
-        df = df[(df['avg_profit_rate'] > 20)]
-        # df = df[(df['hold_time_mean'] < 1000)]
-        # df = df[(df['max_beilv'] > 1)]
+        df = df[(df['net_profit_rate'] > 1)]
+        # df = df[(df['monthly_net_profit_std'] < 10)]
+        # df = df[(df['same_count_rate'] < 1)]
+        # df = df[(df['same_count_rate'] < 1)]
+        df['monthly_trade_std_score'] = df['monthly_trade_std'] / (df['kai_count']) * 22
+
+        df['monthly_net_profit_std_score'] = df['monthly_net_profit_std'] / (df['net_profit_rate']) * 22
+        df['monthly_avg_profit_std_score'] = df['monthly_avg_profit_std'] / (df['avg_profit_rate']) * 100
+        # df = df[(df['monthly_net_profit_std_score'] < 50)]
+        # df = df[(df['score'] > 2)]
+        df = df[(df['avg_profit_rate'] > 1)]
+        # df = df[(df['hold_time_mean'] < 100000)]
+        # df = df[(df['max_beilv'] > 5)]
         # df = df[(df['loss_beilv'] > 1)]
-        df = df[(df['kai_count'] > 1000)]
-        df = df[(df['same_count_rate'] < 1)]
+        # df = df[(df['kai_count'] > 50)]
+        # df = df[(df['same_count_rate'] < 1)]
         # df = df[(df['pin_period'] < 50)]
         if file_key not in df_map:
             df_map[file_key] = []
-        temp_value = 1
-        df['score'] = df['avg_profit_rate'] / (df['true_profit_std'] + temp_value) / (df['true_profit_std'] + temp_value)
         # df['score'] = df['max_consecutive_loss']
         # df['score1'] = df['avg_profit_rate'] / (df['hold_time_mean'] + 20) * 1000
         # df['score2'] = df['avg_profit_rate'] / (
@@ -433,13 +444,144 @@ def choose_good_strategy_debug(inst_id='BTC'):
     # temp.to_csv('temp/temp.csv', index=False)
     return temp
 
+def calculate_final_score(result_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    根据聚合后的 result_df 中各信号的统计指标，计算最终综合评分。
+
+    核心指标：
+      盈利指标：
+        - net_profit_rate: 扣除交易成本后的累计收益率
+        - avg_profit_rate: 平均每笔交易收益率
+      风险/稳定性指标：
+        - loss_rate: 亏损交易比例（越低越好）
+        - monthly_loss_rate: 亏损月份比例（越低越好）
+        - monthly_avg_profit_std: 月度收益标准差
+        - monthly_net_profit_std: 月度净收益标准差
+
+    分析思路：
+      1. 对盈利指标使用 min-max 归一化，数字越大表示盈利能力越好；
+      2. 对风险指标（loss_rate、monthly_loss_rate）归一化后取1-值，保证数值越大越稳定；
+      3. 计算波动性：
+           - risk_volatility = monthly_avg_profit_std / (abs(avg_profit_rate) + eps)
+           - risk_volatility_net = monthly_net_profit_std / (abs(net_profit_rate) + eps)
+         归一化后取 1 - normalized_value（值越大表示波动性较低，相对稳健)；
+      4. 稳定性子评分取这四个风险因子的算数平均；
+      5. 最终得分综合盈利能力和稳定性评分，举例盈利权重0.4，稳定性权重0.6。
+
+    参数:
+      result_df: 包含各信号统计指标的 DataFrame，
+                 需要包含以下列（或部分列）：
+                   - "net_profit_rate"
+                   - "avg_profit_rate"
+                   - "loss_rate"
+                   - "monthly_loss_rate"
+                   - "monthly_avg_profit_std"
+                   - "monthly_net_profit_std"
+
+    返回:
+      带有新增列 "final_score"（以及中间归一化和子评分列）的 DataFrame
+    """
+    eps = 1e-8  # 防止除 0
+    df = result_df.copy()
+
+    # -------------------------------
+    # 1. 盈利能力指标归一化
+    # -------------------------------
+    for col in ['net_profit_rate', 'avg_profit_rate']:
+        if col in df.columns:
+            min_val = df[col].min()
+            max_val = df[col].max()
+            if abs(max_val - min_val) < eps:
+                df[col + '_norm'] = 1.0
+            else:
+                df[col + '_norm'] = df[col] / 100
+        else:
+            df[col + '_norm'] = 0.0
+
+    # 盈利子评分：将归一化后的 net_profit_rate 和 avg_profit_rate 取平均
+    df['profitability_score'] = (df['net_profit_rate_norm'] + df['avg_profit_rate_norm']) / 2.0
+
+    # -------------------------------
+    # 2. 稳定性/风险指标归一化
+    # 对于以下指标，原始数值越低越好，归一化后使用 1 - normalized_value
+    # -------------------------------
+    for col in ['loss_rate', 'monthly_loss_rate']:
+        if col in df.columns:
+            min_val = df[col].min()
+            max_val = df[col].max()
+            if abs(max_val - min_val) < eps:
+                df[col + '_score'] = 1.0
+            else:
+                df[col + '_score'] = 1 - df[col]
+        else:
+            df[col + '_score'] = 1.0
+
+    temp_value = 2
+    # 基于月度平均收益标准差的波动性指标计算
+    if 'monthly_avg_profit_std' in df.columns and 'avg_profit_rate' in df.columns:
+        df['risk_volatility'] = df['monthly_avg_profit_std'] / (df['avg_profit_rate'].abs() + eps) * 100
+        min_val = df['risk_volatility'].min()
+        max_val = df['risk_volatility'].max()
+        if abs(max_val - min_val) < eps:
+            df['risk_volatility_score'] = 1.0
+        else:
+            df['risk_volatility_score'] = temp_value - df['risk_volatility']
+    else:
+        df['risk_volatility_score'] = 1.0
+
+    # -------------------------------
+    # 新增：基于月度净收益标准差的波动性指标计算
+    if 'monthly_net_profit_std' in df.columns and 'net_profit_rate' in df.columns:
+        df['risk_volatility_net'] = df['monthly_net_profit_std'] / (df['net_profit_rate'].abs() + eps) * 22
+        min_val = df['risk_volatility_net'].min()
+        max_val = df['risk_volatility_net'].max()
+        if abs(max_val - min_val) < eps:
+            df['risk_volatility_net_score'] = 1.0
+        else:
+            df['risk_volatility_net_score'] = temp_value - df['risk_volatility_net']
+    else:
+        df['risk_volatility_net_score'] = 1.0
+
+    df['risk_volatility_avg_score'] = temp_value - df['true_profit_std'] / df['avg_profit_rate'] * 100
+    # -------------------------------
+    # 3. 稳定性子评分构造
+    # 四个风险指标平均：
+    #   - loss_rate_score
+    #   - monthly_loss_rate_score
+    #   - risk_volatility_score (基于月均收益标准差)
+    #   - risk_volatility_net_score (基于月净收益标准差)
+    # -------------------------------
+    df['stability_score'] = (
+                                    df['loss_rate_score'] +
+                                    df['monthly_loss_rate_score'] +
+                                    df['risk_volatility_score'] +
+                                    df['risk_volatility_net_score'] +
+                                    df['risk_volatility_avg_score']
+                            ) / 5
+
+    # -------------------------------
+    # 4. 综合评分计算（加权组合）
+    # 根据偏好：宁愿利润少一点，也不想经常亏损，故稳定性权重设为更高
+    # -------------------------------
+    profit_weight = 0.4  # 盈利性的权重
+    stability_weight = 0.6  # 稳定性（风险控制）的权重
+    df['final_score'] = profit_weight * df['profitability_score'] + stability_weight * df['stability_score']
+    df['final_score'] = df['stability_score'] * df['profitability_score']
+    # 删除final_score小于0的
+    df = df[(df['final_score'] > 0)]
+    return df
+
 async def main():
     range_key = 'kai_count'
     sort_key = 'avg_profit_rate'
     sort_key = 'score'
+    sort_key = 'final_score'
+    sort_key = 'stability_score'
+
     range_size = 100
     # # good_strategy_df1 = pd.read_csv('temp/temp.csv')
     good_strategy_df = choose_good_strategy_debug(INSTRUMENT)
+    good_strategy_df = calculate_final_score(good_strategy_df)
     # 筛选出kai_side为long的数据
     long_good_strategy_df = good_strategy_df[good_strategy_df['kai_side'] == 'long']
     short_good_strategy_df = good_strategy_df[good_strategy_df['kai_side'] == 'short']
