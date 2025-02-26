@@ -1509,15 +1509,15 @@ def debug():
     range_key = 'kai_count'
     sort_key = 'avg_profit_rate'
     sort_key = 'final_score'
-    # sort_key = 'stability_score'
+    sort_key = 'stability_score'
     # sort_key = 'loss_score'
     # sort_key = 'monthly_net_profit_std_score'
-    range_size = 100
+    range_size = 1
     # sort_key = 'max_consecutive_loss'
     # origin_good_df = choose_good_strategy_debug('')
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = ['SOL', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     for inst_id in inst_id_list:
-        origin_good_df = pd.read_csv(f'temp/{inst_id}_df.csv')
+        # origin_good_df = pd.read_csv(f'temp/{inst_id}_df.csv')
         # origin_good_df['hold_time_score'] = origin_good_df['hold_time_std'] / origin_good_df['hold_time_mean']
         # origin_good_df['loss_score'] = 1 - origin_good_df['loss_rate'] - origin_good_df['loss_time_rate']
         # origin_good_df = origin_good_df[(origin_good_df['loss_score'] > 0)]
@@ -1526,8 +1526,8 @@ def debug():
 
 
 
-        # origin_good_df = choose_good_strategy_debug(inst_id)
-        # origin_good_df = calculate_final_score(origin_good_df)
+        origin_good_df = choose_good_strategy_debug(inst_id)
+        origin_good_df = calculate_final_score(origin_good_df)
         # 116kai_count 1360个
 
 
@@ -1561,7 +1561,7 @@ def debug():
 
         is_filter = True
         is_detail = False
-        df = pd.read_csv(f'kline_data/origin_data_1m_50000_{inst_id}-USDT-SWAP.csv')
+        df = pd.read_csv(f'kline_data/origin_data_1m_20000_{inst_id}-USDT-SWAP.csv')
         # 计算每一行的涨跌幅
         df['chg'] = df['close'].pct_change() * 100
         df['timestamp'] = pd.to_datetime(df['timestamp'])
@@ -1620,8 +1620,6 @@ def debug():
 
 
 def example():
-    df1 = pd.read_csv('temp\statistic_origin_data_1m_10000000_BTC-USDT-SWAP.csv_rsi_1_2000_80_abs_1_2000_40_1_25_1_relate_1_2000_60_1_200_6__is_filter-Truepart0_op.csv')
-
     debug()
     # choose_good_strategy()
     start_time = time.time()

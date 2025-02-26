@@ -262,6 +262,7 @@ def optimize_parameters(df, tp_range=None, sl_range=None):
     }
 
 
+
 def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is_detail=False):
     """
     优化后的 get_detail_backtest_result_op 函数：
@@ -371,9 +372,11 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
 
     # 利用向量化方式计算收益率
     if is_long:
-        profit_series = ((kai_data_df["pin_price"] - kai_data_df["kai_price"]) / kai_data_df["kai_price"] * 100).round(4)
+        profit_series = ((kai_data_df["pin_price"] - kai_data_df["kai_price"]) / kai_data_df["kai_price"] * 100).round(
+            4)
     else:
-        profit_series = ((kai_data_df["kai_price"] - kai_data_df["pin_price"]) / kai_data_df["pin_price"] * 100).round(4)
+        profit_series = ((kai_data_df["kai_price"] - kai_data_df["pin_price"]) / kai_data_df["pin_price"] * 100).round(
+            4)
     kai_data_df["profit"] = profit_series
     kai_data_df["true_profit"] = profit_series - 0.07
 
@@ -437,10 +440,6 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     monthly_net_profit_max = monthly_agg["sum"].max()
     monthly_loss_rate = (monthly_agg["sum"] < 0).sum() / active_months if active_months else 0
 
-    # 新增指标：每个月净利润和交易个数
-    monthly_net_profit_detail = {str(month): round(val, 4) for month, val in monthly_agg["sum"].to_dict().items()}
-    monthly_trade_count_detail = {str(month): int(val) for month, val in monthly_agg["count"].to_dict().items()}
-
     hold_time_std = kai_data_df["hold_time"].std()
 
     # 前10%盈利/亏损的比率计算
@@ -500,10 +499,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         "monthly_net_profit_std": round(monthly_net_profit_std, 4),
         "monthly_avg_profit_std": round(monthly_avg_profit_std, 4),
         "top_profit_ratio": round(top_profit_ratio, 4),
-        "top_loss_ratio": round(top_loss_ratio, 4),
-        # 新增的每月净利润和交易个数的详细数据
-        "monthly_net_profit_detail": monthly_net_profit_detail,
-        "monthly_trade_count_detail": monthly_trade_count_detail
+        "top_loss_ratio": round(top_loss_ratio, 4)
     }
     statistic_dict.update(temp_dict)
     return kai_data_df, statistic_dict
@@ -633,6 +629,34 @@ def init_worker(precomputed_signals):
     GLOBAL_SIGNALS = precomputed_signals
 
 
+def init_worker1(dataframe):
+    """
+    在每个子进程中初始化全局变量 df，使得 compute_signal 能够访问到它。
+    """
+    global df
+    df = dataframe
+
+def process_signal(sig):
+    """
+    针对单个信号进行计算：
+      - 调用 compute_signal 函数获得 s, p
+      - 将 s, p 转换为 numpy 数组
+      - 获取非零索引，如果数量不足 100 个则跳过
+      - 返回 (sig, (indices, 对应的 p 值)) 的结果
+    如果计算出错，则打印错误信息并返回 None。
+    """
+    try:
+        s, p = compute_signal(df, sig)
+        s_np = s.to_numpy() if hasattr(s, "to_numpy") else np.array(s)
+        p_np = p.to_numpy() if hasattr(p, "to_numpy") else np.array(p)
+        indices = np.nonzero(s_np)[0]
+        if indices.size < 100:
+            return None
+        return (sig, (indices.astype(np.int32), p_np[indices]))
+    except Exception as e:
+        print(f"预计算 {sig} 时出错：{e}")
+        return None
+
 def backtest_breakthrough_strategy(df, base_name, is_filter):
     """
     回测函数：
@@ -653,8 +677,8 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     relate_long_columns, relate_short_columns, relate_key_name = gen_relate_signal_name(1, 2000, 60, 1, 200, 6)
     column_list.append((relate_long_columns, relate_short_columns, relate_key_name))
 
-    # peak_long_columns, peak_short_columns, peak_key_name = gen_peak_signal_name(1, 3000, 300)
-    # column_list.append((peak_long_columns, peak_short_columns, peak_key_name))
+    peak_long_columns, peak_short_columns, peak_key_name = gen_peak_signal_name(1, 100, 10)
+    column_list.append((peak_long_columns, peak_short_columns, peak_key_name))
 
     rsi_long_columns, rsi_short_columns, rsi_key_name = gen_rsi_signal_name(1, 2000, 80)
     column_list.append((rsi_long_columns, rsi_short_columns, rsi_key_name))
@@ -676,18 +700,22 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     # 预计算所有信号（仅保存非零索引及对应价格），过滤掉不足 100 个 True 的信号
     precomputed_signals = {}
     print("开始预计算所有信号（采用稀疏存储）... 一共有 {} 个信号。".format(len(all_columns)))
-    for sig in all_columns:
-        try:
-            s, p = compute_signal(df, sig)
-            s_np = s.to_numpy() if hasattr(s, "to_numpy") else np.array(s)
-            p_np = p.to_numpy() if hasattr(p, "to_numpy") else np.array(p)
-            indices = np.nonzero(s_np)[0]
-            if indices.size < 100:
-                continue
-            precomputed_signals[sig] = (indices.astype(np.int32), p_np[indices])
-        except Exception as e:
-            print(f"预计算 {sig} 时出错：{e}")
-    print(f"预计算完成，共存储 {len(precomputed_signals)} 个信号。 耗时 {time.time() - start_time:.2f} 秒。")
+
+    # 根据系统的 CPU 数量创建进程池
+    num_workers = multiprocessing.cpu_count()
+
+    # 使用 initializer 将全局 df 传给每个子进程
+    with multiprocessing.Pool(processes=num_workers, initializer=init_worker1, initargs=(df,)) as pool:
+        results = pool.map(process_signal, all_columns)
+
+    # 整理并筛选计算结果
+    for res in results:
+        if res is not None:
+            sig, data = res
+            precomputed_signals[sig] = data
+
+    elapsed = time.time() - start_time
+    print(f"预计算完成，共存储 {len(precomputed_signals)} 个信号。 耗时 {elapsed:.2f} 秒。")
 
     total_size = sys.getsizeof(precomputed_signals)  # 计算字典对象本身的大小
 
