@@ -15,6 +15,9 @@ from sklearn.preprocessing import MinMaxScaler
 
 
 def compute_signal(df, col_name):
+    """
+    计算给定信号名称对应的信号及其价格序列（均保留原始 float 精度）
+    """
     parts = col_name.split('_')
     period = int(parts[1])
     signal_type = parts[0]
@@ -27,70 +30,66 @@ def compute_signal(df, col_name):
         else:
             price_series = df['low'].shift(1).rolling(window=period).min()
             signal_series = df['low'] < price_series
+        # 可选：对价格保留4位小数
+        price_series = price_series.round(4)
         return signal_series, price_series
 
     elif signal_type == 'continue':
-
         if direction == "long":
-            rolling_check = df['chg'].rolling(window=period).apply(lambda x: (x > 0).all(), raw=True)
+            condition = df['chg'] > 0
         else:
-            rolling_check = df['chg'].rolling(window=period).apply(lambda x: (x < 0).all(), raw=True)
-        valid_count = df['chg'].rolling(window=period).count()  # 统计窗口内的有效值数量
-        signal_series = (rolling_check == 1) & (valid_count == period)  # 仅当窗口填满时才允许 True
-        price_series = df['close']  # 价格取 close
+            condition = df['chg'] < 0
+        rolling_sum = condition.rolling(window=period).sum()
+        valid_count = df['chg'].rolling(window=period).count()
+        signal_series = (rolling_sum == period) & (valid_count == period)
+        price_series = df['close']
         return signal_series, price_series
+
     elif signal_type == 'abs':
         abs_value = float(parts[2])
         if direction == "long":
-            # 找到不包含当前行的前period行中 low 的最小值
             min_low_series = df['low'].shift(1).rolling(window=period).min()
-            # 计算该值上涨 abs_value% 后的价格
             target_price = min_low_series * (1 + abs_value / 100)
-            # 如果当前行的 high 超过该价格，则发出信号
+            target_price = target_price.round(4)
             signal_series = (df['high'].shift(1) <= target_price) & (df['high'] > target_price)
-            price_series = target_price  # 价格设置为该价格
-        else:  # direction == "short"
-            # 找到不包含当前行的前period行中 high 的最大值
+            return signal_series, target_price
+        else:
             max_high_series = df['high'].shift(1).rolling(window=period).max()
-            # 计算该值下跌 abs_value% 后的价格
             target_price = max_high_series * (1 - abs_value / 100)
-            # 如果当前行的 low 低于该价格，则发出信号
+            target_price = target_price.round(4)
             signal_series = (df['low'].shift(1) >= target_price) & (df['low'] < target_price)
-            price_series = target_price  # 价格设置为该价格
-        return signal_series, price_series
+            return signal_series, target_price
 
     elif signal_type == 'ma':
-        moving_avg = df['close'].shift(1).rolling(window=period).mean()  # 计算不包含当前行的前period行均值
-
+        moving_avg = df['close'].shift(1).rolling(window=period).mean()
+        moving_avg = moving_avg.round(4)
         if direction == "long":
             signal_series = (df['high'].shift(1) <= moving_avg) & (df['high'] > moving_avg)
-        else:  # direction == "short"
+        else:
             signal_series = (df['low'].shift(1) >= moving_avg) & (df['low'] < moving_avg)
-
-        price_series = moving_avg  # 价格取均线值
-        return signal_series, price_series
+        return signal_series, moving_avg
 
     elif signal_type == 'macross':
         fast_period = int(parts[1])
         slow_period = int(parts[2])
         fast_ma = df['close'].rolling(window=fast_period).mean().shift(1)
         slow_ma = df['close'].rolling(window=slow_period).mean().shift(1)
+        fast_ma = fast_ma.round(4)
+        slow_ma = slow_ma.round(4)
         if direction == "long":
             signal_series = (fast_ma.shift(1) <= slow_ma.shift(1)) & (fast_ma > slow_ma)
         else:
             signal_series = (fast_ma.shift(1) >= slow_ma.shift(1)) & (fast_ma < slow_ma)
-        price_series = df['close']
-        return signal_series, price_series
+        # 直接返回 close 价格作为交易价格
+        return signal_series, df['close']
 
     elif signal_type == 'rsi':
         period = int(parts[1])
         overbought = int(parts[2])
         oversold = int(parts[3])
-        delta = df['close'].diff(1)
-        gain = delta.copy()
-        gain[delta < 0] = 0.0
-        loss = -delta.copy()
-        loss[delta > 0] = 0.0
+        delta = df['close'].diff(1).astype(np.float32)
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
         avg_gain = gain.rolling(window=period).mean()
         avg_loss = loss.rolling(window=period).mean()
         rs = avg_gain / avg_loss
@@ -99,33 +98,24 @@ def compute_signal(df, col_name):
             signal_series = (rsi.shift(1) > overbought) & (rsi <= overbought)
         else:
             signal_series = (rsi.shift(1) < oversold) & (rsi >= oversold)
-        price_series = df['close']
-        return signal_series, price_series
+        return signal_series, df['close']
 
     elif signal_type == 'relate':
         abs_value = float(parts[2])
         if direction == "long":
-            # 计算前 period 行的最低价（不包含当前行）
             min_low_series = df['low'].shift(1).rolling(window=period).min()
-            # 计算前 period 行的最高价（不包含当前行）
             max_high_series = df['high'].shift(1).rolling(window=period).max()
-            # 计算目标价格：min + abs_value% * (max - min)
             target_price = min_low_series + abs_value / 100 * (max_high_series - min_low_series)
-            # 生成信号：如果当前行的 high 上穿目标价格
+            target_price = target_price.round(4)
             signal_series = (df['high'].shift(1) <= target_price) & (df['high'] > target_price)
-            price_series = target_price  # 价格设置为目标价格
-
-        else:  # direction == "short"
-            # 计算前 period 行的最高价（不包含当前行）
+            return signal_series, target_price
+        else:
             max_high_series = df['high'].shift(1).rolling(window=period).max()
-            # 计算前 period 行的最低价（不包含当前行）
             min_low_series = df['low'].shift(1).rolling(window=period).min()
-            # 计算目标价格：max - abs_value% * (max - min)
             target_price = max_high_series - abs_value / 100 * (max_high_series - min_low_series)
-            # 生成信号：如果当前行的 low 下穿目标价格
+            target_price = target_price.round(4)
             signal_series = (df['low'].shift(1) >= target_price) & (df['low'] < target_price)
-            price_series = target_price  # 价格设置为目标价格
-        return signal_series, price_series
+            return signal_series, target_price
 
     else:
         raise ValueError(f"未知的信号类型: {signal_type}")
@@ -1169,7 +1159,7 @@ def calculate_final_score(result_df: pd.DataFrame) -> pd.DataFrame:
             if abs(max_val - min_val) < eps:
                 df[col + '_norm'] = 1.0
             else:
-                df[col + '_norm'] = df[col] / 100
+                df[col + '_norm'] = df[col] / 200
         else:
             df[col + '_norm'] = 0.0
 
@@ -1229,8 +1219,8 @@ def calculate_final_score(result_df: pd.DataFrame) -> pd.DataFrame:
                                     df['loss_rate_score'] +
                                     df['monthly_loss_rate_score'] +
                                     df['risk_volatility_score'] +
-                                    df['risk_volatility_net_score'] +
-                                    df['risk_volatility_avg_score']
+                                    df['risk_volatility_net_score']
+                                    # df['risk_volatility_avg_score'] / 2
                             ) / 5
 
     # -------------------------------
@@ -1250,7 +1240,7 @@ def choose_good_strategy_debug(inst_id='BTC'):
     # count_L()
     # 找到temp下面所有包含False的文件
     file_list = os.listdir('temp')
-    file_list = [file for file in file_list if 'True' in file and inst_id in file and 'USDT-SWAP.csv_continue_1_20_1_ma_1_3000_300_peak_1_3000_300_rsi_1_1000_40_macross_1_1000_20_1_1000_20_relate_1_1000_30_1_100_6_abs_1_1000_20_1_25_1_'  in file]
+    file_list = [file for file in file_list if 'TON' not in file and inst_id in file and 'USDT-SWAP.csv_continue_1_20_1_ma_1_3000_300_peak_1_3000_300_rsi_1_1000_40_macross_1_1000_20_1_1000_20_relate_1_1000_30_1_100_6_abs_1_1000_20_1_25_1_'  in file and 'op' in file]
     # file_list = file_list[0:1]
     df_list = []
     df_map = {}
@@ -1281,7 +1271,7 @@ def choose_good_strategy_debug(inst_id='BTC'):
         # df = df[(df['true_profit_std'] < 10)]
         # df = df[(df['max_consecutive_loss'] > -10)]
         # df = df[(df['pin_side'] != df['kai_side'])]
-        df = df[(df['net_profit_rate'] > 1)]
+        df = df[(df['net_profit_rate'] > 50)]
         # df = df[(df['monthly_net_profit_std'] < 10)]
         # df = df[(df['same_count_rate'] < 1)]
         # df = df[(df['same_count_rate'] < 1)]
@@ -1500,14 +1490,17 @@ def gen_score(origin_good_df, key_name):
 def debug():
     # good_df = pd.read_csv('temp/final_good.csv')
 
-    # origin_good_df_list = []
-    # inst_id_list = ['BTC', 'ETH', 'SOL', 'TON']
+    origin_good_df_list = []
+    # inst_id_list = ['BTC', 'ETH', 'SOL']
     # for inst_id in inst_id_list:
     #     origin_good_df = choose_good_strategy_debug(inst_id)
+    #     origin_good_df.to_csv(f'temp/{inst_id}_df.csv', index=False)
     #     origin_good_df_list.append(origin_good_df)
-    # all_df = pd.concat(origin_good_df_list)
-    # all_df = pd.read_csv('temp/all.csv')
+    # # all_df = pd.concat(origin_good_df_list)
+    # # all_df = pd.read_csv('temp/all.csv')
     # merged_df, temp_df = merge_dataframes(origin_good_df_list)
+    # merged_df.to_csv('temp/merged_df.csv', index=False)
+    # temp_df.to_csv('temp/temp_df.csv', index=False)
     # origin_good_df = pd.read_csv('temp/temp.csv')
     # sort_key = gen_score(origin_good_df, 'kai_count')
 
@@ -1516,17 +1509,26 @@ def debug():
     range_key = 'kai_count'
     sort_key = 'avg_profit_rate'
     sort_key = 'final_score'
-    sort_key = 'stability_score'
-    range_size = 1
+    # sort_key = 'stability_score'
+    # sort_key = 'loss_score'
+    # sort_key = 'monthly_net_profit_std_score'
+    range_size = 100
     # sort_key = 'max_consecutive_loss'
+    # origin_good_df = choose_good_strategy_debug('')
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     for inst_id in inst_id_list:
-        # origin_good_df = pd.read_csv('temp/all.csv')
-        # good_df = pd.read_csv('temp/final_good.csv')
+        origin_good_df = pd.read_csv(f'temp/{inst_id}_df.csv')
+        # origin_good_df['hold_time_score'] = origin_good_df['hold_time_std'] / origin_good_df['hold_time_mean']
+        # origin_good_df['loss_score'] = 1 - origin_good_df['loss_rate'] - origin_good_df['loss_time_rate']
+        # origin_good_df = origin_good_df[(origin_good_df['loss_score'] > 0)]
+        # # good_df = pd.read_csv('temp/final_good.csv')
 
-        origin_good_df = choose_good_strategy_debug(inst_id)
-        origin_good_df = calculate_final_score(origin_good_df)
-        # 100 1.17 200 0.94 1000 0.7
+
+
+
+        # origin_good_df = choose_good_strategy_debug(inst_id)
+        # origin_good_df = calculate_final_score(origin_good_df)
+        # 116kai_count 1360个
 
 
         # # # 获取origin_good_df中不重复的kai_column与pin_column的值
@@ -1559,7 +1561,7 @@ def debug():
 
         is_filter = True
         is_detail = False
-        df = pd.read_csv(f'kline_data/origin_data_1m_20000_{inst_id}-USDT-SWAP.csv')
+        df = pd.read_csv(f'kline_data/origin_data_1m_50000_{inst_id}-USDT-SWAP.csv')
         # 计算每一行的涨跌幅
         df['chg'] = df['close'].pct_change() * 100
         df['timestamp'] = pd.to_datetime(df['timestamp'])
@@ -1570,8 +1572,8 @@ def debug():
         for index, row in good_df.iterrows():
             long_column = row['kai_column']
             short_column = row['pin_column']
-            # long_column = 'abs_1_0.1_high_long'
-            # short_column = 'abs_2_0.6_high_long'
+            # long_column = 'ma_1_low_short'
+            # short_column = 'relate_1_1_high_long'
             # long_column = 'relate_50_10_high_long'
             # short_column = 'abs_202_0.1_low_short'
             kai_data_df, statistic_dict = get_detail_backtest_result_op(22, df, long_column, short_column, signal_cache,
@@ -1618,6 +1620,8 @@ def debug():
 
 
 def example():
+    df1 = pd.read_csv('temp\statistic_origin_data_1m_10000000_BTC-USDT-SWAP.csv_rsi_1_2000_80_abs_1_2000_40_1_25_1_relate_1_2000_60_1_200_6__is_filter-Truepart0_op.csv')
+
     debug()
     # choose_good_strategy()
     start_time = time.time()

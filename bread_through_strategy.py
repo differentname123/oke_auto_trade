@@ -371,11 +371,9 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
 
     # 利用向量化方式计算收益率
     if is_long:
-        profit_series = ((kai_data_df["pin_price"] - kai_data_df["kai_price"]) / kai_data_df["kai_price"] * 100).round(
-            4)
+        profit_series = ((kai_data_df["pin_price"] - kai_data_df["kai_price"]) / kai_data_df["kai_price"] * 100).round(4)
     else:
-        profit_series = ((kai_data_df["kai_price"] - kai_data_df["pin_price"]) / kai_data_df["pin_price"] * 100).round(
-            4)
+        profit_series = ((kai_data_df["kai_price"] - kai_data_df["pin_price"]) / kai_data_df["pin_price"] * 100).round(4)
     kai_data_df["profit"] = profit_series
     kai_data_df["true_profit"] = profit_series - 0.07
 
@@ -439,6 +437,10 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     monthly_net_profit_max = monthly_agg["sum"].max()
     monthly_loss_rate = (monthly_agg["sum"] < 0).sum() / active_months if active_months else 0
 
+    # 新增指标：每个月净利润和交易个数
+    monthly_net_profit_detail = {str(month): round(val, 4) for month, val in monthly_agg["sum"].to_dict().items()}
+    monthly_trade_count_detail = {str(month): int(val) for month, val in monthly_agg["count"].to_dict().items()}
+
     hold_time_std = kai_data_df["hold_time"].std()
 
     # 前10%盈利/亏损的比率计算
@@ -498,7 +500,10 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         "monthly_net_profit_std": round(monthly_net_profit_std, 4),
         "monthly_avg_profit_std": round(monthly_avg_profit_std, 4),
         "top_profit_ratio": round(top_profit_ratio, 4),
-        "top_loss_ratio": round(top_loss_ratio, 4)
+        "top_loss_ratio": round(top_loss_ratio, 4),
+        # 新增的每月净利润和交易个数的详细数据
+        "monthly_net_profit_detail": monthly_net_profit_detail,
+        "monthly_trade_count_detail": monthly_trade_count_detail
     }
     statistic_dict.update(temp_dict)
     return kai_data_df, statistic_dict
@@ -639,22 +644,22 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     continue_long_columns, continue_short_columns, continue_key_name = gen_continue_signal_name(1, 20, 1)
     column_list.append((continue_long_columns, continue_short_columns, continue_key_name))
 
-    macross_long_columns, macross_short_columns, macross_key_name = gen_macross_signal_name(1, 1000, 20, 1, 1000, 20)
+    macross_long_columns, macross_short_columns, macross_key_name = gen_macross_signal_name(1, 100, 10, 1, 100, 10)
     column_list.append((macross_long_columns, macross_short_columns, macross_key_name))
 
-    ma_long_columns, ma_short_columns, ma_key_name = gen_ma_signal_name(1, 3000, 300)
+    ma_long_columns, ma_short_columns, ma_key_name = gen_ma_signal_name(1, 100, 10)
     column_list.append((ma_long_columns, ma_short_columns, ma_key_name))
 
-    relate_long_columns, relate_short_columns, relate_key_name = gen_relate_signal_name(1, 1000, 30, 1, 100, 6)
+    relate_long_columns, relate_short_columns, relate_key_name = gen_relate_signal_name(1, 2000, 60, 1, 200, 6)
     column_list.append((relate_long_columns, relate_short_columns, relate_key_name))
 
-    peak_long_columns, peak_short_columns, peak_key_name = gen_peak_signal_name(1, 3000, 300)
-    column_list.append((peak_long_columns, peak_short_columns, peak_key_name))
+    # peak_long_columns, peak_short_columns, peak_key_name = gen_peak_signal_name(1, 3000, 300)
+    # column_list.append((peak_long_columns, peak_short_columns, peak_key_name))
 
-    rsi_long_columns, rsi_short_columns, rsi_key_name = gen_rsi_signal_name(1, 1000, 40)
+    rsi_long_columns, rsi_short_columns, rsi_key_name = gen_rsi_signal_name(1, 2000, 80)
     column_list.append((rsi_long_columns, rsi_short_columns, rsi_key_name))
 
-    abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 1000, 20, 1, 25, 1)
+    abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 2000, 40, 1, 25, 1)
     column_list.append((abs_long_columns, abs_short_columns, abs_key_name))
 
     # 按信号数量升序排列
@@ -667,7 +672,7 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
         key_name += temp_key_name + '_'
         all_columns.extend(temp)
     start_time = time.time()
-
+    # all_columns = all_columns[:100]
     # 预计算所有信号（仅保存非零索引及对应价格），过滤掉不足 100 个 True 的信号
     precomputed_signals = {}
     print("开始预计算所有信号（采用稀疏存储）... 一共有 {} 个信号。".format(len(all_columns)))
@@ -706,9 +711,9 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     print(f"任务分为 {len(big_task_chunks)} 大块。")
 
     pool_processes = max(1, multiprocessing.cpu_count())
-    with multiprocessing.Pool(processes=pool_processes, initializer=init_worker, initargs=(precomputed_signals,)) as pool:
+    with multiprocessing.Pool(processes=pool_processes - 3, initializer=init_worker, initargs=(precomputed_signals,)) as pool:
         for i, task_chunk in enumerate(big_task_chunks):
-            output_path = os.path.join('temp', f"statistic_{base_name}_{key_name}_is_filter-{is_filter}part{i}_debug.csv")
+            output_path = os.path.join('temp', f"statistic_{base_name}_{key_name}_is_filter-{is_filter}part{i}_op.csv")
             if os.path.exists(output_path):
                 print(f'已存在 {output_path}')
                 continue
@@ -734,7 +739,7 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
             statistic_dict_list = [x for x in statistic_dict_list if x is not None]
             statistic_df = pd.DataFrame(statistic_dict_list)
             statistic_df.to_csv(output_path, index=False)
-            print(f'结果已保存到 {output_path} 当前时间 {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())} 耗时 {time.time() - start_time:.2f} 秒。')
+            print(f'耗时 {time.time() - start_time:.2f} 秒。结果已保存到 {output_path} 当前时间 {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())} ')
 
 
 def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
@@ -750,15 +755,8 @@ def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
     needed_columns = ['timestamp', 'open', 'high', 'low', 'close']
     df = df[needed_columns]
 
-    # 转换价格为 float 类型，不进行整数压缩
-    df['close'] = df['close'].astype(np.float32)
-    df['high'] = df['high'].astype(np.float32)
-    df['low'] = df['low'].astype(np.float32)
-    df['open'] = df['open'].astype(np.float32)
-
     # 计算涨跌幅（乘以100得到百分比，这里保留 float32）
     df['chg'] = df['close'].pct_change() * 100
-    df['chg'] = df['chg'].astype('float32')
 
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df_monthly = df['timestamp'].dt.to_period('M')

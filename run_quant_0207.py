@@ -345,7 +345,7 @@ def choose_good_strategy_debug(inst_id='BTC'):
     # count_L()
     # 找到temp下面所有包含False的文件
     file_list = os.listdir('temp')
-    file_list = [file for file in file_list if 'True' in file and inst_id in file]
+    file_list = [file for file in file_list if 'True' in file and inst_id in file and 'USDT-SWAP.csv_continue_1_20_1_ma_1_3000_300_peak_1_3000_300_rsi_1_1000_40_macross_1_1000_20_1_1000_20_relate_1_1000_30_1_100_6_abs_1_1000_20_1_25_1_'  in file and 'op' in file]
     # file_list = file_list[0:1]
     df_list = []
     df_map = {}
