@@ -372,11 +372,9 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
 
     # 利用向量化方式计算收益率
     if is_long:
-        profit_series = ((kai_data_df["pin_price"] - kai_data_df["kai_price"]) / kai_data_df["kai_price"] * 100).round(
-            4)
+        profit_series = ((kai_data_df["pin_price"] - kai_data_df["kai_price"]) / kai_data_df["kai_price"] * 100).round(4)
     else:
-        profit_series = ((kai_data_df["kai_price"] - kai_data_df["pin_price"]) / kai_data_df["pin_price"] * 100).round(
-            4)
+        profit_series = ((kai_data_df["kai_price"] - kai_data_df["pin_price"]) / kai_data_df["pin_price"] * 100).round(4)
     kai_data_df["profit"] = profit_series
     kai_data_df["true_profit"] = profit_series - 0.07
 
@@ -440,6 +438,10 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     monthly_net_profit_max = monthly_agg["sum"].max()
     monthly_loss_rate = (monthly_agg["sum"] < 0).sum() / active_months if active_months else 0
 
+    # 新增指标：每个月净利润和交易个数
+    monthly_net_profit_detail = {str(month): round(val, 4) for month, val in monthly_agg["sum"].to_dict().items()}
+    monthly_trade_count_detail = {str(month): int(val) for month, val in monthly_agg["count"].to_dict().items()}
+
     hold_time_std = kai_data_df["hold_time"].std()
 
     # 前10%盈利/亏损的比率计算
@@ -499,7 +501,10 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         "monthly_net_profit_std": round(monthly_net_profit_std, 4),
         "monthly_avg_profit_std": round(monthly_avg_profit_std, 4),
         "top_profit_ratio": round(top_profit_ratio, 4),
-        "top_loss_ratio": round(top_loss_ratio, 4)
+        "top_loss_ratio": round(top_loss_ratio, 4),
+        # 新增的每月净利润和交易个数的详细数据
+        "monthly_net_profit_detail": monthly_net_profit_detail,
+        "monthly_trade_count_detail": monthly_trade_count_detail
     }
     statistic_dict.update(temp_dict)
     return kai_data_df, statistic_dict
