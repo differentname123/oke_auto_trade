@@ -1,6 +1,7 @@
 """
 突破策略的信号生成以及回测（优化版）
 """
+import itertools
 import math
 import multiprocessing
 import os
@@ -10,8 +11,11 @@ from itertools import product
 
 import numpy as np
 import pandas as pd
+from matplotlib import pyplot as plt
 from numba import njit
+from scipy.stats import spearmanr
 from sklearn.preprocessing import MinMaxScaler
+import ast
 
 
 def compute_signal(df, col_name):
@@ -1146,7 +1150,7 @@ def calculate_final_score(result_df: pd.DataFrame) -> pd.DataFrame:
       带有新增列 "final_score"（以及中间归一化和子评分列）的 DataFrame
     """
     eps = 1e-8  # 防止除 0
-    temp_value = 2
+    temp_value = 1
     df = result_df.copy()
 
     # -------------------------------
@@ -1164,7 +1168,8 @@ def calculate_final_score(result_df: pd.DataFrame) -> pd.DataFrame:
             df[col + '_norm'] = 0.0
 
     # 盈利子评分：将归一化后的 net_profit_rate 和 avg_profit_rate 取平均
-    df['profitability_score'] = (df['net_profit_rate_norm'] + df['avg_profit_rate_norm']) / 2.0
+    df['profitability_score'] = (df['net_profit_rate_norm'] + df['avg_profit_rate_norm'])
+
 
     # -------------------------------
     # 2. 稳定性/风险指标归一化
@@ -1177,36 +1182,18 @@ def calculate_final_score(result_df: pd.DataFrame) -> pd.DataFrame:
             if abs(max_val - min_val) < eps:
                 df[col + '_score'] = 1.0
             else:
-                df[col + '_score'] = 1 - df[col]
+                df[col + '_score'] = 0.5 - df[col]
         else:
             df[col + '_score'] = 1.0
 
     # 基于月度平均收益标准差的波动性指标计算
-    if 'monthly_avg_profit_std' in df.columns and 'avg_profit_rate' in df.columns:
-        df['risk_volatility'] = df['monthly_avg_profit_std'] / (df['avg_profit_rate'].abs() + eps) * 100
-        min_val = df['risk_volatility'].min()
-        max_val = df['risk_volatility'].max()
-        if abs(max_val - min_val) < eps:
-            df['risk_volatility_score'] = 1.0
-        else:
-            df['risk_volatility_score'] = temp_value - df['risk_volatility']
-    else:
-        df['risk_volatility_score'] = 1.0
+    df['monthly_avg_profit_std_score'] = temp_value - df['monthly_avg_profit_std'] / (df['avg_profit_rate'].abs() + eps) * 100
 
-    # -------------------------------
     # 新增：基于月度净收益标准差的波动性指标计算
-    if 'monthly_net_profit_std' in df.columns and 'net_profit_rate' in df.columns:
-        df['risk_volatility_net'] = df['monthly_net_profit_std'] / (df['net_profit_rate'].abs() + eps) * 22
-        min_val = df['risk_volatility_net'].min()
-        max_val = df['risk_volatility_net'].max()
-        if abs(max_val - min_val) < eps:
-            df['risk_volatility_net_score'] = 1.0
-        else:
-            df['risk_volatility_net_score'] = temp_value - df['risk_volatility_net']
-    else:
-        df['risk_volatility_net_score'] = 1.0
+    df['monthly_net_profit_std_score'] = temp_value - df['monthly_net_profit_std'] / (df['net_profit_rate'].abs() + eps) * 22
 
-    df['risk_volatility_avg_score'] = temp_value - df['true_profit_std'] / df['avg_profit_rate'] * 100
+    # 新增：整体平均收益的波动性指标计算
+    df['avg_profit_std_score'] = temp_value - df['true_profit_std'] / df['avg_profit_rate'] * 100
     # -------------------------------
     # 3. 稳定性子评分构造
     # 四个风险指标平均：
@@ -1218,10 +1205,10 @@ def calculate_final_score(result_df: pd.DataFrame) -> pd.DataFrame:
     df['stability_score'] = (
                                     df['loss_rate_score'] +
                                     df['monthly_loss_rate_score'] +
-                                    df['risk_volatility_score'] +
-                                    df['risk_volatility_net_score']
+                                    df['monthly_net_profit_std_score']
+                                    # df['monthly_avg_profit_std_score']
                                     # df['risk_volatility_avg_score'] / 2
-                            ) / 5
+                            )
 
     # -------------------------------
     # 4. 综合评分计算（加权组合）
@@ -1240,13 +1227,17 @@ def choose_good_strategy_debug(inst_id='BTC'):
     # count_L()
     # 找到temp下面所有包含False的文件
     file_list = os.listdir('temp')
-    file_list = [file for file in file_list if 'TON' not in file and inst_id in file and 'USDT-SWAP.csv_continue_1_20_1_ma_1_3000_300_peak_1_3000_300_rsi_1_1000_40_macross_1_1000_20_1_1000_20_relate_1_1000_30_1_100_6_abs_1_1000_20_1_25_1_'  in file and 'op' in file]
+    file_list = [file for file in file_list if 'True' in file and inst_id in file and 'SDT-SWAP.csv_continue_1_20_1_ma_1_100_20_peak_1_100_20_macross_1_100_10_1_100_10_rsi_1_1000_150_relate_1_1500_90_1_100_3_abs_1_2000_90_1_60_1__is_filter-Truepart'  in file and 'op' in file]
     # file_list = file_list[0:1]
     df_list = []
     df_map = {}
     for file in file_list:
         file_key = file.split('_')[4]
         df = pd.read_csv(f'temp/{file}')
+        # 删除monthly_net_profit_detail和monthly_trade_count_detail两列
+        # df = df.drop(columns=['monthly_net_profit_detail', 'monthly_trade_count_detail','total_count','trade_rate','profit_rate','max_loss_start_time','max_loss_end_time','max_profit_start_time','max_profit_end_time'])
+        df = df.drop(columns=['total_count','trade_rate','profit_rate','max_loss_start_time','max_loss_end_time','max_profit_start_time','max_profit_end_time'])
+
 
         # 去除最大的偶然利润
         # df['net_profit_rate'] = df['net_profit_rate'] - 1 * df['max_profit']
@@ -1282,7 +1273,7 @@ def choose_good_strategy_debug(inst_id='BTC'):
         # df = df[(df['monthly_net_profit_std_score'] < 50)]
         # df = df[(df['score'] > 2)]
         df = df[(df['avg_profit_rate'] > 1)]
-        # df = df[(df['hold_time_mean'] < 100000)]
+        df = df[(df['hold_time_mean'] < 10000)]
         # df = df[(df['max_beilv'] > 5)]
         # df = df[(df['loss_beilv'] > 1)]
         # df = df[(df['kai_count'] > 50)]
@@ -1487,6 +1478,171 @@ def gen_score(origin_good_df, key_name):
     return f'{key_name}_score'
 
 
+def safe_parse_dict(val):
+    """
+    将字符串转换为字典，如果 val 已经是 dict 类型，则直接返回。
+    如果转换失败，返回空字典。
+    """
+    if isinstance(val, dict):
+        return val
+    if isinstance(val, str):
+        try:
+            # 尝试将字符串转换为字典
+            return ast.literal_eval(val)
+        except Exception as e:
+            # 转换失败时打印错误信息，并返回空字典
+            print(f"转换错误: {e}，值为: {val}")
+            return {}
+    return {}
+
+def compute_robust_correlation(detail_dict1, detail_dict2):
+    """
+    根据两个字典（key 为月份，value 为数据值）计算稳健相关性。
+
+    计算方法：
+      - 先得到两个字典共有的月份（排序后保证时间序列顺序）
+      - 当共同月份少于 3 或任一数据序列标准差为 0 时，返回 0
+      - 分别计算 Pearson 与 Spearman 相关系数，若 Spearman 相关系数为 nan 则置为 0
+      - 返回两者均值作为稳健相关性
+    """
+    common_keys = sorted(set(detail_dict1.keys()) & set(detail_dict2.keys()))
+    if len(common_keys) < 3:
+        return 0
+
+    x = np.array([detail_dict1[k] for k in common_keys])
+    y = np.array([detail_dict2[k] for k in common_keys])
+
+    std_x = np.std(x)
+    std_y = np.std(y)
+    if std_x == 0 or std_y == 0:
+        return 0
+
+    # 计算 Pearson 相关系数
+    pearson_corr = np.corrcoef(x, y)[0, 1]
+
+    # 计算 Spearman 相关系数
+    spearman_corr, _ = spearmanr(x, y)
+    if np.isnan(spearman_corr):
+        spearman_corr = 0
+
+    robust_corr = (pearson_corr + spearman_corr) / 2
+    return robust_corr
+
+def plot_comparison_chart(detail_dict1, detail_dict2, metric_name):
+    """
+    绘制两个字典数据的对比曲线图：
+      - 仅绘制共同月份数据（排序后按时间顺序展示）
+      - metric_name 为图标题及 y 轴标签
+    """
+    common_keys = sorted(set(detail_dict1.keys()) & set(detail_dict2.keys()))
+    if not common_keys:
+        print(f"没有共同月份数据，无法绘制 {metric_name} 的图表。")
+        return
+
+    x = common_keys
+    y1 = [detail_dict1[k] for k in common_keys]
+    y2 = [detail_dict2[k] for k in common_keys]
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(x, y1, marker='o', label="Row1")
+    plt.plot(x, y2, marker='o', label="Row2")
+    plt.xlabel("month")
+    plt.ylabel(metric_name)
+    plt.title(f"{metric_name} curve")
+    plt.xticks(rotation=45)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+def calculate_row_correlation(row1, row2, is_debug=False):
+    """
+    输入:
+      row1, row2 : 两行回测结果（例如从 DataFrame 中提取的记录），
+                   每行需包含以下字段：
+                   - "monthly_net_profit_detail": 每个月的净利润数据（字典类型，预解析后）
+                   - "monthly_trade_count_detail": 每个月的交易次数数据（字典类型，预解析后）
+    计算方法:
+      1. 对两个指标（净利润和交易次数），利用共同月份内的数据分别计算 Pearson 与 Spearman 相关性的均值；
+      2. 取两项指标相关性的简单平均（范围 [-1, 1]）；
+      3. 映射到 [-100, 100] 并返回整数。
+
+    如 is_debug 为 True，同时绘制出对应的曲线图以直观观察数据对比。
+    """
+    profit_detail1 = row1.get("monthly_net_profit_detail", {})
+    profit_detail2 = row2.get("monthly_net_profit_detail", {})
+    trade_detail1 = row1.get("monthly_trade_count_detail", {})
+    trade_detail2 = row2.get("monthly_trade_count_detail", {})
+
+    if is_debug:
+        # 绘制净利润对比图及交易次数对比图
+        plot_comparison_chart(profit_detail1, profit_detail2, "net_profit")
+        plot_comparison_chart(trade_detail1, trade_detail2, "kai_count")
+
+    net_profit_corr = compute_robust_correlation(profit_detail1, profit_detail2)
+    trade_count_corr = compute_robust_correlation(trade_detail1, trade_detail2)
+    combined_corr = (net_profit_corr + trade_count_corr) / 2.0
+    # 保证结果在 [-1, 1] 内
+    combined_corr = max(min(combined_corr, 1), -1)
+    # 映射到 [-100, 100] 并转换为整数
+    final_value = int(round(combined_corr * 100))
+    return final_value
+
+def gen_statistic_data(inst_id, sort_key):
+    origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good.csv')
+    origin_good_df = origin_good_df.sort_values(sort_key, ascending=False)
+    origin_good_df = origin_good_df[(origin_good_df[sort_key] > 0.1)]
+    # 重置索引
+    origin_good_df = origin_good_df.reset_index(drop=True)
+
+    # 保留 DataFrame 原始索引（非 0 开始），将原始索引放到一列中
+    origin_good_df = origin_good_df.reset_index()  # 新生成一列 "index" 保存原始行标
+
+    # 预处理：对指标字段进行字典解析
+    origin_good_df["monthly_net_profit_detail"] = origin_good_df["monthly_net_profit_detail"].apply(safe_parse_dict)
+    origin_good_df["monthly_trade_count_detail"] = origin_good_df["monthly_trade_count_detail"].apply(
+        safe_parse_dict)
+
+    # 转换为字典列表，保证遍历顺序与原 DataFrame 顺序一致
+    parsed_rows = origin_good_df.to_dict("records")
+
+    # 遍历每一行，对其后续行计算相关性，记录相关性为负的行对
+    negative_correlation_data = []
+    n = len(parsed_rows)
+    for pos_i in range(n):
+        for pos_j in range(pos_i + 1, n):
+            # 计算两行相关性（返回值已映射到 [-100, 100]，负值即为相关性为负）
+            corr_val = calculate_row_correlation(parsed_rows[pos_i], parsed_rows[pos_j])
+            if corr_val < 100:
+                # 使用原始索引，字段名 "index" 为 reset_index 后的原始行标
+                negative_correlation_data.append({
+                    "Row1": parsed_rows[pos_i]['index'],
+                    "Row2": parsed_rows[pos_j]['index'],
+                    "Correlation": corr_val,
+                    "Row1_kai_side": parsed_rows[pos_i].get("kai_side"),
+                    "Row2_kai_side": parsed_rows[pos_j].get("kai_side"),
+                    "Row1_kai_column": parsed_rows[pos_i].get("kai_column"),
+                    "Row2_kai_column": parsed_rows[pos_j].get("kai_column"),
+                    "Row1_pin_column": parsed_rows[pos_i].get("pin_column"),
+                    "Row2_pin_column": parsed_rows[pos_j].get("pin_column"),
+                    "Row1_kai_count": parsed_rows[pos_i].get("kai_count"),
+                    "Row2_kai_count": parsed_rows[pos_j].get("kai_count"),
+                    "Row1_net_profit_rate": parsed_rows[pos_i].get("net_profit_rate"),
+                    "Row2_net_profit_rate": parsed_rows[pos_j].get("net_profit_rate"),
+                    "Row1_avg_profit_rate": parsed_rows[pos_i].get("avg_profit_rate"),
+                    "Row2_avg_profit_rate": parsed_rows[pos_j].get("avg_profit_rate")
+                })
+
+    negative_corr_df = pd.DataFrame(negative_correlation_data, columns=[
+        "Row1", "Row2", "Correlation",
+        "Row1_kai_side", "Row2_kai_side",
+        "Row1_kai_column", "Row2_kai_column",
+        "Row1_pin_column", "Row2_pin_column",
+        "Row1_kai_count", "Row2_kai_count",
+        "Row1_net_profit_rate", "Row2_net_profit_rate",
+        "Row1_avg_profit_rate", "Row2_avg_profit_rate"
+    ])
+    return negative_corr_df
+
 def debug():
     # good_df = pd.read_csv('temp/final_good.csv')
 
@@ -1515,9 +1671,11 @@ def debug():
     range_size = 1
     # sort_key = 'max_consecutive_loss'
     # origin_good_df = choose_good_strategy_debug('')
-    inst_id_list = ['SOL', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     for inst_id in inst_id_list:
+        # origin_good_df = pd.read_csv(f'temp/{inst_id}_final_good.csv')
         # origin_good_df = pd.read_csv(f'temp/{inst_id}_df.csv')
+        # origin_good_df = origin_good_df[(origin_good_df['hold_time_mean'] < 10000)]
         # origin_good_df['hold_time_score'] = origin_good_df['hold_time_std'] / origin_good_df['hold_time_mean']
         # origin_good_df['loss_score'] = 1 - origin_good_df['loss_rate'] - origin_good_df['loss_time_rate']
         # origin_good_df = origin_good_df[(origin_good_df['loss_score'] > 0)]
@@ -1526,21 +1684,24 @@ def debug():
 
 
 
-        origin_good_df = choose_good_strategy_debug(inst_id)
-        origin_good_df = calculate_final_score(origin_good_df)
-        # 116kai_count 1360个
+        # origin_good_df = choose_good_strategy_debug(inst_id)
+        # origin_good_df = calculate_final_score(origin_good_df)
+        # origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good.csv')
+        gen_statistic_data(inst_id, sort_key)
 
 
         # # # 获取origin_good_df中不重复的kai_column与pin_column的值
         # # kai_column_list = origin_good_df['kai_column'].unique()
         # # pin_column_list = origin_good_df['pin_column'].unique()
         # # all_column_list = list(set(kai_column_list) | set(pin_column_list))
-        # # origin_good_df = pd.read_csv('temp/final_good.csv')
-        # # origin_good_df.to_csv('temp/final_good.csv', index=False)
+        # # origin_good_df = pd.read_csv('temp/origin_good.csv')
+        # # origin_good_df.to_csv('temp/origin_good.csv', index=False)
         # # 按照loss_score降序排列，选取前20行
         # # peak_1_high_long
         # # abs_1_0.4_high_long
         # # origin_good_df = origin_good_df[(origin_good_df['kai_side'] == 'short')]
+
+        # good_df = pd.read_csv('temp/final_good.csv')
 
         # kai_column和pin_column相同的时候取第一行
         origin_good_df = origin_good_df.drop_duplicates(subset=['kai_column', 'pin_column'], keep='first')
@@ -1557,64 +1718,73 @@ def debug():
         # good_df = origin_good_df
         # good_df = good_df.sort_values(by=sort_key, ascending=True)
         # good_df = good_df.drop_duplicates(subset=['kai_column', 'kai_side'], keep='first')
-        # good_df.to_csv('temp/final_good.csv', index=False)
+
+        good_df.to_csv('temp/final_good.csv', index=False)
 
         is_filter = True
         is_detail = False
-        df = pd.read_csv(f'kline_data/origin_data_1m_20000_{inst_id}-USDT-SWAP.csv')
-        # 计算每一行的涨跌幅
-        df['chg'] = df['close'].pct_change() * 100
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        signal_cache = {}
-        statistic_dict_list = []
-        good_df = good_df.reset_index(drop=True)
-        start_time = time.time()
-        for index, row in good_df.iterrows():
-            long_column = row['kai_column']
-            short_column = row['pin_column']
-            # long_column = 'ma_1_low_short'
-            # short_column = 'relate_1_1_high_long'
-            # long_column = 'relate_50_10_high_long'
-            # short_column = 'abs_202_0.1_low_short'
-            kai_data_df, statistic_dict = get_detail_backtest_result_op(22, df, long_column, short_column, signal_cache,
-                                                                        is_filter, is_detail)
-            # 为每一行添加统计数据，需要修改到原始数据中
-            # 直接修改 `good_df` 中的相应列
-            good_df.at[index, 'kai_count_new'] = statistic_dict['kai_count']
-            good_df.at[index, 'trade_rate_new'] = statistic_dict['trade_rate']
-            good_df.at[index, 'hold_time_mean_new'] = statistic_dict['hold_time_mean']
-            good_df.at[index, 'net_profit_rate_new'] = statistic_dict['net_profit_rate']
-            good_df.at[index, 'avg_profit_rate_new'] = statistic_dict['avg_profit_rate']
-            good_df.at[index, 'same_count_new'] = statistic_dict['same_count']
-            # good_df.at[index, 'max_profit_new'] = statistic_dict['max_profit']
-            # good_df.at[index, 'min_profit_new'] = statistic_dict['min_profit']
+        file_list = []
+        file_list.append(f'kline_data/origin_data_1m_50000_{inst_id}-USDT-SWAP.csv')
+        file_list.append(f'kline_data/origin_data_1m_20000_{inst_id}-USDT-SWAP.csv')
+        for file in file_list:
+            df = pd.read_csv(file)
+            # 获取第一行和最后一行的close，计算涨跌幅
+            start_close = df.iloc[0]['close']
+            end_close = df.iloc[-1]['close']
+            total_chg = (end_close - start_close) / start_close * 100
+
+            # 计算每一行的涨跌幅
+            df['chg'] = df['close'].pct_change() * 100
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            signal_cache = {}
+            statistic_dict_list = []
+            good_df = good_df.reset_index(drop=True)
+            start_time = time.time()
+            for index, row in good_df.iterrows():
+                long_column = row['kai_column']
+                short_column = row['pin_column']
+                # long_column = 'ma_1_low_short'
+                # short_column = 'relate_1_1_high_long'
+                kai_data_df, statistic_dict = get_detail_backtest_result_op(22, df, long_column, short_column, signal_cache,
+                                                                            is_filter, is_detail)
+                # 为每一行添加统计数据，需要修改到原始数据中
+                # 直接修改 `good_df` 中的相应列
+                good_df.at[index, 'kai_count_new'] = statistic_dict['kai_count']
+                good_df.at[index, 'trade_rate_new'] = statistic_dict['trade_rate']
+                good_df.at[index, 'hold_time_mean_new'] = statistic_dict['hold_time_mean']
+                good_df.at[index, 'net_profit_rate_new'] = statistic_dict['net_profit_rate']
+                good_df.at[index, 'avg_profit_rate_new'] = statistic_dict['avg_profit_rate']
+                good_df.at[index, 'same_count_new'] = statistic_dict['same_count']
+                # good_df.at[index, 'max_profit_new'] = statistic_dict['max_profit']
+                # good_df.at[index, 'min_profit_new'] = statistic_dict['min_profit']
+                if is_detail:
+                    good_df.at[index, 'max_optimal_value'] = statistic_dict['max_optimal_value']
+                    good_df.at[index, 'max_optimal_profit'] = statistic_dict['max_optimal_profit']
+                    good_df.at[index, 'max_optimal_loss_rate'] = statistic_dict['max_optimal_loss_rate']
+                    good_df.at[index, 'min_optimal_value'] = statistic_dict['min_optimal_value']
+                    good_df.at[index, 'min_optimal_profit'] = statistic_dict['min_optimal_profit']
+                    good_df.at[index, 'min_optimal_loss_rate'] = statistic_dict['min_optimal_loss_rate']
+
+                statistic_dict_list.append(statistic_dict)
             if is_detail:
-                good_df.at[index, 'max_optimal_value'] = statistic_dict['max_optimal_value']
-                good_df.at[index, 'max_optimal_profit'] = statistic_dict['max_optimal_profit']
-                good_df.at[index, 'max_optimal_loss_rate'] = statistic_dict['max_optimal_loss_rate']
-                good_df.at[index, 'min_optimal_value'] = statistic_dict['min_optimal_value']
-                good_df.at[index, 'min_optimal_profit'] = statistic_dict['min_optimal_profit']
-                good_df.at[index, 'min_optimal_loss_rate'] = statistic_dict['min_optimal_loss_rate']
+                good_df['max_optimal_profit_cha'] = good_df['max_optimal_profit'] - good_df['net_profit_rate_new']
+                good_df['max_optimal_profit_rate'] = good_df['max_optimal_profit_cha'] / good_df['kai_count_new']
+                good_df['min_optimal_profit_cha'] = good_df['min_optimal_profit'] - good_df['net_profit_rate_new']
+                good_df['min_optimal_profit_rate'] = good_df['min_optimal_profit_cha'] / good_df['kai_count_new']
+            statistic_df = pd.DataFrame(statistic_dict_list)
+            statistic_df_list.append(statistic_df)
+            print(f'耗时 {time.time() - start_time:.2f} 秒。')
+            # 获取good_df的kai_column的分布情况
+            kai_value = good_df['kai_column'].value_counts()
+            pin_value = good_df['pin_column'].value_counts()
+            # 为good_df新增两列，分别为kai_column的分布情况和pin_column的分布情况
+            good_df['kai_value'] = good_df['kai_column'].apply(lambda x: kai_value[x])
+            good_df['pin_value'] = good_df['pin_column'].apply(lambda x: pin_value[x])
+            good_df['value_score'] = good_df['kai_value'] + good_df['pin_value']
+            good_df['value_score1'] = good_df['kai_value'] * good_df['pin_value']
+            good_df['total_chg'] = total_chg
 
-            statistic_dict_list.append(statistic_dict)
-        if is_detail:
-            good_df['max_optimal_profit_cha'] = good_df['max_optimal_profit'] - good_df['net_profit_rate_new']
-            good_df['max_optimal_profit_rate'] = good_df['max_optimal_profit_cha'] / good_df['kai_count_new']
-            good_df['min_optimal_profit_cha'] = good_df['min_optimal_profit'] - good_df['net_profit_rate_new']
-            good_df['min_optimal_profit_rate'] = good_df['min_optimal_profit_cha'] / good_df['kai_count_new']
-        statistic_df = pd.DataFrame(statistic_dict_list)
-        statistic_df_list.append(statistic_df)
-        print(f'耗时 {time.time() - start_time:.2f} 秒。')
-        # 获取good_df的kai_column的分布情况
-        kai_value = good_df['kai_column'].value_counts()
-        pin_value = good_df['pin_column'].value_counts()
-        # 为good_df新增两列，分别为kai_column的分布情况和pin_column的分布情况
-        good_df['kai_value'] = good_df['kai_column'].apply(lambda x: kai_value[x])
-        good_df['pin_value'] = good_df['pin_column'].apply(lambda x: pin_value[x])
-        good_df['value_score'] = good_df['kai_value'] + good_df['pin_value']
-        good_df['value_score1'] = good_df['kai_value'] * good_df['pin_value']
-
-        print(inst_id)
+            print(inst_id)
     merged_df, temp_df = merge_dataframes(statistic_df_list)
     print()
 

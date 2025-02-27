@@ -4,6 +4,7 @@
 
 import multiprocessing
 import os
+import pickle
 import sys
 import time
 import traceback
@@ -439,8 +440,8 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     monthly_loss_rate = (monthly_agg["sum"] < 0).sum() / active_months if active_months else 0
 
     # 新增指标：每个月净利润和交易个数
-    monthly_net_profit_detail = {str(month): round(val, 4) for month, val in monthly_agg["sum"].to_dict().items()}
-    monthly_trade_count_detail = {str(month): int(val) for month, val in monthly_agg["count"].to_dict().items()}
+    # monthly_net_profit_detail = {str(month): round(val, 4) for month, val in monthly_agg["sum"].to_dict().items()}
+    # monthly_trade_count_detail = {str(month): int(val) for month, val in monthly_agg["count"].to_dict().items()}
 
     hold_time_std = kai_data_df["hold_time"].std()
 
@@ -503,8 +504,8 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         "top_profit_ratio": round(top_profit_ratio, 4),
         "top_loss_ratio": round(top_loss_ratio, 4),
         # 新增的每月净利润和交易个数的详细数据
-        "monthly_net_profit_detail": monthly_net_profit_detail,
-        "monthly_trade_count_detail": monthly_trade_count_detail
+        # "monthly_net_profit_detail": monthly_net_profit_detail,
+        # "monthly_trade_count_detail": monthly_trade_count_detail
     }
     statistic_dict.update(temp_dict)
     return kai_data_df, statistic_dict
@@ -587,7 +588,7 @@ def gen_continue_signal_name(start_period, end_period, step):
 def gen_abs_signal_name(start_period, end_period, step, start_period1, end_period1, step1):
     period_list = generate_numbers(start_period, end_period, step, even=False)
     period_list1 = range(start_period1, end_period1, step1)
-    period_list1 = [x / 10 for x in period_list1]
+    period_list1 = [x / 20 for x in period_list1]
     long_columns = [f"abs_{period}_{period1}_high_long"
                     for period in period_list for period1 in period_list1 if period >= period1]
     short_columns = [f"abs_{period}_{period1}_low_short"
@@ -652,8 +653,10 @@ def process_signal(sig):
     """
     try:
         s, p = compute_signal(df, sig)
-        s_np = s.to_numpy() if hasattr(s, "to_numpy") else np.array(s)
-        p_np = p.to_numpy() if hasattr(p, "to_numpy") else np.array(p)
+        s_np = s.to_numpy(copy=False) if hasattr(s, "to_numpy") else np.asarray(s)
+        p_np = p.to_numpy(copy=False) if hasattr(p, "to_numpy") else np.asarray(p)
+        if p_np.dtype == np.float64:
+            p_np = p_np.astype(np.float32)
         indices = np.nonzero(s_np)[0]
         if indices.size < 100:
             return None
@@ -661,6 +664,18 @@ def process_signal(sig):
     except Exception as e:
         print(f"预计算 {sig} 时出错：{e}")
         return None
+
+def process_batch(sig_batch):
+    """
+    针对一批信号进行处理：
+      遍历列表并调用 process_signal, 如果返回非 None 则加入结果列表
+    """
+    batch_results = []
+    for sig in sig_batch:
+        res = process_signal(sig)
+        if res is not None:
+            batch_results.append(res)
+    return batch_results
 
 def backtest_breakthrough_strategy(df, base_name, is_filter):
     """
@@ -676,19 +691,19 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     macross_long_columns, macross_short_columns, macross_key_name = gen_macross_signal_name(1, 100, 10, 1, 100, 10)
     column_list.append((macross_long_columns, macross_short_columns, macross_key_name))
 
-    ma_long_columns, ma_short_columns, ma_key_name = gen_ma_signal_name(1, 100, 10)
+    ma_long_columns, ma_short_columns, ma_key_name = gen_ma_signal_name(1, 100, 20)
     column_list.append((ma_long_columns, ma_short_columns, ma_key_name))
 
-    relate_long_columns, relate_short_columns, relate_key_name = gen_relate_signal_name(1, 2000, 60, 1, 200, 6)
+    relate_long_columns, relate_short_columns, relate_key_name = gen_relate_signal_name(1, 1500, 90, 1, 100, 3)
     column_list.append((relate_long_columns, relate_short_columns, relate_key_name))
 
-    peak_long_columns, peak_short_columns, peak_key_name = gen_peak_signal_name(1, 100, 10)
+    peak_long_columns, peak_short_columns, peak_key_name = gen_peak_signal_name(1, 100, 20)
     column_list.append((peak_long_columns, peak_short_columns, peak_key_name))
 
-    rsi_long_columns, rsi_short_columns, rsi_key_name = gen_rsi_signal_name(1, 2000, 80)
+    rsi_long_columns, rsi_short_columns, rsi_key_name = gen_rsi_signal_name(1, 1000, 150)
     column_list.append((rsi_long_columns, rsi_short_columns, rsi_key_name))
 
-    abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 2000, 40, 1, 25, 1)
+    abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 2000, 90, 1, 60, 1)
     column_list.append((abs_long_columns, abs_short_columns, abs_key_name))
 
     # 按信号数量升序排列
@@ -702,25 +717,49 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
         all_columns.extend(temp)
     start_time = time.time()
     # all_columns = all_columns[:100]
-    # 预计算所有信号（仅保存非零索引及对应价格），过滤掉不足 100 个 True 的信号
-    precomputed_signals = {}
     print("开始预计算所有信号（采用稀疏存储）... 一共有 {} 个信号。".format(len(all_columns)))
 
     # 根据系统的 CPU 数量创建进程池
     num_workers = multiprocessing.cpu_count()
 
-    # 使用 initializer 将全局 df 传给每个子进程
-    with multiprocessing.Pool(processes=num_workers, initializer=init_worker1, initargs=(df,)) as pool:
-        results = pool.map(process_signal, all_columns)
+    # 用于存储最终预计算结果的字典
+    precomputed_signals = {}
+    # 定义结果文件保存路径
+    precomputed_file = f"temp/precomputed_signals_{key_name}.pkl"
 
-    # 整理并筛选计算结果
-    for res in results:
-        if res is not None:
-            sig, data = res
-            precomputed_signals[sig] = data
+    # --- 尝试加载已有的预计算结果 ---
+    if os.path.exists(precomputed_file):
+        try:
+            with open(precomputed_file, "rb") as f:
+                precomputed_signals = pickle.load(f)
+            print(f"成功加载预计算结果，共 {len(precomputed_signals)} 个信号。")
+        except Exception as e:
+            print(f"加载预计算结果失败：{e}")
 
-    elapsed = time.time() - start_time
-    print(f"预计算完成，共存储 {len(precomputed_signals)} 个信号。 耗时 {elapsed:.2f} 秒。")
+    if not precomputed_signals:
+        # 将 all_columns 分批，每批处理 10 个信号
+        signal_batches = [all_columns[i:i + 10] for i in range(0, len(all_columns), 10)]
+
+        # 使用 multiprocessing.Pool 进行并行处理，每个子进程通过 initializer 传入全局 df
+        with multiprocessing.Pool(processes=num_workers, initializer=init_worker1, initargs=(df,)) as pool:
+            batch_results = pool.map(process_batch, signal_batches)
+
+        # 整理计算结果：batch_results 是一个列表，其中每个元素为一个批次的结果列表
+        for batch in batch_results:
+            for res in batch:
+                sig, data = res
+                precomputed_signals[sig] = data
+
+        elapsed = time.time() - start_time
+        print(f"预计算完成，共存储 {len(precomputed_signals)} 个信号，耗时 {elapsed:.2f} 秒。")
+
+        # 保存预计算结果到文件
+        try:
+            with open(precomputed_file, "wb") as f:
+                pickle.dump(precomputed_signals, f)
+            print(f"预计算结果已保存到 {precomputed_file}。")
+        except Exception as e:
+            print(f"保存预计算结果时出错：{e}")
 
     total_size = sys.getsizeof(precomputed_signals)  # 计算字典对象本身的大小
 
@@ -734,8 +773,15 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
 
     # 更新 all_columns 仅保留存在于预计算字典中的信号
     all_columns = [col for col in all_columns if col in precomputed_signals]
+    # task_list = list(product(all_columns, all_columns))
 
-    task_list = list(product(all_columns, all_columns))
+
+    # 获取long_columns和short_columns
+    long_columns = [col for col in all_columns if 'long' in col]
+    short_columns = [col for col in all_columns if 'short' in col]
+    task_list = list(product(long_columns, short_columns))
+    task_list.extend(list(product(short_columns, long_columns)))
+
     print(f"共有 {len(task_list)} 个任务。")
 
     # 将任务分块（每块 100,000 个任务）
@@ -744,7 +790,7 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     print(f"任务分为 {len(big_task_chunks)} 大块。")
 
     pool_processes = max(1, multiprocessing.cpu_count())
-    with multiprocessing.Pool(processes=pool_processes - 3, initializer=init_worker, initargs=(precomputed_signals,)) as pool:
+    with multiprocessing.Pool(processes=pool_processes - 1, initializer=init_worker, initargs=(precomputed_signals,)) as pool:
         for i, task_chunk in enumerate(big_task_chunks):
             output_path = os.path.join('temp', f"statistic_{base_name}_{key_name}_is_filter-{is_filter}part{i}_op.csv")
             if os.path.exists(output_path):
@@ -785,11 +831,13 @@ def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
     base_name = os.path.basename(data_path)
     is_filter = True
     df = pd.read_csv(data_path)
-    needed_columns = ['timestamp', 'open', 'high', 'low', 'close']
+    needed_columns = ['timestamp', 'high', 'low', 'close']
     df = df[needed_columns]
 
-    # 计算涨跌幅（乘以100得到百分比，这里保留 float32）
-    df['chg'] = df['close'].pct_change() * 100
+    df['chg'] = (df['close'].pct_change() * 100).astype('float32')
+    df['high'] = df['high'].astype('float32')
+    df['low'] = df['low'].astype('float32')
+    df['close'] = df['close'].astype('float32')
 
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df_monthly = df['timestamp'].dt.to_period('M')
