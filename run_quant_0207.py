@@ -19,11 +19,8 @@ OKX_WS_URL = "wss://ws.okx.com:8443/ws/v5/public"
 INSTRUMENT = "BTC-USDT-SWAP"
 min_count_map= {"BTC-USDT-SWAP":0.01,"ETH-USDT-SWAP":0.01,"SOL-USDT-SWAP":0.1,"TON-USDT-SWAP":1}
 # 初始化价格映射
-kai_high_price_map = {}
-kai_low_price_map = {}
-
-pin_high_price_map = {}
-pin_low_price_map = {}
+kai_target_price_info_map = {}
+pin_target_price_info_map = {}
 
 order_detail_map = {}
 
@@ -31,6 +28,121 @@ kai_pin_map = {}
 
 # 记录当前分钟
 current_minute = None
+
+
+def get_next_threshold_abs(df, col_name):
+    parts = col_name.split('_')
+    direction = parts[-1]
+    period = int(parts[1])
+    abs_value = float(parts[2])
+
+    if len(df) < period + 1:
+        return None  # 数据不足，无法计算
+
+    last_high = df['high'].iloc[-1]  # 当前 K 线的最高价
+    last_low = df['low'].iloc[-1]    # 当前 K 线的最低价
+
+    if direction == "long":
+        # 计算过去 period 根 K 线的最低价（不包括当前 K 线）
+        min_low_prev = df['low'].iloc[-(period+1):-1].min()
+        threshold_price = round(min_low_prev * (1 + abs_value / 100), 4)
+
+        # 确保当前 K 线有可能触发信号
+        if last_high < threshold_price:
+            return threshold_price, ">="
+        else:
+            return None  # 价格未突破，不会触发信号
+
+    elif direction == "short":
+        # 计算过去 period 根 K 线的最高价（不包括当前 K 线）
+        max_high_prev = df['high'].iloc[-(period+1):-1].max()
+        threshold_price = round(max_high_prev * (1 - abs_value / 100), 4)
+
+        # 确保当前 K 线有可能触发信号
+        if last_low > threshold_price:
+            return threshold_price, "<="
+        else:
+            return None  # 价格未跌破，不会触发信号
+
+    return None  # 方向无效
+
+
+def get_next_threshold_relate(df, col_name):
+    parts = col_name.split('_')
+    direction = parts[-1]
+    period = int(parts[1])
+    abs_value = float(parts[2])
+
+    # 检查数据是否足够（由于 shift(1) 后会丢失最新数据，需至少 period+1 行）
+    if df.shape[0] < period + 1:
+        return None
+
+    if direction == "long":
+        # 取前一周期数据（所有计算基于 shift(1)）
+        min_low = df['low'].shift(1).rolling(window=period).min().iloc[-1]
+        max_high = df['high'].shift(1).rolling(window=period).max().iloc[-1]
+        target_price = round(min_low + abs_value / 100 * (max_high - min_low), 4)
+        comp = ">"  # 下一周期若 high > target_price 则突破成功
+        return target_price, comp
+    else:
+        max_high = df['high'].shift(1).rolling(window=period).max().iloc[-1]
+        min_low = df['low'].shift(1).rolling(window=period).min().iloc[-1]
+        target_price = round(max_high - abs_value / 100 * (max_high - min_low), 4)
+        comp = "<"  # 下一周期若 low < target_price 则突破成功
+        return target_price, comp
+
+def get_next_threshold_rsi(df, col_name):
+    parts = col_name.split('_')
+    direction = parts[-1]
+    period = int(parts[1])
+    overbought = int(parts[2])
+    oversold = int(parts[3])
+
+    if len(df) < period + 1:
+        raise None
+
+    # 计算价格变化
+    delta = df['close'].diff(1).astype(np.float64)
+    # 提取最新 period 个差值（正好构成当前滚动窗口）
+    diffs = delta.iloc[-period:]
+
+    if diffs.isnull().any():
+        return None
+
+    # 分别计算每个差值的正值（涨幅）与负值（跌幅，正数）贡献
+    gains = diffs.clip(lower=0)
+    losses = -diffs.clip(upper=0)
+
+    S_gain = gains.sum()
+    S_loss = losses.sum()
+
+    # 当前窗口中最早的那笔差值，在更新时会被剔除
+    d0 = diffs.iloc[0]
+    g0 = max(d0, 0)  # 若 d0 为正，其贡献；否则为 0
+    l0 = -min(d0, 0)  # 若 d0 为负，其转化为正数的贡献；否则为 0
+
+    C_last = df['close'].iloc[-1]
+
+    if direction == "short":
+        # 对 short 信号，新差值应为正 => X - C_last > 0
+        OS = oversold
+        # 根据公式：
+        #   ( (S_gain - g0) + (X - C_last) ) / (S_loss - l0) = OS/(100-OS)
+        # 解得：
+        threshold_price = C_last + (OS / (100 - OS)) * (S_loss - l0) - (S_gain - g0)
+        comp = ">="
+        return threshold_price, comp
+    elif direction == "long":
+        # 对 long 信号，新差值应为负 => X - C_last < 0
+        OB = overbought
+        # 根据公式：
+        #   (S_gain - g0) / ((S_loss - l0) + (C_last - X)) = OB/(100-OB)
+        # 解得：
+        threshold_price = C_last - ((S_gain - g0) * ((100 - OB) / OB) - (S_loss - l0))
+        comp = "<="
+        return threshold_price, comp
+    else:
+        return None
 
 def gen_signal_price(df, col_name):
     """
@@ -40,53 +152,82 @@ def gen_signal_price(df, col_name):
     :return:
     """
     parts = col_name.split('_')
-    period = int(parts[1])
     signal_type = parts[0]
-    direction = parts[-1]  # "long" 或 "short"
-    target_price = None
-    if signal_type == "peak":
-        if direction == "long":
-            target_price = df['high'].tail(period).max()
-        elif direction == "short":
-            target_price = df['low'].tail(period).min()
+    if signal_type == "rsi":
+        target_info = get_next_threshold_rsi(df, col_name)
     elif signal_type == "abs":
-        abs_value = float(parts[2])
-        if direction == "long":
-            target_price = df['low'].tail(period).min()
-            target_price = target_price * (1 + abs_value / 100)
-            # 判断df的最后一行数据的high是否小于target_price
-            if df['high'].tail(1).values[0] > target_price:
-                target_price = None
-        elif direction == "short":
-            target_price = df['high'].tail(period).max()
-            target_price = target_price * (1 - abs_value / 100)
-            # 判断df的最后一行数据的low是否大于target_price
-            if df['low'].tail(1).values[0] < target_price:
-                target_price = None
+        target_info = get_next_threshold_abs(df, col_name)
+    elif signal_type == "relate":
+        target_info = get_next_threshold_relate(df, col_name)
     else:
-        target_price = None
-        print(f"❌ 未知信号类型：{signal_type}")
-    return target_price
+        target_info = None
+        print(f"❌ 未知信号类型：{col_name}")
+    return target_info
+
+
+def forecast_signal_price_range(df, col_name):
+    parts = col_name.split('_')
+    direction = parts[-1]
+    period = int(parts[1])
+    overbought = int(parts[2])
+    oversold = int(parts[3])
+
+    if len(df) < period + 1:
+        raise None
+
+    # 计算价格变化
+    delta = df['close'].diff(1).astype(np.float64)
+    # 提取最新 period 个差值（正好构成当前滚动窗口）
+    diffs = delta.iloc[-period:]
+
+    if diffs.isnull().any():
+        raise ValueError("数据不足，无法计算完整的滚动窗口 RSI")
+
+    # 分别计算每个差值的正值（涨幅）与负值（跌幅，正数）贡献
+    gains = diffs.clip(lower=0)
+    losses = -diffs.clip(upper=0)
+
+    S_gain = gains.sum()
+    S_loss = losses.sum()
+
+    # 当前窗口中最早的那笔差值，在更新时会被剔除
+    d0 = diffs.iloc[0]
+    g0 = max(d0, 0)  # 若 d0 为正，其贡献；否则为 0
+    l0 = -min(d0, 0)  # 若 d0 为负，其转化为正数的贡献；否则为 0
+
+    C_last = df['close'].iloc[-1]
+
+    if direction == "short":
+        # 对 short 信号，新差值应为正 => X - C_last > 0
+        OS = oversold
+        # 根据公式：
+        #   ( (S_gain - g0) + (X - C_last) ) / (S_loss - l0) = OS/(100-OS)
+        # 解得：
+        threshold_price = C_last + (OS / (100 - OS)) * (S_loss - l0) - (S_gain - g0)
+        comp = ">="
+        return threshold_price, comp
+    elif direction == "long":
+        # 对 long 信号，新差值应为负 => X - C_last < 0
+        OB = overbought
+        # 根据公式：
+        #   (S_gain - g0) / ((S_loss - l0) + (C_last - X)) = OB/(100-OB)
+        # 解得：
+        threshold_price = C_last - ((S_gain - g0) * ((100 - OB) / OB) - (S_loss - l0))
+        comp = "<="
+        return threshold_price, comp
+    else:
+        return None
 
 def  update_price_map(strategy_df, df, target_column='kai_column'):
     kai_column_list = strategy_df[target_column].unique().tolist()
-    high_price_map = {}
-    low_price_map = {}
+    target_price_info_map = {}
     for kai_column in kai_column_list:
-        price_side = kai_column.split('_')[-2]
-        if price_side == 'high':
-            target_price = gen_signal_price(df, kai_column)
-            if target_price:
-                high_price_map[kai_column] = target_price
-        else:
-            target_price = gen_signal_price(df, kai_column)
-            if target_price:
-                low_price_map[kai_column] = target_price
-    return high_price_map, low_price_map
+        target_price_info_map[kai_column] = gen_signal_price(df, kai_column)
+    return target_price_info_map
 
 async def fetch_new_data(strategy_df, max_period):
     """ 每分钟获取最新数据并更新 high_price_map 和 low_price_map """
-    global kai_high_price_map, kai_low_price_map,pin_high_price_map, pin_low_price_map, current_minute, order_detail_map, price
+    global kai_target_price_info_map, pin_target_price_info_map, current_minute, order_detail_map, price
     newest_data = LatestDataManager(max_period, INSTRUMENT)
     max_attempts = 50
     previous_timestamp = None
@@ -107,10 +248,10 @@ async def fetch_new_data(strategy_df, max_period):
                         print(f"✅ 数据已更新，最新 timestamp: {latest_timestamp} 实时最新价格 {price}")
 
                         # 更新映射
-                        kai_high_price_map, kai_low_price_map = update_price_map(strategy_df, df)
-                        pin_high_price_map, pin_low_price_map = update_price_map(strategy_df, df, target_column='pin_column')
+                        kai_target_price_info_map = update_price_map(strategy_df, df)
+                        pin_target_price_info_map = update_price_map(strategy_df, df, target_column='pin_column')
 
-                        print(f"📈 更新开多仓价格映射：{kai_high_price_map} 📉 更新开空仓价格映射：{kai_low_price_map} 📈 更新平多仓价格映射：{pin_high_price_map} 📉 更新平空仓价格映射：{pin_low_price_map}")
+                        print(f"📈 更新开仓价格映射：{kai_target_price_info_map}  📈 更新平仓价格映射：{pin_target_price_info_map}")
                         previous_timestamp = latest_timestamp
                         current_minute = now.minute  # 更新当前分钟
                         break  # 数据已更新，跳出循环
@@ -124,10 +265,8 @@ async def fetch_new_data(strategy_df, max_period):
 
             await asyncio.sleep(1)  # 每秒检查一次当前分钟
         except Exception as e:
-            kai_high_price_map = {}
-            kai_low_price_map = {}
-            pin_high_price_map = {}
-            pin_low_price_map = {}
+            pin_target_price_info_map = {}
+            kai_target_price_info_map = {}
             traceback.print_exc()
 
 async def subscribe_channel(ws, inst_id):
@@ -147,32 +286,33 @@ def process_open_orders(price, default_size):
     根据最新成交价判断是否需要开仓（买多或卖空）
     """
     # 检查高价策略（买多）
-    for key, high_price in kai_high_price_map.items():
-        if price >= high_price and key not in order_detail_map:
-            result = place_order(INSTRUMENT, "buy", default_size)
-            if result:
-                order_detail_map[key] = {
-                    'price': price,
-                    'side': 'buy',
-                    'pin_side': 'sell',
-                    'time': current_minute,
-                    'size': default_size
-                }
-                print(f"📈 开仓 {key} 成交，价格：{price}，时间：{datetime.datetime.now()}")
-
-    # 检查低价策略（卖空）
-    for key, low_price in kai_low_price_map.items():
-        if price <= low_price and key not in order_detail_map:
-            result = place_order(INSTRUMENT, "sell", default_size)
-            if result:
-                order_detail_map[key] = {
-                    'price': price,
-                    'side': 'sell',
-                    'pin_side': 'buy',
-                    'time': current_minute,
-                    'size': default_size
-                }
-                print(f"📉 开仓 {key} 成交，价格：{price}，时间：{datetime.datetime.now()}")
+    for key, target_info in kai_target_price_info_map.items():
+        if target_info != None:
+            threshold_price, comp = target_info
+            if comp == '>':
+                if price >= threshold_price and key not in order_detail_map:
+                    result = place_order(INSTRUMENT, "buy", default_size)
+                    if result:
+                        order_detail_map[key] = {
+                            'price': price,
+                            'side': 'buy',
+                            'pin_side': 'sell',
+                            'time': current_minute,
+                            'size': default_size
+                        }
+                        print(f"开仓成功 {key} 成交，价格：{price}，时间：{datetime.datetime.now()}")
+            if comp == '<':
+                if price <= threshold_price and key not in order_detail_map:
+                    result = place_order(INSTRUMENT, "sell", default_size)
+                    if result:
+                        order_detail_map[key] = {
+                            'price': price,
+                            'side': 'sell',
+                            'pin_side': 'buy',
+                            'time': current_minute,
+                            'size': default_size
+                        }
+                        print(f"开仓成功 {key} 成交，价格：{price}，时间：{datetime.datetime.now()}")
 
 
 def process_close_orders(price, kai_pin_map):
@@ -190,22 +330,30 @@ def process_close_orders(price, kai_pin_map):
             continue
 
         kai_price = order_detail['price']
-        # 根据平仓阈值判断是否平仓（高价平仓逻辑）
-        if pin_key in pin_high_price_map and price >= pin_high_price_map[pin_key]:
-            result = place_order(INSTRUMENT, order_detail['pin_side'], order_detail['size'], trade_action="close")
-            if result:
-                keys_to_remove.append(kai_key)
-                print(f"📈 【平仓】{pin_key} {order_detail['pin_side']} 成交，价格：{price}，开仓价格 {kai_price} "
-                      f"kai_key {kai_key} pin_key {pin_key} order_time {order_detail['time']} "
-                      f"current_minute {current_minute} 时间：{datetime.datetime.now()}")
-        # 低价平仓逻辑
-        elif pin_key in pin_low_price_map and price <= pin_low_price_map[pin_key]:
-            result = place_order(INSTRUMENT, order_detail['pin_side'], order_detail['size'], trade_action="close")
-            if result:
-                keys_to_remove.append(kai_key)
-                print(f"📉 【平仓】{pin_key} {order_detail['pin_side']} 成交，价格：{price}，开仓价格 {kai_price} "
-                      f"kai_key {kai_key} pin_key {pin_key} order_time {order_detail['time']} "
-                      f"current_minute {current_minute} 时间：{datetime.datetime.now()}")
+        if pin_key in pin_target_price_info_map:
+            target_info = pin_target_price_info_map[pin_key]
+            if target_info != None:
+                threshold_price, comp = target_info
+                if comp == '>':
+                    if price > threshold_price:
+                        result = place_order(INSTRUMENT, order_detail['pin_side'], order_detail['size'],
+                                             trade_action="close")
+                        if result:
+                            keys_to_remove.append(kai_key)
+                            print(
+                                f"📈 【平仓】{pin_key} {order_detail['pin_side']} 成交，价格：{price}，开仓价格 {kai_price} "
+                                f"kai_key {kai_key} pin_key {pin_key} order_time {order_detail['time']} "
+                                f"current_minute {current_minute} 时间：{datetime.datetime.now()}")
+                if comp == '<':
+                    if price < threshold_price:
+                        result = place_order(INSTRUMENT, order_detail['pin_side'], order_detail['size'],
+                                             trade_action="close")
+                        if result:
+                            keys_to_remove.append(kai_key)
+                            print(
+                                f"📉 【平仓】{pin_key} {order_detail['pin_side']} 成交，价格：{price}，开仓价格 {kai_price} "
+                                f"kai_key {kai_key} pin_key {pin_key} order_time {order_detail['time']} "
+                                f"current_minute {current_minute} 时间：{datetime.datetime.now()}")
 
     # 移除已经平仓完成的订单
     for key in keys_to_remove:
@@ -217,7 +365,7 @@ async def websocket_listener(kai_pin_map):
     监听 OKX WebSocket 实时数据，处理开仓和平仓逻辑
     """
     default_size = min_count_map[INSTRUMENT]
-    global kai_high_price_map, kai_low_price_map, pin_high_price_map, pin_low_price_map, order_detail_map, current_minute, price
+    global kai_target_price_info_map, pin_target_price_info_map, order_detail_map, current_minute, price
 
     while True:
         try:

@@ -725,7 +725,7 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     # 用于存储最终预计算结果的字典
     precomputed_signals = {}
     # 定义结果文件保存路径
-    precomputed_file = f"temp/precomputed_signals_{key_name}.pkl"
+    precomputed_file = f"temp/{base_name}_{key_name}.pkl"
 
     # --- 尝试加载已有的预计算结果 ---
     if os.path.exists(precomputed_file):
@@ -790,7 +790,7 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     print(f"任务分为 {len(big_task_chunks)} 大块。")
 
     pool_processes = max(1, multiprocessing.cpu_count())
-    with multiprocessing.Pool(processes=pool_processes - 1, initializer=init_worker, initargs=(precomputed_signals,)) as pool:
+    with multiprocessing.Pool(processes=pool_processes - 3, initializer=init_worker, initargs=(precomputed_signals,)) as pool:
         for i, task_chunk in enumerate(big_task_chunks):
             output_path = os.path.join('temp', f"statistic_{base_name}_{key_name}_is_filter-{is_filter}part{i}_op.csv")
             if os.path.exists(output_path):
@@ -851,9 +851,9 @@ def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
 def example():
     start_time = time.time()
     data_path_list = [
-        'kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv',
-        'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv',
+        # 'kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv',
         'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv',
+        'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv',
         'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv',
         'kline_data/origin_data_1m_10000000_DOGE-USDT-SWAP.csv',
         'kline_data/origin_data_1m_10000000_XRP-USDT-SWAP.csv',

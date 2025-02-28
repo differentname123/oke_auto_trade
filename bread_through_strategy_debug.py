@@ -17,6 +17,119 @@ from scipy.stats import spearmanr
 from sklearn.preprocessing import MinMaxScaler
 import ast
 
+def get_next_threshold_abs(df, col_name):
+    parts = col_name.split('_')
+    direction = parts[-1]
+    period = int(parts[1])
+    abs_value = float(parts[2])
+
+    if len(df) < period + 1:
+        return None  # 数据不足，无法计算
+
+    last_high = df['high'].iloc[-1]  # 当前 K 线的最高价
+    last_low = df['low'].iloc[-1]    # 当前 K 线的最低价
+
+    if direction == "long":
+        # 计算过去 period 根 K 线的最低价（不包括当前 K 线）
+        min_low_prev = df['low'].iloc[-(period+1):-1].min()
+        threshold_price = round(min_low_prev * (1 + abs_value / 100), 4)
+
+        # 确保当前 K 线有可能触发信号
+        if last_high < threshold_price:
+            return threshold_price, ">="
+        else:
+            return None  # 价格未突破，不会触发信号
+
+    elif direction == "short":
+        # 计算过去 period 根 K 线的最高价（不包括当前 K 线）
+        max_high_prev = df['high'].iloc[-(period+1):-1].max()
+        threshold_price = round(max_high_prev * (1 - abs_value / 100), 4)
+
+        # 确保当前 K 线有可能触发信号
+        if last_low > threshold_price:
+            return threshold_price, "<="
+        else:
+            return None  # 价格未跌破，不会触发信号
+
+    return None  # 方向无效
+
+
+def get_next_threshold_relate(df, col_name):
+    parts = col_name.split('_')
+    direction = parts[-1]
+    period = int(parts[1])
+    abs_value = float(parts[2])
+
+    # 检查数据是否足够（由于 shift(1) 后会丢失最新数据，需至少 period+1 行）
+    if df.shape[0] < period + 1:
+        return None
+
+    if direction == "long":
+        # 取前一周期数据（所有计算基于 shift(1)）
+        min_low = df['low'].shift(1).rolling(window=period).min().iloc[-1]
+        max_high = df['high'].shift(1).rolling(window=period).max().iloc[-1]
+        target_price = round(min_low + abs_value / 100 * (max_high - min_low), 4)
+        comp = ">"  # 下一周期若 high > target_price 则突破成功
+        return target_price, comp
+    else:
+        max_high = df['high'].shift(1).rolling(window=period).max().iloc[-1]
+        min_low = df['low'].shift(1).rolling(window=period).min().iloc[-1]
+        target_price = round(max_high - abs_value / 100 * (max_high - min_low), 4)
+        comp = "<"  # 下一周期若 low < target_price 则突破成功
+        return target_price, comp
+
+def get_next_threshold_rsi(df, col_name):
+    parts = col_name.split('_')
+    direction = parts[-1]
+    period = int(parts[1])
+    overbought = int(parts[2])
+    oversold = int(parts[3])
+
+    if len(df) < period + 1:
+        raise None
+
+    # 计算价格变化
+    delta = df['close'].diff(1).astype(np.float64)
+    # 提取最新 period 个差值（正好构成当前滚动窗口）
+    diffs = delta.iloc[-period:]
+
+    if diffs.isnull().any():
+        return None
+
+    # 分别计算每个差值的正值（涨幅）与负值（跌幅，正数）贡献
+    gains = diffs.clip(lower=0)
+    losses = -diffs.clip(upper=0)
+
+    S_gain = gains.sum()
+    S_loss = losses.sum()
+
+    # 当前窗口中最早的那笔差值，在更新时会被剔除
+    d0 = diffs.iloc[0]
+    g0 = max(d0, 0)  # 若 d0 为正，其贡献；否则为 0
+    l0 = -min(d0, 0)  # 若 d0 为负，其转化为正数的贡献；否则为 0
+
+    C_last = df['close'].iloc[-1]
+
+    if direction == "short":
+        # 对 short 信号，新差值应为正 => X - C_last > 0
+        OS = oversold
+        # 根据公式：
+        #   ( (S_gain - g0) + (X - C_last) ) / (S_loss - l0) = OS/(100-OS)
+        # 解得：
+        threshold_price = C_last + (OS / (100 - OS)) * (S_loss - l0) - (S_gain - g0)
+        comp = ">="
+        return threshold_price, comp
+    elif direction == "long":
+        # 对 long 信号，新差值应为负 => X - C_last < 0
+        OB = overbought
+        # 根据公式：
+        #   (S_gain - g0) / ((S_loss - l0) + (C_last - X)) = OB/(100-OB)
+        # 解得：
+        threshold_price = C_last - ((S_gain - g0) * ((100 - OB) / OB) - (S_loss - l0))
+        comp = "<="
+        return threshold_price, comp
+    else:
+        return None
 
 def compute_signal(df, col_name):
     """
@@ -112,14 +225,13 @@ def compute_signal(df, col_name):
             target_price = min_low_series + abs_value / 100 * (max_high_series - min_low_series)
             target_price = target_price.round(4)
             signal_series = (df['high'].shift(1) <= target_price) & (df['high'] > target_price)
-            return signal_series, target_price
         else:
             max_high_series = df['high'].shift(1).rolling(window=period).max()
             min_low_series = df['low'].shift(1).rolling(window=period).min()
             target_price = max_high_series - abs_value / 100 * (max_high_series - min_low_series)
             target_price = target_price.round(4)
             signal_series = (df['low'].shift(1) >= target_price) & (df['low'] < target_price)
-            return signal_series, target_price
+        return signal_series, target_price
 
     else:
         raise ValueError(f"未知的信号类型: {signal_type}")
@@ -1242,9 +1354,8 @@ def choose_good_strategy_debug(inst_id='BTC'):
         # 去除最大的偶然利润
         # df['net_profit_rate'] = df['net_profit_rate'] - 1 * df['max_profit']
         # df['avg_profit_rate'] = df['net_profit_rate'] / df['kai_count'] * 100
-        df['max_beilv'] = df['net_profit_rate'] / df['max_profit']
-        df['loss_beilv'] = -df['net_profit_rate'] / df['max_consecutive_loss']
-        temp_value = 1
+        # df['max_beilv'] = df['net_profit_rate'] / df['max_profit']
+        # df['loss_beilv'] = -df['net_profit_rate'] / df['max_consecutive_loss']
         # df['score'] = (df['true_profit_std']) / df['avg_profit_rate'] * 100
 
 
@@ -1262,18 +1373,20 @@ def choose_good_strategy_debug(inst_id='BTC'):
         # df = df[(df['true_profit_std'] < 10)]
         # df = df[(df['max_consecutive_loss'] > -10)]
         # df = df[(df['pin_side'] != df['kai_side'])]
-        df = df[(df['net_profit_rate'] > 50)]
+        # df = df[(df['net_profit_rate'] > 20)]
         # df = df[(df['monthly_net_profit_std'] < 10)]
         # df = df[(df['same_count_rate'] < 1)]
         # df = df[(df['same_count_rate'] < 1)]
-        df['monthly_trade_std_score'] = df['monthly_trade_std'] / (df['kai_count']) * 22
-
-        df['monthly_net_profit_std_score'] = df['monthly_net_profit_std'] / (df['net_profit_rate']) * 22
-        df['monthly_avg_profit_std_score'] = df['monthly_avg_profit_std'] / (df['avg_profit_rate']) * 100
+        # df['monthly_trade_std_score'] = df['monthly_trade_std'] / (df['kai_count']) * 22
+        #
+        # df['monthly_net_profit_std_score'] = df['monthly_net_profit_std'] / (df['net_profit_rate']) * 22
+        # df['monthly_avg_profit_std_score'] = df['monthly_avg_profit_std'] / (df['avg_profit_rate']) * 100
         # df = df[(df['monthly_net_profit_std_score'] < 50)]
         # df = df[(df['score'] > 2)]
         df = df[(df['avg_profit_rate'] > 1)]
-        df = df[(df['hold_time_mean'] < 10000)]
+        # df = df[(df['kai_side'] == 'short')]
+
+        # df = df[(df['hold_time_mean'] < 10000)]
         # df = df[(df['max_beilv'] > 5)]
         # df = df[(df['loss_beilv'] > 1)]
         # df = df[(df['kai_count'] > 50)]
@@ -1641,6 +1754,7 @@ def gen_statistic_data(inst_id, sort_key):
         "Row1_net_profit_rate", "Row2_net_profit_rate",
         "Row1_avg_profit_rate", "Row2_avg_profit_rate"
     ])
+    # calculate_row_correlation(parsed_rows[0], parsed_rows[4], True)
     return negative_corr_df
 
 def debug():
@@ -1666,12 +1780,12 @@ def debug():
     sort_key = 'avg_profit_rate'
     sort_key = 'final_score'
     sort_key = 'stability_score'
-    # sort_key = 'loss_score'
+    # sort_key = 'score'
     # sort_key = 'monthly_net_profit_std_score'
     range_size = 1
     # sort_key = 'max_consecutive_loss'
     # origin_good_df = choose_good_strategy_debug('')
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = ['SOL', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     for inst_id in inst_id_list:
         # origin_good_df = pd.read_csv(f'temp/{inst_id}_final_good.csv')
         # origin_good_df = pd.read_csv(f'temp/{inst_id}_df.csv')
@@ -1684,10 +1798,16 @@ def debug():
 
 
 
-        # origin_good_df = choose_good_strategy_debug(inst_id)
+        origin_good_df = choose_good_strategy_debug(inst_id)
+        origin_good_df = calculate_final_score(origin_good_df)
+        origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op.csv')
+        origin_good_df = origin_good_df[(origin_good_df['max_consecutive_loss'] > -10)]
+        # origin_good_df = origin_good_df[(origin_good_df['kai_count'] > 500)]
+        # origin_good_df = origin_good_df[(origin_good_df[sort_key] > 0.8)]
+
+        origin_good_df['score'] = - origin_good_df['net_profit_rate'] / (origin_good_df['max_consecutive_loss'])
         # origin_good_df = calculate_final_score(origin_good_df)
-        # origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good.csv')
-        gen_statistic_data(inst_id, sort_key)
+        # gen_statistic_data(inst_id, sort_key)
 
 
         # # # 获取origin_good_df中不重复的kai_column与pin_column的值
@@ -1724,8 +1844,8 @@ def debug():
         is_filter = True
         is_detail = False
         file_list = []
-        file_list.append(f'kline_data/origin_data_1m_50000_{inst_id}-USDT-SWAP.csv')
-        file_list.append(f'kline_data/origin_data_1m_20000_{inst_id}-USDT-SWAP.csv')
+        # file_list.append(f'kline_data/origin_data_1m_50000_{inst_id}-USDT-SWAP.csv')
+        file_list.append(f'kline_data/origin_data_1m_2000_{inst_id}-USDT-SWAP.csv')
         for file in file_list:
             df = pd.read_csv(file)
             # 获取第一行和最后一行的close，计算涨跌幅
