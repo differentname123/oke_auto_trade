@@ -73,6 +73,9 @@ def get_next_threshold_relate(df, col_name):
     period = int(parts[1])
     abs_value = float(parts[2])
 
+    last_high = df['high'].iloc[-1]  # 当前 K 线的最高价
+    last_low = df['low'].iloc[-1]    # 当前 K 线的最低价
+
     # 检查数据是否足够（由于 shift(1) 后会丢失最新数据，需至少 period+1 行）
     if df.shape[0] < period + 1:
         return None
@@ -83,13 +86,16 @@ def get_next_threshold_relate(df, col_name):
         max_high = df['high'].shift(1).rolling(window=period).max().iloc[-1]
         target_price = round(min_low + abs_value / 100 * (max_high - min_low), 4)
         comp = ">"  # 下一周期若 high > target_price 则突破成功
-        return target_price, comp
+        if last_high < target_price:
+            return target_price, comp
     else:
         max_high = df['high'].shift(1).rolling(window=period).max().iloc[-1]
         min_low = df['low'].shift(1).rolling(window=period).min().iloc[-1]
         target_price = round(max_high - abs_value / 100 * (max_high - min_low), 4)
         comp = "<"  # 下一周期若 low < target_price 则突破成功
-        return target_price, comp
+        if last_low > target_price:
+            return target_price, comp
+    return None
 
 def get_next_threshold_rsi(df, col_name):
     parts = col_name.split('_')
@@ -99,50 +105,56 @@ def get_next_threshold_rsi(df, col_name):
     oversold = int(parts[3])
 
     if len(df) < period + 1:
-        raise None
+        return None
 
     # 计算价格变化
     delta = df['close'].diff(1).astype(np.float64)
-    # 提取最新 period 个差值（正好构成当前滚动窗口）
+
+    # 获取最近 `period` 个数据
     diffs = delta.iloc[-period:]
 
     if diffs.isnull().any():
         return None
 
-    # 分别计算每个差值的正值（涨幅）与负值（跌幅，正数）贡献
+    # 计算涨跌幅
     gains = diffs.clip(lower=0)
     losses = -diffs.clip(upper=0)
 
     S_gain = gains.sum()
     S_loss = losses.sum()
 
-    # 当前窗口中最早的那笔差值，在更新时会被剔除
-    d0 = diffs.iloc[0]
-    g0 = max(d0, 0)  # 若 d0 为正，其贡献；否则为 0
-    l0 = -min(d0, 0)  # 若 d0 为负，其转化为正数的贡献；否则为 0
+    # 如果 S_loss 为 0，避免除零错误
+    if S_loss == 0:
+        rs = float('inf')
+    else:
+        rs = S_gain / S_loss
 
+    rsi = 100 - (100 / (1 + rs))
+
+    # 获取最后的 RSI 值
+    df.loc[df.index[-1], 'rsi'] = rsi
+    last_rsi = df['rsi'].iloc[-1]
+
+    # 获取最新收盘价
     C_last = df['close'].iloc[-1]
 
+    # 计算门槛价格
+    d0 = diffs.iloc[0]
+    g0 = max(d0, 0)
+    l0 = -min(d0, 0)
+
     if direction == "short":
-        # 对 short 信号，新差值应为正 => X - C_last > 0
         OS = oversold
-        # 根据公式：
-        #   ( (S_gain - g0) + (X - C_last) ) / (S_loss - l0) = OS/(100-OS)
-        # 解得：
         threshold_price = C_last + (OS / (100 - OS)) * (S_loss - l0) - (S_gain - g0)
-        comp = ">="
-        return threshold_price, comp
+        if last_rsi < OS:
+            return threshold_price, ">"
     elif direction == "long":
-        # 对 long 信号，新差值应为负 => X - C_last < 0
         OB = overbought
-        # 根据公式：
-        #   (S_gain - g0) / ((S_loss - l0) + (C_last - X)) = OB/(100-OB)
-        # 解得：
         threshold_price = C_last - ((S_gain - g0) * ((100 - OB) / OB) - (S_loss - l0))
-        comp = "<="
-        return threshold_price, comp
-    else:
-        return None
+        if last_rsi > OB:
+            return threshold_price, "<"
+
+    return None
 
 def gen_signal_price(df, col_name):
     """
@@ -727,22 +739,21 @@ async def main():
     sort_key = 'stability_score'
 
     range_size = 100
-    # # good_strategy_df1 = pd.read_csv('temp/temp.csv')
-    good_strategy_df = choose_good_strategy_debug(INSTRUMENT)
-    good_strategy_df = calculate_final_score(good_strategy_df)
-    # 筛选出kai_side为long的数据
-    long_good_strategy_df = good_strategy_df[good_strategy_df['kai_side'] == 'long']
-    short_good_strategy_df = good_strategy_df[good_strategy_df['kai_side'] == 'short']
+    inst_id = 'BTC'
+    origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op.csv')
+    origin_good_df = origin_good_df[(origin_good_df['max_consecutive_loss'] > -10)]
+    origin_good_df = origin_good_df[(origin_good_df[sort_key] > 0.5)]
+    origin_good_df = origin_good_df.drop_duplicates(subset=['kai_column', 'pin_column'], keep='first')
+    good_df = origin_good_df.sort_values(sort_key, ascending=False)
+    long_good_strategy_df = good_df[good_df['kai_side'] == 'long']
+    short_good_strategy_df = good_df[good_df['kai_side'] == 'short']
 
+    # 将long_good_strategy_df按照net_profit_rate_mult降序排列
     long_good_select_df = select_best_rows_in_ranges(long_good_strategy_df, range_size=range_size,
                                                      sort_key=sort_key, range_key=range_key)
     short_good_select_df = select_best_rows_in_ranges(short_good_strategy_df, range_size=range_size,
                                                       sort_key=sort_key, range_key=range_key)
     final_good_df = pd.concat([long_good_select_df, short_good_select_df])
-    # 如果kai_column和kai_side相同,保留range_key最大的
-    final_good_df = final_good_df.sort_values(by=sort_key, ascending=True)
-    final_good_df = final_good_df.drop_duplicates(subset=['kai_column', 'kai_side'], keep='first')
-
     print(final_good_df[sort_key])
     # final_good_df.to_csv('temp/final_good.csv', index=False)
 
