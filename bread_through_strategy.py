@@ -264,7 +264,7 @@ def optimize_parameters(df, tp_range=None, sl_range=None):
 
 
 
-def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is_detail=False):
+def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is_detail=False, is_reverse=False):
     """
     优化后的 get_detail_backtest_result_op 函数：
       1. 从全局预计算的稀疏信号数据中提取非零索引及对应价格；
@@ -328,7 +328,10 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     kai_data_df["hold_time"] = matched_pin.index.values - kai_idx_valid
 
     # 判断方向，仅判断一次，避免多处调用字符串查找
-    is_long = "long" in kai_column.lower()
+    if is_reverse:
+        is_long = "short" in kai_column.lower()
+    else:
+        is_long = "long" in kai_column.lower()
 
     # 若要求详细计算，用已缓存的 NumPy 数组及向量化操作计算区间最低和最高价格，进而计算收益率区间
     if is_detail:
@@ -375,7 +378,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     if is_long:
         profit_series = ((kai_data_df["pin_price"] - kai_data_df["kai_price"]) / kai_data_df["kai_price"] * 100).round(4)
     else:
-        profit_series = ((kai_data_df["kai_price"] - kai_data_df["pin_price"]) / kai_data_df["pin_price"] * 100).round(4)
+        profit_series = ((kai_data_df["kai_price"] - kai_data_df["pin_price"]) / kai_data_df["kai_price"] * 100).round(4)
     kai_data_df["profit"] = profit_series
     kai_data_df["true_profit"] = profit_series - 0.07
 
@@ -503,6 +506,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         "monthly_avg_profit_std": round(monthly_avg_profit_std, 4),
         "top_profit_ratio": round(top_profit_ratio, 4),
         "top_loss_ratio": round(top_loss_ratio, 4),
+        'is_reverse':is_reverse
         # 新增的每月净利润和交易个数的详细数据
         # "monthly_net_profit_detail": monthly_net_profit_detail,
         # "monthly_trade_count_detail": monthly_trade_count_detail
@@ -541,7 +545,9 @@ def process_tasks(task_chunk, df, is_filter):
     results = []
     for long_column, short_column in task_chunk:
         _, stat_long = get_detail_backtest_result_op(df, long_column, short_column, is_filter)
+        # _, stat_long_reverse = get_detail_backtest_result_op(df, long_column, short_column, is_filter, is_reverse=True)
         results.append(stat_long)
+        # results.append(stat_long_reverse)
     print(f"处理 {len(task_chunk)} 个任务，耗时 {time.time() - start_time:.2f} 秒。")
     return results
 
@@ -588,7 +594,7 @@ def gen_continue_signal_name(start_period, end_period, step):
 def gen_abs_signal_name(start_period, end_period, step, start_period1, end_period1, step1):
     period_list = generate_numbers(start_period, end_period, step, even=False)
     period_list1 = range(start_period1, end_period1, step1)
-    period_list1 = [x / 20 for x in period_list1]
+    period_list1 = [x / 10 for x in period_list1]
     long_columns = [f"abs_{period}_{period1}_high_long"
                     for period in period_list for period1 in period_list1 if period >= period1]
     short_columns = [f"abs_{period}_{period1}_low_short"
@@ -694,16 +700,16 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     ma_long_columns, ma_short_columns, ma_key_name = gen_ma_signal_name(1, 100, 20)
     column_list.append((ma_long_columns, ma_short_columns, ma_key_name))
 
-    relate_long_columns, relate_short_columns, relate_key_name = gen_relate_signal_name(1, 1500, 90, 1, 100, 3)
+    relate_long_columns, relate_short_columns, relate_key_name = gen_relate_signal_name(1, 2000, 90, 1, 100, 3)
     column_list.append((relate_long_columns, relate_short_columns, relate_key_name))
 
     peak_long_columns, peak_short_columns, peak_key_name = gen_peak_signal_name(1, 100, 20)
     column_list.append((peak_long_columns, peak_short_columns, peak_key_name))
 
-    rsi_long_columns, rsi_short_columns, rsi_key_name = gen_rsi_signal_name(1, 1000, 150)
+    rsi_long_columns, rsi_short_columns, rsi_key_name = gen_rsi_signal_name(1, 1000, 130)
     column_list.append((rsi_long_columns, rsi_short_columns, rsi_key_name))
 
-    abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 2000, 90, 1, 60, 1)
+    abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 2000, 100, 1, 40, 1)
     column_list.append((abs_long_columns, abs_short_columns, abs_key_name))
 
     # 按信号数量升序排列
@@ -773,14 +779,14 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
 
     # 更新 all_columns 仅保留存在于预计算字典中的信号
     all_columns = [col for col in all_columns if col in precomputed_signals]
-    # task_list = list(product(all_columns, all_columns))
+    task_list = list(product(all_columns, all_columns))
 
 
-    # 获取long_columns和short_columns
-    long_columns = [col for col in all_columns if 'long' in col]
-    short_columns = [col for col in all_columns if 'short' in col]
-    task_list = list(product(long_columns, short_columns))
-    task_list.extend(list(product(short_columns, long_columns)))
+    # # 获取long_columns和short_columns
+    # long_columns = [col for col in all_columns if 'long' in col]
+    # short_columns = [col for col in all_columns if 'short' in col]
+    # task_list = list(product(long_columns, short_columns))
+    # task_list.extend(list(product(short_columns, long_columns)))
 
     print(f"共有 {len(task_list)} 个任务。")
 
@@ -790,7 +796,7 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     print(f"任务分为 {len(big_task_chunks)} 大块。")
 
     pool_processes = max(1, multiprocessing.cpu_count())
-    with multiprocessing.Pool(processes=pool_processes - 3, initializer=init_worker, initargs=(precomputed_signals,)) as pool:
+    with multiprocessing.Pool(processes=pool_processes - 2, initializer=init_worker, initargs=(precomputed_signals,)) as pool:
         for i, task_chunk in enumerate(big_task_chunks):
             output_path = os.path.join('temp', f"statistic_{base_name}_{key_name}_is_filter-{is_filter}part{i}_op.csv")
             if os.path.exists(output_path):
@@ -851,8 +857,8 @@ def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
 def example():
     start_time = time.time()
     data_path_list = [
-        # 'kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv',
         'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv',
+        'kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv',
         'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv',
         'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv',
         'kline_data/origin_data_1m_10000000_DOGE-USDT-SWAP.csv',

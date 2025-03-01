@@ -1221,28 +1221,142 @@ def choose_good_strategy():
     return temp
 
 
-def add_reverse(df):
-    df['reverse_net_profit_rate'] = -df['profit_rate'] - df['cost_rate']
-    df['reverse_avg_profit_rate'] = df['reverse_net_profit_rate'] / df['kai_count'] * 100
-    # 将reverse_net_profit_rate和reverse_net_profit_rate放在avg_profit_rate这一列紧邻后面
-    # 1. 获取当前列的顺序
-    cols = df.columns.tolist()
+def generate_reverse_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    根据回测统计数据中各字段的含义计算逆向版本，
+    注意：所有逆向计算均基于原始 df 的数值，结果保留原字段名称。
+    """
+    # 复制一份用于生成逆向数据
+    df_rev = df.copy()
 
-    # 2. 找到 'avg_profit_rate' 的索引
-    avg_profit_rate_index = cols.index('avg_profit_rate')
+    # ----- 收益相关指标 -----
+    # profit_rate 直接取负
+    if 'profit_rate' in df.columns:
+        df_rev['profit_rate'] = -df['profit_rate']
 
-    # 3. 移除 'reverse_net_profit_rate' 和 'reverse_avg_profit_rate' (如果它们已经在列表中，避免重复)
-    cols_to_move = ['reverse_net_profit_rate', 'reverse_avg_profit_rate']
-    for col_to_move in cols_to_move:
-        if col_to_move in cols:
-            cols.remove(col_to_move)
+    # cost_rate 保持不变
+    if 'cost_rate' in df.columns:
+        df_rev['cost_rate'] = df['cost_rate']
 
-    # 4. 将 'reverse_net_profit_rate' 和 'reverse_avg_profit_rate' 插入到 'avg_profit_rate' 的后面
-    new_cols = cols[:avg_profit_rate_index + 1] + cols_to_move + cols[avg_profit_rate_index + 1:]
+    # 实际净收益：原来的 net_profit_rate = profit_rate - cost_rate,
+    # 逆向时，净收益为 -profit_rate - cost_rate
+    if 'net_profit_rate' in df.columns and 'profit_rate' in df.columns and 'cost_rate' in df.columns:
+        df_rev['net_profit_rate'] = -df['profit_rate'] - df['cost_rate']
 
-    # 5. 使用新的列顺序重新索引 DataFrame
-    df = df[new_cols]
-    return df
+    # 平均收益率，假设为 ( -profit_rate - cost_rate ) / kai_count
+    if 'avg_profit_rate' in df.columns and 'profit_rate' in df.columns \
+            and 'cost_rate' in df.columns and 'kai_count' in df.columns:
+        df_rev['avg_profit_rate'] = (-df['profit_rate'] - df['cost_rate']) / df['kai_count']
+
+    # true_profit_std 和其它标准差类指标不受方向影响，直接复制
+    if 'true_profit_std' in df.columns:
+        df_rev['true_profit_std'] = df['true_profit_std']
+
+    # ----- 最大/最小盈利指标 -----
+    # 逆向时，最大盈利 = -原最小盈利，最小盈利 = -原最大盈利
+    if 'min_profit' in df.columns and 'max_profit' in df.columns:
+        df_rev['max_profit'] = -df['min_profit']
+        df_rev['min_profit'] = -df['max_profit']
+
+    # ----- 连续性指标（例如连续盈亏）-----
+    if 'max_consecutive_loss' in df.columns and 'max_consecutive_profit' in df.columns:
+        df_rev['max_consecutive_loss'] = -df['max_consecutive_profit']
+        df_rev['max_consecutive_profit'] = -df['max_consecutive_loss']
+
+    if 'max_loss_trade_count' in df.columns and 'max_profit_trade_count' in df.columns:
+        # 亏损交易数与盈利交易数交换
+        df_rev['max_loss_trade_count'] = df['max_profit_trade_count']
+        df_rev['max_profit_trade_count'] = df['max_loss_trade_count']
+
+    if 'max_loss_hold_time' in df.columns and 'max_profit_hold_time' in df.columns:
+        # 持仓时长交换
+        df_rev['max_loss_hold_time'] = df['max_profit_hold_time']
+        df_rev['max_profit_hold_time'] = df['max_loss_hold_time']
+
+    if 'max_loss_start_time' in df.columns and 'max_profit_start_time' in df.columns:
+        df_rev['max_loss_start_time'] = df['max_profit_start_time']
+        df_rev['max_profit_start_time'] = df['max_loss_start_time']
+
+    if 'max_loss_end_time' in df.columns and 'max_profit_end_time' in df.columns:
+        df_rev['max_loss_end_time'] = df['max_profit_end_time']
+        df_rev['max_profit_end_time'] = df['max_loss_end_time']
+
+    # ----- 胜率相关指标 -----
+    if 'loss_rate' in df.columns:
+        df_rev['loss_rate'] = 1 - df['loss_rate']
+
+    if 'loss_time_rate' in df.columns:
+        df_rev['loss_time_rate'] = 1 - df['loss_time_rate']
+
+    # ----- 其它不受方向影响或数值拷贝 -----
+    if 'trade_rate' in df.columns:
+        df_rev['trade_rate'] = df['trade_rate']
+    if 'hold_time_mean' in df.columns:
+        df_rev['hold_time_mean'] = df['hold_time_mean']
+    if 'hold_time_std' in df.columns:
+        df_rev['hold_time_std'] = df['hold_time_std']
+
+    # ----- 月度统计指标 -----
+    if 'monthly_trade_std' in df.columns:
+        df_rev['monthly_trade_std'] = df['monthly_trade_std']
+    if 'active_month_ratio' in df.columns:
+        df_rev['active_month_ratio'] = df['active_month_ratio']
+    if 'monthly_loss_rate' in df.columns:
+        df_rev['monthly_loss_rate'] = 1 - df['monthly_loss_rate']
+
+    if 'monthly_net_profit_min' in df.columns and 'monthly_net_profit_max' in df.columns:
+        df_rev['monthly_net_profit_min'] = -df['monthly_net_profit_max']
+        df_rev['monthly_net_profit_max'] = -df['monthly_net_profit_min']
+    else:
+        if 'monthly_net_profit_min' in df.columns:
+            df_rev['monthly_net_profit_min'] = -df['monthly_net_profit_min']
+        if 'monthly_net_profit_max' in df.columns:
+            df_rev['monthly_net_profit_max'] = -df['monthly_net_profit_max']
+
+    if 'monthly_net_profit_std' in df.columns:
+        df_rev['monthly_net_profit_std'] = df['monthly_net_profit_std']
+    if 'monthly_avg_profit_std' in df.columns:
+        df_rev['monthly_avg_profit_std'] = df['monthly_avg_profit_std']
+
+    # ----- 前10%盈利/亏损比率 -----
+    if 'top_profit_ratio' in df.columns and 'top_loss_ratio' in df.columns:
+        # 逆向时前10%盈利比率变为原前10%亏损比率，反之亦然
+        df_rev['top_profit_ratio'] = df['top_loss_ratio']
+        df_rev['top_loss_ratio'] = df['top_profit_ratio']
+
+    # ----- 信号方向与信号字段 -----
+    if 'kai_side' in df.columns:
+        df_rev['kai_side'] = df['kai_side'].apply(
+            lambda x: "short" if isinstance(x, str) and x.lower() == "long"
+            else ("long" if isinstance(x, str) and x.lower() == "short" else x)
+        )
+
+    if 'kai_column' in df.columns and 'pin_column' in df.columns:
+        df_rev['kai_column'] = df['pin_column']
+        df_rev['pin_column'] = df['kai_column']
+
+    # ----- 其它计数类字段，直接复制 -----
+    for col in ['same_count', 'same_count_rate', 'kai_count', 'total_count']:
+        if col in df.columns:
+            df_rev[col] = df[col]
+
+    # 对于未涉及具体逆向逻辑的其他字段，保持原值
+    return df_rev
+
+
+def add_reverse(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    接受原始的回测统计数据 DataFrame，
+    为每一行生成逆向数据（按字段计算规则），
+    最后返回的 DataFrame 包含原始数据行和逆向数据行（顺序拼接），
+    行数为原来的2倍，字段名称保持一致。
+    """
+    # 生成逆向数据 DataFrame（所有计算均基于原始 df 的数值）
+    df_rev = generate_reverse_df(df)
+    df_rev['is_reverse'] = True
+    # 拼接原始数据和逆向数据（重置索引）
+    df_result = pd.concat([df, df_rev], ignore_index=True)
+    return df_result
 
 
 def calculate_final_score(result_df: pd.DataFrame) -> pd.DataFrame:
@@ -1360,7 +1474,7 @@ def choose_good_strategy_debug(inst_id='BTC'):
     # count_L()
     # 找到temp下面所有包含False的文件
     file_list = os.listdir('temp')
-    file_list = [file for file in file_list if 'True' in file and inst_id in file and 'SDT-SWAP.csv_continue_1_20_1_ma_1_100_20_peak_1_100_20_macross_1_100_10_1_100_10_rsi_1_1000_150_relate_1_1500_90_1_100_3_abs_1_2000_90_1_60_1__is_filter-Truepart'  in file and 'op' in file]
+    file_list = [file for file in file_list if 'True' in file and inst_id in file and 'continue_1_20_1_ma_1_100_20_peak_1_100_20_macross_1_100_10_1_100_10_rsi_1_1000_130_relate_1_2000_90_1_100_3_abs_1_2000_100_1_40_1__is_filter-Truepart'  in file and 'op' in file]
     # file_list = file_list[0:1]
     df_list = []
     df_map = {}
@@ -1379,8 +1493,8 @@ def choose_good_strategy_debug(inst_id='BTC'):
         # df['loss_beilv'] = -df['net_profit_rate'] / df['max_consecutive_loss']
         # df['score'] = (df['true_profit_std']) / df['avg_profit_rate'] * 100
 
-
-        # df = add_reverse(df)
+        df = df[(df['is_reverse'] == False)]
+        df = add_reverse(df)
         # df['kai_period'] = df['kai_column'].apply(lambda x: int(x.split('_')[0]))
         # df['pin_period'] = df['pin_column'].apply(lambda x: int(x.split('_')[0]))
 
@@ -1394,7 +1508,7 @@ def choose_good_strategy_debug(inst_id='BTC'):
         # df = df[(df['true_profit_std'] < 10)]
         # df = df[(df['max_consecutive_loss'] > -10)]
         # df = df[(df['pin_side'] != df['kai_side'])]
-        # df = df[(df['net_profit_rate'] > 20)]
+        df = df[(df['net_profit_rate'] > 20)]
         # df = df[(df['monthly_net_profit_std'] < 10)]
         # df = df[(df['same_count_rate'] < 1)]
         # df = df[(df['same_count_rate'] < 1)]
@@ -1404,7 +1518,7 @@ def choose_good_strategy_debug(inst_id='BTC'):
         # df['monthly_avg_profit_std_score'] = df['monthly_avg_profit_std'] / (df['avg_profit_rate']) * 100
         # df = df[(df['monthly_net_profit_std_score'] < 50)]
         # df = df[(df['score'] > 2)]
-        df = df[(df['avg_profit_rate'] > 1)]
+        df = df[(df['avg_profit_rate'] > 10)]
         # df = df[(df['kai_side'] == 'short')]
 
         # df = df[(df['hold_time_mean'] < 10000)]
@@ -1806,7 +1920,7 @@ def debug():
     range_size = 100
     # sort_key = 'max_consecutive_loss'
     # origin_good_df = choose_good_strategy_debug('')
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = ['SOL', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     for inst_id in inst_id_list:
         # origin_good_df = pd.read_csv(f'temp/{inst_id}_final_good.csv')
         # origin_good_df = pd.read_csv(f'temp/{inst_id}_df.csv')
@@ -1819,8 +1933,8 @@ def debug():
 
 
 
-        # origin_good_df = choose_good_strategy_debug(inst_id)
-        # origin_good_df = calculate_final_score(origin_good_df)
+        origin_good_df = choose_good_strategy_debug(inst_id)
+        origin_good_df = calculate_final_score(origin_good_df)
         origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op.csv')
         origin_good_df = origin_good_df[(origin_good_df['max_consecutive_loss'] > -10)]
         # origin_good_df = origin_good_df[(origin_good_df['kai_count'] > 500)]
