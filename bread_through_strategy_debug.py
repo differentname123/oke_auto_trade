@@ -1521,7 +1521,7 @@ def choose_good_strategy_debug(inst_id='BTC'):
         # df = df[(df['avg_profit_rate'] > 5)]
         # df = df[(df['kai_side'] == 'short')]
 
-        # df = df[(df['hold_time_mean'] < 10000)]
+        df = df[(df['hold_time_mean'] < 10000)]
         # df = df[(df['max_beilv'] > 5)]
         # df = df[(df['loss_beilv'] > 1)]
         # df = df[(df['kai_count'] > 50)]
@@ -1906,12 +1906,33 @@ def filter_param(inst_id):
     target_key = ['net_profit_rate', 'avg_profit_rate', 'stability_score', 'final_score', 'score', 'monthly_net_profit_min', 'loss_rate_score', 'monthly_loss_rate_score', 'avg_profit_std_score',
                   'monthly_net_profit_std_score','monthly_avg_profit_std_score'
                   ]
-    max_consecutive_loss_list = [-5, -10, -15, -20, -30, -40, -100]
+    max_consecutive_loss_list = [-5, -10, -15, -100]
     good_df_list = []
-    all_origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op.csv')
+    all_origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_all.csv')
+    false_all_origin_good_df = all_origin_good_df[(all_origin_good_df['is_reverse'] == False)]
+    true_all_origin_good_df = all_origin_good_df[(all_origin_good_df['is_reverse'] == True)]
 
     for max_consecutive_loss in max_consecutive_loss_list:
-        origin_good_df = all_origin_good_df.copy()
+        origin_good_df = false_all_origin_good_df.copy()
+        origin_good_df['score'] = -origin_good_df['net_profit_rate'] / origin_good_df['max_consecutive_loss'] * \
+                                  origin_good_df['net_profit_rate']
+        origin_good_df = origin_good_df[(origin_good_df['max_consecutive_loss'] > max_consecutive_loss)]
+
+        origin_good_df = origin_good_df.drop_duplicates(subset=['kai_column', 'pin_column'], keep='first')
+
+        for sort_key in target_key:
+            origin_good_df = origin_good_df.drop_duplicates(subset=['kai_column', 'pin_column'], keep='first')
+            good_df = origin_good_df.sort_values(sort_key, ascending=False)
+            long_good_strategy_df = good_df[good_df['kai_side'] == 'long']
+            short_good_strategy_df = good_df[good_df['kai_side'] == 'short']
+
+            # 将long_good_strategy_df按照net_profit_rate_mult降序排列
+            long_good_select_df = select_best_rows_in_ranges(long_good_strategy_df, range_size=range_size,sort_key=sort_key, range_key=range_key)
+            short_good_select_df = select_best_rows_in_ranges(short_good_strategy_df, range_size=range_size,sort_key=sort_key, range_key=range_key)
+            good_df = pd.concat([long_good_select_df, short_good_select_df])
+            good_df_list.append(good_df)
+    for max_consecutive_loss in max_consecutive_loss_list:
+        origin_good_df = true_all_origin_good_df.copy()
         origin_good_df['score'] = -origin_good_df['net_profit_rate'] / origin_good_df['max_consecutive_loss'] * \
                                   origin_good_df['net_profit_rate']
         origin_good_df = origin_good_df[(origin_good_df['max_consecutive_loss'] > max_consecutive_loss)]
@@ -1981,9 +2002,11 @@ def gen_extend_columns(columns):
         print(f'error type:{type}')
         return columns
 
-def gen_search_param(inst_id):
+def gen_search_param(inst_id, is_reverse=False):
     all_task_list = []
     good_df = filter_param(inst_id)
+    good_df = good_df[(good_df['is_reverse'] == is_reverse)]
+    all_columns = []
     # 遍历每一行
     for index, row in good_df.iterrows():
         kai_column = row['kai_column']
@@ -1992,10 +2015,13 @@ def gen_search_param(inst_id):
         pin_column_list = gen_extend_columns(pin_column)
         task_list = list(product(kai_column_list, pin_column_list))
         all_task_list.extend(task_list)
+        all_columns.extend(kai_column_list)
+        all_columns.extend(pin_column_list)
         # all_task_list = list(set(all_task_list))
     # 删除all_task_list中重复的元素
     all_task_list = list(set(all_task_list))
-    return all_task_list
+    all_columns = list(set(all_columns))
+    return all_task_list, all_columns
 
 def debug():
     # good_df = pd.read_csv('temp/final_good.csv')
@@ -2027,7 +2053,7 @@ def debug():
     # origin_good_df = choose_good_strategy_debug('')
     inst_id_list = ['SOL', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     for inst_id in inst_id_list:
-        # gen_search_param(inst_id)
+        gen_search_param(inst_id)
         # origin_good_df = pd.read_csv(f'temp/{inst_id}_final_good.csv')
         # origin_good_df = pd.read_csv(f'temp/{inst_id}_df.csv')
         # origin_good_df = origin_good_df[(origin_good_df['hold_time_mean'] < 10000)]
@@ -2040,12 +2066,11 @@ def debug():
 
 
         origin_good_df = choose_good_strategy_debug(inst_id)
+        origin_good_df['score'] = -origin_good_df['net_profit_rate'] / origin_good_df['max_consecutive_loss'] * origin_good_df['net_profit_rate']
         origin_good_df = calculate_final_score(origin_good_df)
-        # origin_good_df.to_csv(f'temp/{inst_id}_origin_good_op_all.csv', index=False)
+        origin_good_df.to_csv(f'temp/{inst_id}_origin_good_op_all.csv', index=False)
         # origin_good_df = calculate_final_score(origin_good_df)
         origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op.csv')
-        origin_good_df['score'] = -origin_good_df['net_profit_rate'] / origin_good_df['max_consecutive_loss'] * origin_good_df['net_profit_rate']
-        origin_good_df = origin_good_df[(origin_good_df['max_consecutive_loss'] > -30)]
         origin_good_df = calculate_final_score(origin_good_df)
 
         # origin_good_df = origin_good_df[(origin_good_df['kai_count'] > 500)]

@@ -549,11 +549,11 @@ def generate_numbers(start, end, number, even=True):
     return final_result[:number]
 
 
-def process_tasks(task_chunk, df, is_filter):
+def process_tasks(task_chunk, df, is_filter, is_reverse):
     start_time = time.time()
     results = []
     for long_column, short_column in task_chunk:
-        _, stat_long = get_detail_backtest_result_op(df, long_column, short_column, is_filter)
+        _, stat_long = get_detail_backtest_result_op(df, long_column, short_column, is_filter, is_reverse=is_reverse)
         # _, stat_long_reverse = get_detail_backtest_result_op(df, long_column, short_column, is_filter, is_reverse=True)
         results.append(stat_long)
         # results.append(stat_long_reverse)
@@ -638,8 +638,8 @@ def gen_macross_signal_name(start_period, end_period, step, start_period1, end_p
 
 
 def worker_func(args):
-    chunk, df, is_filter = args
-    return process_tasks(chunk, df, is_filter)
+    chunk, df, is_filter, is_reverse = args
+    return process_tasks(chunk, df, is_filter, is_reverse)
 
 
 def init_worker(precomputed_signals):
@@ -701,6 +701,17 @@ def filter_param(inst_id):
     output_path = f'temp/{inst_id}_good.csv'
     if os.path.exists(output_path):
         return pd.read_csv(output_path)
+def gen_period_list(base_value, ratio, count):
+    result_list = []
+    period_extend = max(1, int(round(base_value * ratio)))
+    for i in range(1, count + 1):
+        result_list.append(base_value - period_extend * i)
+        result_list.append(base_value + period_extend * i)
+    result_list.append(base_value)
+    result_list = list(set(result_list))
+    return result_list
+
+
 
 def gen_extend_columns(columns):
     """
@@ -711,37 +722,37 @@ def gen_extend_columns(columns):
     parts = columns.split('_')
     period = int(parts[1])
     type = parts[0]
+    ratio = 0.05
     extend_value = 2
     # 生成period前后100个period
-    period_list = [str(i) for i in range(period - extend_value, period + extend_value)]
+    period_list = gen_period_list(period, ratio, extend_value)
     # 筛选出大于1
     period_list = [i for i in period_list if int(i) > 0]
     if type == 'rsi':
         value1 = int(parts[2])
         value2 = int(parts[3])
-        value1_list = [str(i) for i in range(value1 - extend_value, value1 + extend_value)]
-        value2_list = [str(i) for i in range(value2 - extend_value, value2 + extend_value)]
+        value1_list = gen_period_list(value1, ratio, extend_value)
+        value2_list = gen_period_list(value2, ratio, extend_value)
         value1_list = [i for i in value1_list if int(i) > 0 and int(i) < 100]
         value2_list = [i for i in value2_list if int(i) > 0 and int(i) < 100]
         return [f'{type}_{period}_{value1}_{value2}_{parts[4]}_{parts[5]}' for period in period_list for value1 in value1_list for value2 in value2_list]
     if type == 'macross':
         value1 = int(parts[2])
-        value1_list = [i for i in range(value1 - extend_value, value1 + extend_value)]
+        value1_list = gen_period_list(value1, ratio, extend_value)
         value1_list = [i for i in value1_list if i > 0]
         return [f'{type}_{period}_{value1}_{parts[3]}_{parts[4]}' for period in period_list for value1 in value1_list]
     elif type == 'abs':
         value1 = int(float(parts[2]) * 10)
-        value1_list = [i / 10 for i in range(value1 - extend_value, value1 + extend_value)]
-        value1_list = [i for i in value1_list if i > 0]
+        value1_list = gen_period_list(value1, ratio, extend_value)
+        value1_list = [i / 10 for i in value1_list if i > 0]
         return [f'{type}_{period}_{value1}_{parts[3]}_{parts[4]}' for period in period_list for value1 in value1_list]
     elif type == 'relate':
         value1 = int(parts[2])
-        value1_list = [i for i in range(value1 - extend_value, value1 + extend_value)]
+        value1_list = gen_period_list(value1, ratio, extend_value)
         value1_list = [i for i in value1_list if i > 0]
         return [f'{type}_{period}_{value1}_{parts[3]}_{parts[4]}' for period in period_list for value1 in value1_list]
     elif type == 'ma':
         return [f'{type}_{period}_{parts[2]}_{parts[3]}' for period in period_list]
-
     elif type == 'peak':
         return [f'{type}_{period}_{parts[2]}_{parts[3]}' for period in period_list]
     elif type == 'continue':
@@ -750,9 +761,10 @@ def gen_extend_columns(columns):
         print(f'error type:{type}')
         return columns
 
-def gen_search_param(inst_id):
+def gen_search_param(inst_id, is_reverse=False):
     all_task_list = []
     good_df = filter_param(inst_id)
+    good_df = good_df[(good_df['is_reverse'] == is_reverse)]
     all_columns = []
     # 遍历每一行
     for index, row in good_df.iterrows():
@@ -770,7 +782,7 @@ def gen_search_param(inst_id):
     all_columns = list(set(all_columns))
     return all_task_list, all_columns
 
-def backtest_breakthrough_strategy(df, base_name, is_filter):
+def backtest_breakthrough_strategy(df, base_name, is_filter, is_reverse):
     """
     回测函数（不依赖预计算信号，每次调用时在 get_detail_backtest_result_op 内重新生成信号）：
       1. 生成各信号列名；
@@ -808,7 +820,7 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     #     key_name += temp_key_name + '_'
     #     all_columns.extend(temp)
     key_name = 'SOL'
-    task_list, all_columns = gen_search_param(key_name)
+    task_list, all_columns = gen_search_param(key_name, is_reverse)
     start_time = time.time()
     print("当前信号总数：{} 个。".format(len(all_columns)))
 
@@ -822,9 +834,9 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     print(f"任务分为 {len(big_task_chunks)} 大块。")
 
     pool_processes = max(1, multiprocessing.cpu_count())
-    with multiprocessing.Pool(processes=pool_processes - 4) as pool:
+    with multiprocessing.Pool(processes=pool_processes - 2) as pool:
         for i, task_chunk in enumerate(big_task_chunks):
-            output_path = os.path.join('temp', f"statistic_{base_name}_{key_name}_is_filter-{is_filter}part{i}_op.csv")
+            output_path = os.path.join('temp', f"statistic_{base_name}_{key_name}_is_filter-{is_filter}_is_reverse-{is_reverse}part{i}_op.csv")
             if os.path.exists(output_path):
                 print(f'已存在 {output_path}')
                 continue
@@ -841,7 +853,7 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
                 f'每块任务约 {len(task_chunks[0])} 个。'
             )
             start_time_block = time.time()
-            tasks_args = [(chunk, df, is_filter) for chunk in task_chunks]
+            tasks_args = [(chunk, df, is_filter, is_reverse) for chunk in task_chunks]
             statistic_dict_list = []
             for result in pool.imap_unordered(worker_func, tasks_args, chunksize=1):
                 statistic_dict_list.extend(result)
@@ -876,7 +888,9 @@ def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
     max_df_month = df_monthly.max()
     df = df[(df_monthly != min_df_month) & (df_monthly != max_df_month)]
     print(f'开始回测 {base_name} ... 数据长度 {df.shape[0]} 当前时间 {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}')
-    backtest_breakthrough_strategy(df, base_name, is_filter)
+    backtest_breakthrough_strategy(df, base_name, is_filter, is_reverse=False)
+    backtest_breakthrough_strategy(df, base_name, is_filter, is_reverse=True)
+
 
 
 def example():
