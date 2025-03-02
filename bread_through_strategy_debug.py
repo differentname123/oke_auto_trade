@@ -1324,16 +1324,16 @@ def generate_reverse_df(df: pd.DataFrame) -> pd.DataFrame:
         df_rev['top_profit_ratio'] = df['top_loss_ratio']
         df_rev['top_loss_ratio'] = df['top_profit_ratio']
 
-    # ----- 信号方向与信号字段 -----
-    if 'kai_side' in df.columns:
-        df_rev['kai_side'] = df['kai_side'].apply(
-            lambda x: "short" if isinstance(x, str) and x.lower() == "long"
-            else ("long" if isinstance(x, str) and x.lower() == "short" else x)
-        )
-
-    if 'kai_column' in df.columns and 'pin_column' in df.columns:
-        df_rev['kai_column'] = df['pin_column']
-        df_rev['pin_column'] = df['kai_column']
+    # # ----- 信号方向与信号字段 -----
+    # if 'kai_side' in df.columns:
+    #     df_rev['kai_side'] = df['kai_side'].apply(
+    #         lambda x: "short" if isinstance(x, str) and x.lower() == "long"
+    #         else ("long" if isinstance(x, str) and x.lower() == "short" else x)
+    #     )
+    #
+    # if 'kai_column' in df.columns and 'pin_column' in df.columns:
+    #     df_rev['kai_column'] = df['pin_column']
+    #     df_rev['pin_column'] = df['kai_column']
 
     # ----- 其它计数类字段，直接复制 -----
     for col in ['same_count', 'same_count_rate', 'kai_count', 'total_count']:
@@ -1483,7 +1483,7 @@ def choose_good_strategy_debug(inst_id='BTC'):
         df = pd.read_csv(f'temp/{file}')
         # 删除monthly_net_profit_detail和monthly_trade_count_detail两列
         # df = df.drop(columns=['monthly_net_profit_detail', 'monthly_trade_count_detail','total_count','trade_rate','profit_rate','max_loss_start_time','max_loss_end_time','max_profit_start_time','max_profit_end_time'])
-        df = df.drop(columns=['total_count','trade_rate','profit_rate','max_loss_start_time','max_loss_end_time','max_profit_start_time','max_profit_end_time'])
+        # df = df.drop(columns=['total_count','trade_rate','profit_rate','max_loss_start_time','max_loss_end_time','max_profit_start_time','max_profit_end_time'])
 
 
         # 去除最大的偶然利润
@@ -1494,7 +1494,7 @@ def choose_good_strategy_debug(inst_id='BTC'):
         # df['score'] = (df['true_profit_std']) / df['avg_profit_rate'] * 100
 
         df = df[(df['is_reverse'] == False)]
-        # df = add_reverse(df)
+        df = add_reverse(df)
         # df['kai_period'] = df['kai_column'].apply(lambda x: int(x.split('_')[0]))
         # df['pin_period'] = df['pin_column'].apply(lambda x: int(x.split('_')[0]))
 
@@ -1506,7 +1506,7 @@ def choose_good_strategy_debug(inst_id='BTC'):
         # df = df[(df['kai_column'].str.contains('abs')) & (df['pin_column'].str.contains('abs'))]
 
         # df = df[(df['true_profit_std'] < 10)]
-        # df = df[(df['max_consecutive_loss'] > -10)]
+        df = df[(df['max_consecutive_loss'] > -30)]
         # df = df[(df['pin_side'] != df['kai_side'])]
         df = df[(df['net_profit_rate'] > 50)]
         # df = df[(df['monthly_net_profit_std'] < 10)]
@@ -1518,7 +1518,7 @@ def choose_good_strategy_debug(inst_id='BTC'):
         # df['monthly_avg_profit_std_score'] = df['monthly_avg_profit_std'] / (df['avg_profit_rate']) * 100
         # df = df[(df['monthly_net_profit_std_score'] < 50)]
         # df = df[(df['score'] > 2)]
-        df = df[(df['avg_profit_rate'] > 5)]
+        # df = df[(df['avg_profit_rate'] > 5)]
         # df = df[(df['kai_side'] == 'short')]
 
         # df = df[(df['hold_time_mean'] < 10000)]
@@ -2027,7 +2027,7 @@ def debug():
     # origin_good_df = choose_good_strategy_debug('')
     inst_id_list = ['SOL', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     for inst_id in inst_id_list:
-        gen_search_param(inst_id)
+        # gen_search_param(inst_id)
         # origin_good_df = pd.read_csv(f'temp/{inst_id}_final_good.csv')
         # origin_good_df = pd.read_csv(f'temp/{inst_id}_df.csv')
         # origin_good_df = origin_good_df[(origin_good_df['hold_time_mean'] < 10000)]
@@ -2039,10 +2039,11 @@ def debug():
 
 
 
-        # origin_good_df = choose_good_strategy_debug(inst_id)
+        origin_good_df = choose_good_strategy_debug(inst_id)
+        origin_good_df = calculate_final_score(origin_good_df)
         # origin_good_df.to_csv(f'temp/{inst_id}_origin_good_op_all.csv', index=False)
         # origin_good_df = calculate_final_score(origin_good_df)
-        origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_all.csv')
+        origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op.csv')
         origin_good_df['score'] = -origin_good_df['net_profit_rate'] / origin_good_df['max_consecutive_loss'] * origin_good_df['net_profit_rate']
         origin_good_df = origin_good_df[(origin_good_df['max_consecutive_loss'] > -30)]
         origin_good_df = calculate_final_score(origin_good_df)

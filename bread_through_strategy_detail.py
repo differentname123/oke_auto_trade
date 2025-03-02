@@ -711,31 +711,32 @@ def gen_extend_columns(columns):
     parts = columns.split('_')
     period = int(parts[1])
     type = parts[0]
+    extend_value = 2
     # 生成period前后100个period
-    period_list = [str(i) for i in range(period - 5, period + 5)]
+    period_list = [str(i) for i in range(period - extend_value, period + extend_value)]
     # 筛选出大于1
     period_list = [i for i in period_list if int(i) > 0]
     if type == 'rsi':
         value1 = int(parts[2])
         value2 = int(parts[3])
-        value1_list = [str(i) for i in range(value1 - 5, value1 + 5)]
-        value2_list = [str(i) for i in range(value2 - 5, value2 + 5)]
+        value1_list = [str(i) for i in range(value1 - extend_value, value1 + extend_value)]
+        value2_list = [str(i) for i in range(value2 - extend_value, value2 + extend_value)]
         value1_list = [i for i in value1_list if int(i) > 0 and int(i) < 100]
         value2_list = [i for i in value2_list if int(i) > 0 and int(i) < 100]
         return [f'{type}_{period}_{value1}_{value2}_{parts[4]}_{parts[5]}' for period in period_list for value1 in value1_list for value2 in value2_list]
     if type == 'macross':
         value1 = int(parts[2])
-        value1_list = [i for i in range(value1 - 5, value1 + 5)]
+        value1_list = [i for i in range(value1 - extend_value, value1 + extend_value)]
         value1_list = [i for i in value1_list if i > 0]
         return [f'{type}_{period}_{value1}_{parts[3]}_{parts[4]}' for period in period_list for value1 in value1_list]
     elif type == 'abs':
         value1 = int(float(parts[2]) * 10)
-        value1_list = [i / 10 for i in range(value1 - 5, value1 + 5)]
+        value1_list = [i / 10 for i in range(value1 - extend_value, value1 + extend_value)]
         value1_list = [i for i in value1_list if i > 0]
         return [f'{type}_{period}_{value1}_{parts[3]}_{parts[4]}' for period in period_list for value1 in value1_list]
     elif type == 'relate':
         value1 = int(parts[2])
-        value1_list = [i for i in range(value1 - 5, value1 + 5)]
+        value1_list = [i for i in range(value1 - extend_value, value1 + extend_value)]
         value1_list = [i for i in value1_list if i > 0]
         return [f'{type}_{period}_{value1}_{parts[3]}_{parts[4]}' for period in period_list for value1 in value1_list]
     elif type == 'ma':
@@ -816,12 +817,12 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     print(f"共有 {len(task_list)} 个任务。")
 
     # 将任务分块（每块 1,000,000 个任务）
-    big_chunk_size = 1000000
+    big_chunk_size = 100000
     big_task_chunks = [task_list[i:i + big_chunk_size] for i in range(0, len(task_list), big_chunk_size)]
     print(f"任务分为 {len(big_task_chunks)} 大块。")
 
     pool_processes = max(1, multiprocessing.cpu_count())
-    with multiprocessing.Pool(processes=pool_processes - 2) as pool:
+    with multiprocessing.Pool(processes=pool_processes - 4) as pool:
         for i, task_chunk in enumerate(big_task_chunks):
             output_path = os.path.join('temp', f"statistic_{base_name}_{key_name}_is_filter-{is_filter}part{i}_op.csv")
             if os.path.exists(output_path):
