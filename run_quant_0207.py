@@ -81,7 +81,7 @@ def get_next_threshold_abs(df, col_name):
 
         # 确保当前 K 线有可能触发信号
         if last_high < threshold_price:
-            return threshold_price, ">="
+            return threshold_price, ">"
         else:
             return None  # 价格未突破，不会触发信号
 
@@ -92,7 +92,7 @@ def get_next_threshold_abs(df, col_name):
 
         # 确保当前 K 线有可能触发信号
         if last_low > threshold_price:
-            return threshold_price, "<="
+            return threshold_price, "<"
         else:
             return None  # 价格未跌破，不会触发信号
 
