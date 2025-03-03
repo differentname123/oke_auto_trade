@@ -341,7 +341,7 @@ def process_open_orders(price, default_size):
         if target_info is not None:
             threshold_price, comp = target_info
             side = 'buy' if 'long' in key else 'sell'
-            print(f"open:{key}", f"[开仓检测] 检查信号 {key}: 当前价格 {price}, 阈值 {threshold_price}, 比较符 {comp}")
+            print(f"open: {key:<25} [开仓检测] 检查信号 {key:<25}: 当前价格 {price:>10.2f}, 阈值 {threshold_price:>10.2f}, 比较符 {comp:^5}")
             if comp == '>':
                 if price >= threshold_price and key not in order_detail_map:
                     result = place_order(INSTRUMENT, "buy", default_size)
@@ -391,7 +391,7 @@ def process_close_orders(price, kai_pin_map):
             target_info = pin_target_price_info_map[pin_key]
             if target_info is not None:
                 threshold_price, comp = target_info
-                print(f"close:{kai_key}", f"[平仓检测] 检查信号 {pin_key} 对应开仓 {kai_key}: 当前价格 {price}, 阈值 {threshold_price}, 比较符 {comp}, 开仓价格 {kai_price}")
+                print(f"close: {kai_key:<20} [平仓检测] 检查信号 {pin_key:<20} 对应开仓 {kai_key:<10}: 当前价格 {price:>10.2f}, 阈值 {threshold_price:>10.2f}, 比较符 {comp:^5}, 开仓价格 {kai_price:>10.2f}")
                 if comp == '>':
                     if price > threshold_price:
                         result = place_order(INSTRUMENT, order_detail['pin_side'], order_detail['size'],
