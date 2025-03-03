@@ -2071,14 +2071,13 @@ def debug():
 
 
 
-        # origin_good_df = choose_good_strategy_debug(inst_id)
-        # origin_good_df['score'] = -origin_good_df['net_profit_rate'] / origin_good_df['max_consecutive_loss'] * origin_good_df['net_profit_rate']
-        # origin_good_df['score1'] = -origin_good_df['net_profit_rate'] / origin_good_df['fu_profit_sum'] * origin_good_df['net_profit_rate']
-        # origin_good_df = calculate_final_score(origin_good_df)
-        origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_false.csv')
+        origin_good_df = choose_good_strategy_debug(inst_id)
         origin_good_df['score'] = -origin_good_df['net_profit_rate'] / origin_good_df['max_consecutive_loss'] * origin_good_df['net_profit_rate']
         origin_good_df['score1'] = -origin_good_df['net_profit_rate'] / origin_good_df['fu_profit_sum'] * origin_good_df['net_profit_rate']
-        # origin_good_df = calculate_final_score(origin_good_df)
+        origin_good_df = calculate_final_score(origin_good_df)
+        # origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_false.csv')
+        # origin_good_df['score'] = -origin_good_df['net_profit_rate'] / origin_good_df['max_consecutive_loss'] * origin_good_df['net_profit_rate']
+        # origin_good_df['score1'] = -origin_good_df['net_profit_rate'] / origin_good_df['fu_profit_sum'] * origin_good_df['net_profit_rate']
         origin_good_df = origin_good_df[(origin_good_df['max_consecutive_loss'] > -10)]
 
         # origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op.csv')

@@ -19,7 +19,7 @@ from numba import njit
 GLOBAL_SIGNALS = {}
 
 
-def compute_signal(df, col_name):
+def compute_signal_old(df, col_name):
     """
     计算给定信号名称对应的信号及其价格序列（均保留原始 float 精度）
     """
@@ -120,6 +120,112 @@ def compute_signal(df, col_name):
             target_price = max_high_series - abs_value / 100 * (max_high_series - min_low_series)
             target_price = target_price.round(4)
             signal_series = (df['low'].shift(1) >= target_price) & (df['low'] < target_price)
+            return signal_series, target_price
+
+    else:
+        raise ValueError(f"未知的信号类型: {signal_type}")
+
+def compute_signal(df, col_name):
+    """
+    计算给定信号名称对应的信号及其价格序列（均保留原始 float 精度）
+    """
+    parts = col_name.split('_')
+    period = int(parts[1])
+    signal_type = parts[0]
+    direction = parts[-1]  # "long" 或 "short"
+
+    if signal_type == 'peak':
+        if direction == "long":
+            price_series = df['high'].shift(1).rolling(window=period).max()
+            signal_series = df['high'] > price_series
+        else:
+            price_series = df['low'].shift(1).rolling(window=period).min()
+            signal_series = df['low'] < price_series
+        # 可选：对价格保留4位小数
+        price_series = price_series.round(4)
+        return signal_series, price_series
+
+    elif signal_type == 'continue':
+        if direction == "long":
+            condition = df['chg'] > 0
+        else:
+            condition = df['chg'] < 0
+        rolling_sum = condition.rolling(window=period).sum()
+        valid_count = df['chg'].rolling(window=period).count()
+        signal_series = (rolling_sum == period) & (valid_count == period)
+        price_series = df['close']
+        return signal_series, price_series
+
+    elif signal_type == 'abs':
+        abs_value = float(parts[2])
+        if direction == "long":
+            min_low_series = df['low'].shift(1).rolling(window=period).min()
+            target_price = min_low_series * (1 + abs_value / 100)
+            target_price = target_price.round(4)
+            signal_series = (df['close'].shift(1) <= target_price) & (df['high'] > target_price)
+            return signal_series, target_price
+        else:
+            max_high_series = df['high'].shift(1).rolling(window=period).max()
+            target_price = max_high_series * (1 - abs_value / 100)
+            target_price = target_price.round(4)
+            signal_series = (df['close'].shift(1) >= target_price) & (df['low'] < target_price)
+            return signal_series, target_price
+
+    elif signal_type == 'ma':
+        moving_avg = df['close'].shift(1).rolling(window=period).mean()
+        moving_avg = moving_avg.round(4)
+        if direction == "long":
+            signal_series = (df['close'].shift(1) <= moving_avg) & (df['high'] > moving_avg)
+        else:
+            signal_series = (df['close'].shift(1) >= moving_avg) & (df['low'] < moving_avg)
+        return signal_series, moving_avg
+
+    elif signal_type == 'macross':
+        fast_period = int(parts[1])
+        slow_period = int(parts[2])
+        fast_ma = df['close'].rolling(window=fast_period).mean().shift(1)
+        slow_ma = df['close'].rolling(window=slow_period).mean().shift(1)
+        fast_ma = fast_ma.round(4)
+        slow_ma = slow_ma.round(4)
+        if direction == "long":
+            signal_series = (fast_ma.shift(1) <= slow_ma.shift(1)) & (fast_ma > slow_ma)
+        else:
+            signal_series = (fast_ma.shift(1) >= slow_ma.shift(1)) & (fast_ma < slow_ma)
+        # 直接返回 close 价格作为交易价格
+        return signal_series, df['close']
+
+    elif signal_type == 'rsi':
+        period = int(parts[1])
+        overbought = int(parts[2])
+        oversold = int(parts[3])
+        delta = df['close'].diff(1).astype(np.float32)
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        avg_gain = gain.rolling(window=period).mean()
+        avg_loss = loss.rolling(window=period).mean()
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        if direction == "long":
+            signal_series = (rsi.shift(1) > overbought) & (rsi <= overbought)
+        else:
+            signal_series = (rsi.shift(1) < oversold) & (rsi >= oversold)
+        return signal_series, df['close']
+
+    elif signal_type == 'relate':
+        abs_value = float(parts[2])
+        if direction == "long":
+            min_low_series = df['low'].shift(1).rolling(window=period).min()
+            max_high_series = df['high'].shift(1).rolling(window=period).max()
+            target_price = min_low_series + abs_value / 100 * (max_high_series - min_low_series)
+            target_price = target_price.round(4)
+            signal_series = (df['close'].shift(1) <= target_price) & (df['high'] > target_price)
+            return signal_series, target_price
+        else:
+            max_high_series = df['high'].shift(1).rolling(window=period).max()
+            min_low_series = df['low'].shift(1).rolling(window=period).min()
+            target_price = max_high_series - abs_value / 100 * (max_high_series - min_low_series)
+            target_price = target_price.round(4)
+            signal_series = (df['close'].shift(1) >= target_price) & (df['low'] < target_price)
             return signal_series, target_price
 
     else:
@@ -735,7 +841,7 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     # 用于存储最终预计算结果的字典
     precomputed_signals = {}
     # 定义结果文件保存路径
-    precomputed_file = f"temp/{base_name}_{key_name}.pkl"
+    precomputed_file = f"temp/{base_name}_{key_name}_close.pkl"
 
     # --- 尝试加载已有的预计算结果 ---
     if os.path.exists(precomputed_file):
@@ -802,7 +908,7 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     pool_processes = max(1, multiprocessing.cpu_count())
     with multiprocessing.Pool(processes=pool_processes - 2, initializer=init_worker, initargs=(precomputed_signals,)) as pool:
         for i, task_chunk in enumerate(big_task_chunks):
-            output_path = os.path.join('temp', f"statistic_{base_name}_{key_name}_is_filter-{is_filter}part{i}_op.csv")
+            output_path = os.path.join('temp', f"statistic_{base_name}_{key_name}_is_filter-{is_filter}part{i}_op_close.csv")
             if os.path.exists(output_path):
                 print(f'已存在 {output_path}')
                 continue
