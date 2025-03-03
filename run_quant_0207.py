@@ -25,6 +25,8 @@ pin_target_price_info_map = {}
 # 订单详情映射，全局变量，保存持仓订单信息
 order_detail_map = {}
 order_file_path = f"temp/order_detail_map_{INSTRUMENT}.json"
+price = 0
+price_list = []
 
 kai_pin_map = {}
 
@@ -76,7 +78,7 @@ def get_next_threshold_abs(df, col_name):
 
     if direction == "long":
         # 计算过去 period 根 K 线的最低价（不包括当前 K 线）
-        min_low_prev = df['low'].iloc[-(period+1):-1].min()
+        min_low_prev = df['low'].iloc[-(period):].min()
         threshold_price = round(min_low_prev * (1 + abs_value / 100), 4)
 
         # 确保当前 K 线有可能触发信号
@@ -87,7 +89,7 @@ def get_next_threshold_abs(df, col_name):
 
     elif direction == "short":
         # 计算过去 period 根 K 线的最高价（不包括当前 K 线）
-        max_high_prev = df['high'].iloc[-(period+1):-1].max()
+        max_high_prev = df['high'].iloc[-(period):].max()
         threshold_price = round(max_high_prev * (1 - abs_value / 100), 4)
 
         # 确保当前 K 线有可能触发信号
@@ -114,8 +116,8 @@ def get_next_threshold_relate(df, col_name):
 
     if direction == "long":
         # 取前一周期数据（所有计算基于 shift(1)）
-        min_low = df['low'].shift(1).rolling(window=period).min().iloc[-1]
-        max_high = df['high'].shift(1).rolling(window=period).max().iloc[-1]
+        min_low = df['low'].rolling(window=period).min().iloc[-1]
+        max_high = df['high'].rolling(window=period).max().iloc[-1]
         target_price = round(min_low + abs_value / 100 * (max_high - min_low), 4)
         comp = ">"  # 下一周期若 high > target_price 则突破成功
         if last_high < target_price:
@@ -275,16 +277,16 @@ def update_price_map(strategy_df, df, target_column='kai_column'):
 
 async def fetch_new_data(strategy_df, max_period):
     """ 每分钟获取最新数据并更新 high_price_map 和 low_price_map """
-    global kai_target_price_info_map, pin_target_price_info_map, current_minute, order_detail_map, price
+    global kai_target_price_info_map, pin_target_price_info_map, current_minute, order_detail_map, price, price_list
     newest_data = LatestDataManager(max_period, INSTRUMENT)
-    max_attempts = 50
+    max_attempts = 200
     previous_timestamp = None
     while True:
         try:
             now = datetime.datetime.now()
             if current_minute is None or now.minute != current_minute:
                 print(f"🕐 {now.strftime('%H:%M')} 触发数据更新...")
-                await asyncio.sleep(9)
+                # await asyncio.sleep(7)
                 attempt = 0
                 while attempt < max_attempts:
                     df = newest_data.get_newest_data()  # 获取最新数据
@@ -294,6 +296,7 @@ async def fetch_new_data(strategy_df, max_period):
 
                     if previous_timestamp is None or latest_timestamp != previous_timestamp:
                         print(f"✅ 数据已更新，最新 timestamp: {latest_timestamp} 实时最新价格 {price}")
+                        price_list = []
 
                         # 更新映射
                         kai_target_price_info_map = update_price_map(strategy_df, df)
@@ -337,13 +340,15 @@ def process_open_orders(price, default_size):
     for key, target_info in kai_target_price_info_map.items():
         if target_info is not None:
             threshold_price, comp = target_info
+            side = 'buy' if 'long' in key else 'sell'
+            print(f"open:{key}", f"[开仓检测] 检查信号 {key}: 当前价格 {price}, 阈值 {threshold_price}, 比较符 {comp}")
             if comp == '>':
                 if price >= threshold_price and key not in order_detail_map:
                     result = place_order(INSTRUMENT, "buy", default_size)
                     if result:
                         order_detail_map[key] = {
                             'price': price,
-                            'side': 'buy',
+                            'side': side,
                             'pin_side': 'sell',
                             'time': current_minute,
                             'size': default_size
@@ -357,7 +362,7 @@ def process_open_orders(price, default_size):
                     if result:
                         order_detail_map[key] = {
                             'price': price,
-                            'side': 'sell',
+                            'side': side,
                             'pin_side': 'buy',
                             'time': current_minute,
                             'size': default_size
@@ -386,6 +391,7 @@ def process_close_orders(price, kai_pin_map):
             target_info = pin_target_price_info_map[pin_key]
             if target_info is not None:
                 threshold_price, comp = target_info
+                print(f"close:{kai_key}", f"[平仓检测] 检查信号 {pin_key} 对应开仓 {kai_key}: 当前价格 {price}, 阈值 {threshold_price}, 比较符 {comp}, 开仓价格 {kai_price}")
                 if comp == '>':
                     if price > threshold_price:
                         result = place_order(INSTRUMENT, order_detail['pin_side'], order_detail['size'],
@@ -615,15 +621,13 @@ async def websocket_listener(kai_pin_map):
     监听 OKX WebSocket 实时数据，处理开仓和平仓逻辑
     """
     default_size = min_count_map[INSTRUMENT]
-    global kai_target_price_info_map, pin_target_price_info_map, order_detail_map, current_minute, price
+    global kai_target_price_info_map, pin_target_price_info_map, order_detail_map, current_minute, price, price_list
 
     while True:
         try:
             async with websockets.connect(OKX_WS_URL) as ws:
                 print("✅ 已连接到 OKX WebSocket")
                 await subscribe_channel(ws, INSTRUMENT)
-                pre_price = 0.0
-
                 # 持续监听 WebSocket 消息
                 while True:
                     try:
@@ -635,13 +639,11 @@ async def websocket_listener(kai_pin_map):
 
                         for trade in data["data"]:
                             price = float(trade["px"])
-                            if price == pre_price:
+                            if price in price_list:
                                 continue
-
+                            price_list.append(price)
                             process_open_orders(price, default_size)
                             process_close_orders(price, kai_pin_map)
-
-                            pre_price = price
 
                     except websockets.exceptions.ConnectionClosed:
                         print("🔴 WebSocket 连接断开，正在重连...")

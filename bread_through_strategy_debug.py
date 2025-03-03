@@ -588,7 +588,7 @@ def optimize_parameters(df, tp_range=None, sl_range=None):
     }
 
 
-def get_detail_backtest_result_op(total_months, df, kai_column, pin_column, signal_cache, is_filter=True, is_detail=False):
+def get_detail_backtest_result_op(total_months, df, kai_column, pin_column, signal_cache, is_filter=True, is_detail=False, is_reverse=False):
     # 判断交易方向
     kai_side = 'long' if 'long' in kai_column.lower() else 'short'
     temp_dict = {}
@@ -648,6 +648,12 @@ def get_detail_backtest_result_op(total_months, df, kai_column, pin_column, sign
     # 这里用 matched_pin.index（即 pin 数据的 index）减去 kai_data_df 的 index，二者必须均为时间类型
     kai_data_df['hold_time'] = matched_pin.index.to_numpy() - kai_idx_valid
 
+    # 判断方向，仅判断一次，避免多处调用字符串查找
+    if is_reverse:
+        is_long = "short" in kai_column.lower()
+    else:
+        is_long = "long" in kai_column.lower()
+
     if is_detail:
         # 缓存 df 各列数据的 NumPy 数组，避免重复转换
         df_index_arr = df.index.to_numpy()
@@ -666,7 +672,7 @@ def get_detail_backtest_result_op(total_months, df, kai_column, pin_column, sign
         kai_data_df['low_min'] = low_min_arr
         kai_data_df['high_max'] = high_max_arr
 
-        if kai_side == 'long':
+        if is_long:
             kai_data_df['max_true_profit'] = (((kai_data_df['high_max'] - kai_data_df['kai_price']) /
                                                 kai_data_df['kai_price'] * 100 - 0.07)
                                                .round(4))
@@ -690,7 +696,7 @@ def get_detail_backtest_result_op(total_months, df, kai_column, pin_column, sign
     kai_data_df['kai_price'] = mapped_prices.combine_first(kai_data_df['kai_price'])
 
     # 计算收益率，均采用向量化计算
-    if kai_side == 'long':
+    if is_long:
         kai_data_df['profit'] = ((kai_data_df['pin_price'] - kai_data_df['kai_price']) /
                                  kai_data_df['kai_price'] * 100).round(4)
     else:
@@ -1466,7 +1472,7 @@ def calculate_final_score(result_df: pd.DataFrame) -> pd.DataFrame:
     df['final_score'] = profit_weight * df['profitability_score'] + stability_weight * df['stability_score']
     df['final_score'] = df['stability_score'] * df['profitability_score']
     # 删除final_score小于0的
-    # df = df[(df['final_score'] > 0)]
+    df = df[(df['final_score'] > 0)]
     return df
 
 def choose_good_strategy_debug(inst_id='BTC'):
@@ -1474,7 +1480,7 @@ def choose_good_strategy_debug(inst_id='BTC'):
     # count_L()
     # 找到temp下面所有包含False的文件
     file_list = os.listdir('temp')
-    file_list = [file for file in file_list if 'True' in file and inst_id in file and 'continue_1_20_1_ma_1_100_20_peak_1_100_20_macross_1_100_10_1_100_10_rsi_1_1000_130_relate_1_2000_90_1_100_3_abs_1_2000_100_1_40_1__is_filter-Truepart'  in file and 'op' in file]
+    file_list = [file for file in file_list if 'True' in file and inst_id in file and '-USDT-SWAP.csv_SOL_is_filter-True_is_reverse-Truepart'  in file and 'op' in file]
     # file_list = file_list[0:1]
     df_list = []
     df_map = {}
@@ -1493,8 +1499,8 @@ def choose_good_strategy_debug(inst_id='BTC'):
         # df['loss_beilv'] = -df['net_profit_rate'] / df['max_consecutive_loss']
         # df['score'] = (df['true_profit_std']) / df['avg_profit_rate'] * 100
 
-        df = df[(df['is_reverse'] == False)]
-        df = add_reverse(df)
+        # df = df[(df['is_reverse'] == False)]
+        # df = add_reverse(df)
         # df['kai_period'] = df['kai_column'].apply(lambda x: int(x.split('_')[0]))
         # df['pin_period'] = df['pin_column'].apply(lambda x: int(x.split('_')[0]))
 
@@ -2046,14 +2052,14 @@ def debug():
     sort_key = 'avg_profit_rate'
     sort_key = 'final_score'
     sort_key = 'stability_score'
-    sort_key = 'score'
+    # sort_key = 'score'
     # sort_key = 'monthly_net_profit_std_score'
     range_size = 1
     # sort_key = 'max_consecutive_loss'
     # origin_good_df = choose_good_strategy_debug('')
     inst_id_list = ['SOL', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     for inst_id in inst_id_list:
-        gen_search_param(inst_id)
+        # gen_search_param(inst_id)
         # origin_good_df = pd.read_csv(f'temp/{inst_id}_final_good.csv')
         # origin_good_df = pd.read_csv(f'temp/{inst_id}_df.csv')
         # origin_good_df = origin_good_df[(origin_good_df['hold_time_mean'] < 10000)]
@@ -2065,13 +2071,18 @@ def debug():
 
 
 
-        origin_good_df = choose_good_strategy_debug(inst_id)
-        origin_good_df['score'] = -origin_good_df['net_profit_rate'] / origin_good_df['max_consecutive_loss'] * origin_good_df['net_profit_rate']
-        origin_good_df = calculate_final_score(origin_good_df)
-        origin_good_df.to_csv(f'temp/{inst_id}_origin_good_op_all.csv', index=False)
+        # origin_good_df = choose_good_strategy_debug(inst_id)
+        # origin_good_df['score'] = -origin_good_df['net_profit_rate'] / origin_good_df['max_consecutive_loss'] * origin_good_df['net_profit_rate']
+        # origin_good_df['score1'] = -origin_good_df['net_profit_rate'] / origin_good_df['fu_profit_sum'] * origin_good_df['net_profit_rate']
         # origin_good_df = calculate_final_score(origin_good_df)
-        origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op.csv')
-        origin_good_df = calculate_final_score(origin_good_df)
+        origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_false.csv')
+        origin_good_df['score'] = -origin_good_df['net_profit_rate'] / origin_good_df['max_consecutive_loss'] * origin_good_df['net_profit_rate']
+        origin_good_df['score1'] = -origin_good_df['net_profit_rate'] / origin_good_df['fu_profit_sum'] * origin_good_df['net_profit_rate']
+        # origin_good_df = calculate_final_score(origin_good_df)
+        origin_good_df = origin_good_df[(origin_good_df['max_consecutive_loss'] > -10)]
+
+        # origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op.csv')
+        # origin_good_df = calculate_final_score(origin_good_df)
 
         # origin_good_df = origin_good_df[(origin_good_df['kai_count'] > 500)]
         # origin_good_df = origin_good_df[(origin_good_df[sort_key] > 0.8)]
@@ -2116,6 +2127,8 @@ def debug():
         file_list = []
         file_list.append(f'kline_data/origin_data_1m_50000_{inst_id}-USDT-SWAP.csv')
         file_list.append(f'kline_data/origin_data_1m_20000_{inst_id}-USDT-SWAP.csv')
+
+        file_list.append(f'kline_data/origin_data_1m_2000_{inst_id}-USDT-SWAP.csv')
         for file in file_list:
             df = pd.read_csv(file)
             # 获取第一行和最后一行的close，计算涨跌幅
@@ -2133,10 +2146,11 @@ def debug():
             for index, row in good_df.iterrows():
                 long_column = row['kai_column']
                 short_column = row['pin_column']
+                is_reverse = row['is_reverse']
                 # long_column = 'ma_1_low_short'
                 # short_column = 'relate_1_1_high_long'
                 kai_data_df, statistic_dict = get_detail_backtest_result_op(22, df, long_column, short_column, signal_cache,
-                                                                            is_filter, is_detail)
+                                                                            is_filter, is_detail, is_reverse)
                 # 为每一行添加统计数据，需要修改到原始数据中
                 # 直接修改 `good_df` 中的相应列
                 good_df.at[index, 'kai_count_new'] = statistic_dict['kai_count']
