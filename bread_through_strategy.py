@@ -529,7 +529,9 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     profit_df = kai_data_df[kai_data_df["true_profit"] > 0]
     loss_df = kai_data_df[kai_data_df["true_profit"] < 0]
     fu_profit_sum = loss_df["true_profit"].sum()
+    fu_profit_mean = round(loss_df["true_profit"].mean() if not loss_df.empty else 0, 4)
     zhen_profit_sum = profit_df["true_profit"].sum()
+    zhen_profit_mean = round(profit_df["true_profit"].mean() if not profit_df.empty else 0, 4)
     loss_rate = loss_df.shape[0] / trade_count if trade_count else 0
     loss_time = loss_df["hold_time"].sum() if not loss_df.empty else 0
     profit_time = profit_df["hold_time"].sum() if not profit_df.empty else 0
@@ -587,7 +589,9 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         "loss_rate": loss_rate,
         "loss_time_rate": loss_time_rate,
         'zhen_profit_sum': zhen_profit_sum,
+        'zhen_profit_mean': zhen_profit_mean,
         'fu_profit_sum': fu_profit_sum,
+        'fu_profit_mean': fu_profit_mean,
         "profit_rate": profit_sum,
         "max_profit": max_single_profit,
         "min_profit": min_single_profit,
@@ -906,7 +910,7 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     print(f"任务分为 {len(big_task_chunks)} 大块。")
 
     pool_processes = max(1, multiprocessing.cpu_count())
-    with multiprocessing.Pool(processes=pool_processes - 2, initializer=init_worker, initargs=(precomputed_signals,)) as pool:
+    with multiprocessing.Pool(processes=pool_processes - 12, initializer=init_worker, initargs=(precomputed_signals,)) as pool:
         for i, task_chunk in enumerate(big_task_chunks):
             output_path = os.path.join('temp', f"statistic_{base_name}_{key_name}_is_filter-{is_filter}part{i}_op_close.csv")
             if os.path.exists(output_path):
@@ -949,11 +953,12 @@ def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
     df = pd.read_csv(data_path)
     needed_columns = ['timestamp', 'high', 'low', 'close']
     df = df[needed_columns]
+    jingdu = 'float32'
 
-    df['chg'] = (df['close'].pct_change() * 100).astype('float32')
-    df['high'] = df['high'].astype('float32')
-    df['low'] = df['low'].astype('float32')
-    df['close'] = df['close'].astype('float32')
+    df['chg'] = (df['close'].pct_change() * 100).astype('float16')
+    df['high'] = df['high'].astype(jingdu)
+    df['low'] = df['low'].astype(jingdu)
+    df['close'] = df['close'].astype(jingdu)
 
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df_monthly = df['timestamp'].dt.to_period('M')

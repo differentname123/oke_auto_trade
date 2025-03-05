@@ -29,6 +29,7 @@ price = 0
 price_list = []
 
 kai_pin_map = {}
+kai_reverse_map = {}
 
 # 记录当前分钟
 current_minute = None
@@ -332,7 +333,7 @@ async def subscribe_channel(ws, inst_id):
     print(f"📡 已订阅 {inst_id} 实时成交数据")
 
 
-def process_open_orders(price, default_size):
+def process_open_orders(price, default_size, kai_reverse_map):
     """
     根据最新成交价判断是否需要开仓（买多或卖空）
     """
@@ -340,16 +341,20 @@ def process_open_orders(price, default_size):
     for key, target_info in kai_target_price_info_map.items():
         if target_info is not None:
             threshold_price, comp = target_info
+            is_reverse = kai_reverse_map[key]
             side = 'buy' if 'long' in key else 'sell'
-            print(f"open: {key:<25} [开仓检测] 检查信号 {key:<25}: 当前价格 {price:>10.2f}, 阈值 {threshold_price:>10.2f}, 比较符 {comp:^5}")
+            if is_reverse:
+                side = 'buy' if side == 'sell' else 'sell'
+            pin_side = 'sell' if side == 'buy' else 'buy'
+            # print(f"open: {key:<25} [开仓检测] 检查信号 {key:<25}: 当前价格 {price:>10.2f}, 阈值 {threshold_price:>10.2f}, 比较符 {comp:^5}")
             if comp == '>':
                 if price >= threshold_price and key not in order_detail_map:
-                    result = place_order(INSTRUMENT, "buy", default_size)
+                    result = place_order(INSTRUMENT, side, default_size)
                     if result:
                         order_detail_map[key] = {
                             'price': price,
                             'side': side,
-                            'pin_side': 'sell',
+                            'pin_side': pin_side,
                             'time': current_minute,
                             'size': default_size
                         }
@@ -358,12 +363,12 @@ def process_open_orders(price, default_size):
                         save_order_detail_map()
             if comp == '<':
                 if price <= threshold_price and key not in order_detail_map:
-                    result = place_order(INSTRUMENT, "sell", default_size)
+                    result = place_order(INSTRUMENT, side, default_size)
                     if result:
                         order_detail_map[key] = {
                             'price': price,
                             'side': side,
-                            'pin_side': 'buy',
+                            'pin_side': pin_side,
                             'time': current_minute,
                             'size': default_size
                         }
@@ -391,7 +396,7 @@ def process_close_orders(price, kai_pin_map):
             target_info = pin_target_price_info_map[pin_key]
             if target_info is not None:
                 threshold_price, comp = target_info
-                print(f"close: {kai_key:<20} [平仓检测] 检查信号 {pin_key:<20} 对应开仓 {kai_key:<10}: 当前价格 {price:>10.2f}, 阈值 {threshold_price:>10.2f}, 比较符 {comp:^5}, 开仓价格 {kai_price:>10.2f}")
+                # print(f"close: {kai_key:<20} [平仓检测] 检查信号 {pin_key:<20} 对应开仓 {kai_key:<10}: 当前价格 {price:>10.2f}, 阈值 {threshold_price:>10.2f}, 比较符 {comp:^5}, 开仓价格 {kai_price:>10.2f}")
                 if comp == '>':
                     if price > threshold_price:
                         result = place_order(INSTRUMENT, order_detail['pin_side'], order_detail['size'],
@@ -616,7 +621,7 @@ def calculate_final_score(result_df: pd.DataFrame) -> pd.DataFrame:
 
 
 
-async def websocket_listener(kai_pin_map):
+async def websocket_listener(kai_pin_map, kai_reverse_map):
     """
     监听 OKX WebSocket 实时数据，处理开仓和平仓逻辑
     """
@@ -642,7 +647,7 @@ async def websocket_listener(kai_pin_map):
                             if price in price_list:
                                 continue
                             price_list.append(price)
-                            process_open_orders(price, default_size)
+                            process_open_orders(price, default_size, kai_reverse_map)
                             process_close_orders(price, kai_pin_map)
 
                     except websockets.exceptions.ConnectionClosed:
@@ -651,6 +656,7 @@ async def websocket_listener(kai_pin_map):
 
         except Exception as e:
             traceback.print_exc()
+
 
 async def main():
     # 确保temp目录存在并加载之前保存的order_detail_map
@@ -680,19 +686,24 @@ async def main():
     print(f'final_good_df shape: {final_good_df.shape[0]}')
     period_list = []
     for index, row in final_good_df.iterrows():
+        if 'is_reverse' not in row:
+            is_reverse = False
+        else:
+            is_reverse = row['is_reverse']
         kai_column = row['kai_column']
         kai_period = int(kai_column.split('_')[1])
         period_list.append(kai_period)
         pin_column = row['pin_column']
         pin_period = int(pin_column.split('_')[1])
         kai_pin_map[kai_column] = pin_column
+        kai_reverse_map[kai_column] = is_reverse
         period_list.append(pin_period)
 
     max_period = max(period_list)
     max_period = int(np.ceil(max_period / 100) * 100)
     await asyncio.gather(
         fetch_new_data(final_good_df, max_period),  # 定时更新数据
-        websocket_listener(kai_pin_map)  # 监听实时数据
+        websocket_listener(kai_pin_map, kai_reverse_map)  # 监听实时数据
     )
 
 # 运行 asyncio 事件循环

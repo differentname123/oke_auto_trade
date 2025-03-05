@@ -1480,7 +1480,7 @@ def choose_good_strategy_debug(inst_id='BTC'):
     # count_L()
     # 找到temp下面所有包含False的文件
     file_list = os.listdir('temp')
-    file_list = [file for file in file_list if 'True' in file and inst_id in file and '-USDT-SWAP.csv_SOL_is_filter-True_is_reverse-Truepart'  in file and 'op' in file]
+    file_list = [file for file in file_list if 'True' in file and inst_id in file and 'USDT-SWAP.csv_SOL_is_filter-True_is_reverse-Truepart'  in file and 'close' not in file]
     # file_list = file_list[0:1]
     df_list = []
     df_map = {}
@@ -1505,6 +1505,9 @@ def choose_good_strategy_debug(inst_id='BTC'):
         # df['pin_period'] = df['pin_column'].apply(lambda x: int(x.split('_')[0]))
 
         df['filename'] = file.split('_')[5]
+        df['profit_risk_score_con'] = -df['net_profit_rate'] / df['max_consecutive_loss'] * df['net_profit_rate']
+        df['profit_risk_score'] = -df['net_profit_rate'] / df['fu_profit_sum'] * df['net_profit_rate']
+        df['profit_risk_score_pure'] = -df['net_profit_rate'] / df['fu_profit_sum']
         # df['pin_side'] = df['pin_column'].apply(lambda x: x.split('_')[-1])
         # 删除kai_column和pin_column中不包含 ma的行
         # df = df[(df['kai_column'].str.contains('ma')) & (df['pin_column'].str.contains('ma'))]
@@ -1512,9 +1515,12 @@ def choose_good_strategy_debug(inst_id='BTC'):
         # df = df[(df['kai_column'].str.contains('abs')) & (df['pin_column'].str.contains('abs'))]
 
         # df = df[(df['true_profit_std'] < 10)]
-        df = df[(df['max_consecutive_loss'] > -30)]
+        # df = df[(df['max_consecutive_loss'] > -30)]
         # df = df[(df['pin_side'] != df['kai_side'])]
-        df = df[(df['net_profit_rate'] > 50)]
+        df = df[(df['profit_risk_score_pure'] > 1)]
+        # df = df[(df['net_profit_rate'] > 50)]
+        df = df[(df['avg_profit_rate'] > 1)]
+
         # df = df[(df['monthly_net_profit_std'] < 10)]
         # df = df[(df['same_count_rate'] < 1)]
         # df = df[(df['same_count_rate'] < 1)]
@@ -1841,62 +1847,129 @@ def calculate_row_correlation(row1, row2, is_debug=False):
     final_value = int(round(combined_corr * 100))
     return final_value
 
-def gen_statistic_data(inst_id, sort_key):
-    origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good.csv')
-    origin_good_df = origin_good_df.sort_values(sort_key, ascending=False)
-    origin_good_df = origin_good_df[(origin_good_df[sort_key] > 0.1)]
-    # 重置索引
-    origin_good_df = origin_good_df.reset_index(drop=True)
 
-    # 保留 DataFrame 原始索引（非 0 开始），将原始索引放到一列中
-    origin_good_df = origin_good_df.reset_index()  # 新生成一列 "index" 保存原始行标
+def filter_similar_rows(inst_id, sort_key, threshold=50):
+    """
+    根据相关性过滤高度相似的数据行。
+    逻辑说明：
+      1. 按照sort_key从高到低排序，并筛选出sort_key大于0.1的行；
+      2. 遍历排序后的每一行，与已经筛选出的行进行两两相关性比较；
+      3. 如果该行与已经筛选出的每一行的相关性都小于或等于threshold，
+         则将该行加入筛选结果 filtered_rows 中。
 
-    # 预处理：对指标字段进行字典解析
-    origin_good_df["monthly_net_profit_detail"] = origin_good_df["monthly_net_profit_detail"].apply(safe_parse_dict)
-    origin_good_df["monthly_trade_count_detail"] = origin_good_df["monthly_trade_count_detail"].apply(
-        safe_parse_dict)
+    参数:
+      inst_id (str): 用于构成文件名的实例ID；
+      sort_key (str): 用于排序的键；
+      threshold (float): 相关性阈值，若相关性大于该值则认为两行过于相关，默认值为10。
+
+    返回:
+      pd.DataFrame: 筛选后的数据。
+    """
+    # 读取并预处理数据
+    df = pd.read_csv(f'temp/{inst_id}_origin_good_op_false.csv')
+    df = df.sort_values(sort_key, ascending=False)
+    df = df[df[sort_key] > 0.1]
+    # df = df[df['net_profit_rate'] > 50]
+    # df = df[df['hold_time_mean'] < 1000]
+    # 重置索引，并保留原始行标到 "index" 列中
+    df = df.reset_index(drop=True)
+    df = df.reset_index()  # 将原先的行号存到 "index" 列中
+
+    # 对部分需要用字典进行解析的字段进行预处理
+    df["monthly_net_profit_detail"] = df["monthly_net_profit_detail"].apply(safe_parse_dict)
+    df["monthly_trade_count_detail"] = df["monthly_trade_count_detail"].apply(safe_parse_dict)
 
     # 转换为字典列表，保证遍历顺序与原 DataFrame 顺序一致
-    parsed_rows = origin_good_df.to_dict("records")
+    parsed_rows = df.to_dict("records")
+    filtered_rows = []
+    print(f"初始数据量：{len(df)}")
 
-    # 遍历每一行，对其后续行计算相关性，记录相关性为负的行对
-    negative_correlation_data = []
-    n = len(parsed_rows)
-    for pos_i in range(n):
-        for pos_j in range(pos_i + 1, n):
-            # 计算两行相关性（返回值已映射到 [-100, 100]，负值即为相关性为负）
-            corr_val = calculate_row_correlation(parsed_rows[pos_i], parsed_rows[pos_j])
-            if corr_val < 100:
-                # 使用原始索引，字段名 "index" 为 reset_index 后的原始行标
-                negative_correlation_data.append({
-                    "Row1": parsed_rows[pos_i]['index'],
-                    "Row2": parsed_rows[pos_j]['index'],
-                    "Correlation": corr_val,
-                    "Row1_kai_side": parsed_rows[pos_i].get("kai_side"),
-                    "Row2_kai_side": parsed_rows[pos_j].get("kai_side"),
-                    "Row1_kai_column": parsed_rows[pos_i].get("kai_column"),
-                    "Row2_kai_column": parsed_rows[pos_j].get("kai_column"),
-                    "Row1_pin_column": parsed_rows[pos_i].get("pin_column"),
-                    "Row2_pin_column": parsed_rows[pos_j].get("pin_column"),
-                    "Row1_kai_count": parsed_rows[pos_i].get("kai_count"),
-                    "Row2_kai_count": parsed_rows[pos_j].get("kai_count"),
-                    "Row1_net_profit_rate": parsed_rows[pos_i].get("net_profit_rate"),
-                    "Row2_net_profit_rate": parsed_rows[pos_j].get("net_profit_rate"),
-                    "Row1_avg_profit_rate": parsed_rows[pos_i].get("avg_profit_rate"),
-                    "Row2_avg_profit_rate": parsed_rows[pos_j].get("avg_profit_rate")
-                })
+    start_time = time.time()
+    i = 0
+    # 遍历每一条记录
+    for candidate in parsed_rows:
+        candidate_kai_count = candidate.get("kai_count")
+        i += 1
+        add_candidate = True
+        # 与已筛选记录进行遍历对比
+        for accepted in filtered_rows:
+            accepted_kai_count = accepted.get("kai_count")
+            corr_val = calculate_row_correlation(candidate, accepted)
+            # 如果任一相关性大于阈值，则不加入该候选记录
+            if abs(accepted_kai_count - candidate_kai_count) < 10 or corr_val < threshold:
+                add_candidate = False
+                break
+        if add_candidate:
+            filtered_rows.append(candidate)
 
-    negative_corr_df = pd.DataFrame(negative_correlation_data, columns=[
-        "Row1", "Row2", "Correlation",
-        "Row1_kai_side", "Row2_kai_side",
-        "Row1_kai_column", "Row2_kai_column",
-        "Row1_pin_column", "Row2_pin_column",
-        "Row1_kai_count", "Row2_kai_count",
-        "Row1_net_profit_rate", "Row2_net_profit_rate",
-        "Row1_avg_profit_rate", "Row2_avg_profit_rate"
-    ])
-    # calculate_row_correlation(parsed_rows[0], parsed_rows[4], True)
-    return negative_corr_df
+    print(f"过滤后数据量：{len(filtered_rows)}")
+    print(f"过滤耗时：{time.time() - start_time:.2f} 秒")
+
+    # 构造返回数据 DataFrame
+    filtered_df = pd.DataFrame(filtered_rows)
+    filtered_df.to_csv(f'temp/{inst_id}_filtered_data.csv', index=False)
+    return filtered_df
+
+def gen_statistic_data(inst_id, sort_key):
+    filtered_df = filter_similar_rows(inst_id, sort_key)
+    # origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_false.csv')
+    # origin_good_df = origin_good_df.sort_values(sort_key, ascending=False)
+    # origin_good_df = origin_good_df[(origin_good_df[sort_key] > 0.1)]
+    # start_time = time.time()
+    # print(f'待计算的数据量：{len(origin_good_df)}')
+    # # 重置索引
+    # origin_good_df = origin_good_df.reset_index(drop=True)
+    #
+    # # 保留 DataFrame 原始索引（非 0 开始），将原始索引放到一列中
+    # origin_good_df = origin_good_df.reset_index()  # 新生成一列 "index" 保存原始行标
+    #
+    # # 预处理：对指标字段进行字典解析
+    # origin_good_df["monthly_net_profit_detail"] = origin_good_df["monthly_net_profit_detail"].apply(safe_parse_dict)
+    # origin_good_df["monthly_trade_count_detail"] = origin_good_df["monthly_trade_count_detail"].apply(
+    #     safe_parse_dict)
+    #
+    # # 转换为字典列表，保证遍历顺序与原 DataFrame 顺序一致
+    # parsed_rows = origin_good_df.to_dict("records")
+    #
+    # # 遍历每一行，对其后续行计算相关性，记录相关性为负的行对
+    # negative_correlation_data = []
+    # n = len(parsed_rows)
+    # for pos_i in range(n):
+    #     for pos_j in range(pos_i + 1, n):
+    #         # 计算两行相关性（返回值已映射到 [-100, 100]，负值即为相关性为负）
+    #         corr_val = calculate_row_correlation(parsed_rows[pos_i], parsed_rows[pos_j])
+    #         if corr_val < 100:
+    #             # 使用原始索引，字段名 "index" 为 reset_index 后的原始行标
+    #             negative_correlation_data.append({
+    #                 "Row1": parsed_rows[pos_i]['index'],
+    #                 "Row2": parsed_rows[pos_j]['index'],
+    #                 "Correlation": corr_val,
+    #                 "Row1_kai_side": parsed_rows[pos_i].get("kai_side"),
+    #                 "Row2_kai_side": parsed_rows[pos_j].get("kai_side"),
+    #                 "Row1_kai_column": parsed_rows[pos_i].get("kai_column"),
+    #                 "Row2_kai_column": parsed_rows[pos_j].get("kai_column"),
+    #                 "Row1_pin_column": parsed_rows[pos_i].get("pin_column"),
+    #                 "Row2_pin_column": parsed_rows[pos_j].get("pin_column"),
+    #                 "Row1_kai_count": parsed_rows[pos_i].get("kai_count"),
+    #                 "Row2_kai_count": parsed_rows[pos_j].get("kai_count"),
+    #                 "Row1_net_profit_rate": parsed_rows[pos_i].get("net_profit_rate"),
+    #                 "Row2_net_profit_rate": parsed_rows[pos_j].get("net_profit_rate"),
+    #                 "Row1_avg_profit_rate": parsed_rows[pos_i].get("avg_profit_rate"),
+    #                 "Row2_avg_profit_rate": parsed_rows[pos_j].get("avg_profit_rate")
+    #             })
+    #
+    # negative_corr_df = pd.DataFrame(negative_correlation_data, columns=[
+    #     "Row1", "Row2", "Correlation",
+    #     "Row1_kai_side", "Row2_kai_side",
+    #     "Row1_kai_column", "Row2_kai_column",
+    #     "Row1_pin_column", "Row2_pin_column",
+    #     "Row1_kai_count", "Row2_kai_count",
+    #     "Row1_net_profit_rate", "Row2_net_profit_rate",
+    #     "Row1_avg_profit_rate", "Row2_avg_profit_rate"
+    # ])
+    # print(f'计算耗时：{time.time() - start_time:.2f} 秒')
+    # # calculate_row_correlation(parsed_rows[0], parsed_rows[4], True)
+    # return negative_corr_df
 
 def filter_param(inst_id):
     """
@@ -2049,12 +2122,12 @@ def debug():
     # debug
     statistic_df_list = []
     range_key = 'kai_count'
-    sort_key = 'avg_profit_rate'
+    sort_key = 'net_profit_rate'
     sort_key = 'final_score'
     sort_key = 'stability_score'
-    # sort_key = 'score'
-    # sort_key = 'monthly_net_profit_std_score'
-    range_size = 1
+    # sort_key = 'profit_risk_score'
+    # sort_key = 'monthly_net_profit_min'
+    range_size = 10
     # sort_key = 'max_consecutive_loss'
     # origin_good_df = choose_good_strategy_debug('')
     inst_id_list = ['SOL', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
@@ -2071,35 +2144,13 @@ def debug():
 
 
 
-        origin_good_df = choose_good_strategy_debug(inst_id)
-        origin_good_df['score'] = -origin_good_df['net_profit_rate'] / origin_good_df['max_consecutive_loss'] * origin_good_df['net_profit_rate']
-        origin_good_df['score1'] = -origin_good_df['net_profit_rate'] / origin_good_df['fu_profit_sum'] * origin_good_df['net_profit_rate']
-        origin_good_df = calculate_final_score(origin_good_df)
-        # origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_false.csv')
-        # origin_good_df['score'] = -origin_good_df['net_profit_rate'] / origin_good_df['max_consecutive_loss'] * origin_good_df['net_profit_rate']
-        # origin_good_df['score1'] = -origin_good_df['net_profit_rate'] / origin_good_df['fu_profit_sum'] * origin_good_df['net_profit_rate']
-        origin_good_df = origin_good_df[(origin_good_df['max_consecutive_loss'] > -10)]
-
-        # origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op.csv')
+        # origin_good_df = choose_good_strategy_debug(inst_id)
         # origin_good_df = calculate_final_score(origin_good_df)
-
-        # origin_good_df = origin_good_df[(origin_good_df['kai_count'] > 500)]
-        # origin_good_df = origin_good_df[(origin_good_df[sort_key] > 0.8)]
-
-        # origin_good_df = calculate_final_score(origin_good_df)
-        # gen_statistic_data(inst_id, sort_key)
-
-
-        # # # 获取origin_good_df中不重复的kai_column与pin_column的值
-        # # kai_column_list = origin_good_df['kai_column'].unique()
-        # # pin_column_list = origin_good_df['pin_column'].unique()
-        # # all_column_list = list(set(kai_column_list) | set(pin_column_list))
-        # # origin_good_df = pd.read_csv('temp/origin_good.csv')
-        # # origin_good_df.to_csv(f'temp/{inst_id}_origin_good_op.csv', index=False)
-        # # 按照loss_score降序排列，选取前20行
-        # # peak_1_high_long
-        # # abs_1_0.4_high_long
-        # # origin_good_df = origin_good_df[(origin_good_df['kai_side'] == 'short')]
+        origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_false.csv')
+        origin_good_df = origin_good_df[(origin_good_df['stability_score'] > 0.5)]
+        origin_good_df = origin_good_df[(origin_good_df['profit_risk_score'] > 500)]
+        # origin_good_df = origin_good_df[(origin_good_df['max_consecutive_loss'] > -20)]
+        # origin_good_df.to_csv(f'temp/{inst_id}_origin_good_op_true.csv', index=False)
 
         # good_df = pd.read_csv('temp/final_good.csv')
 
@@ -2119,15 +2170,20 @@ def debug():
         # good_df = good_df.sort_values(by=sort_key, ascending=True)
         # good_df = good_df.drop_duplicates(subset=['kai_column', 'kai_side'], keep='first')
 
-        good_df.to_csv('temp/final_good.csv', index=False)
+        # good_df.to_csv('temp/final_good.csv', index=False)
+        # good_df = pd.read_csv(f'temp/{inst_id}_filtered_data.csv')
 
         is_filter = True
         is_detail = False
         file_list = []
-        file_list.append(f'kline_data/origin_data_1m_50000_{inst_id}-USDT-SWAP.csv')
+        # file_list.append(f'kline_data/origin_data_1m_50000_{inst_id}-USDT-SWAP.csv')
+        file_list.append(f'kline_data/origin_data_1m_40000_{inst_id}-USDT-SWAP.csv')
+        file_list.append(f'kline_data/origin_data_1m_30000_{inst_id}-USDT-SWAP.csv')
         file_list.append(f'kline_data/origin_data_1m_20000_{inst_id}-USDT-SWAP.csv')
-
+        file_list.append(f'kline_data/origin_data_1m_10000_{inst_id}-USDT-SWAP.csv')
+        file_list.append(f'kline_data/origin_data_1m_3000_{inst_id}-USDT-SWAP.csv')
         file_list.append(f'kline_data/origin_data_1m_2000_{inst_id}-USDT-SWAP.csv')
+
         for file in file_list:
             df = pd.read_csv(file)
             # 获取第一行和最后一行的close，计算涨跌幅

@@ -429,7 +429,9 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     profit_df = kai_data_df[kai_data_df["true_profit"] > 0]
     loss_df = kai_data_df[kai_data_df["true_profit"] < 0]
     fu_profit_sum = loss_df["true_profit"].sum()
+    fu_profit_mean = round(loss_df["true_profit"].mean() if not loss_df.empty else 0, 4)
     zhen_profit_sum = profit_df["true_profit"].sum()
+    zhen_profit_mean = round(profit_df["true_profit"].mean() if not profit_df.empty else 0, 4)
     loss_rate = loss_df.shape[0] / trade_count if trade_count else 0
     loss_time = loss_df["hold_time"].sum() if not loss_df.empty else 0
     profit_time = profit_df["hold_time"].sum() if not profit_df.empty else 0
@@ -485,8 +487,10 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         "hold_time_std": hold_time_std,
         "loss_rate": loss_rate,
         "loss_time_rate": loss_time_rate,
-        "zhen_profit_sum": zhen_profit_sum,
-        "fu_profit_sum": fu_profit_sum,
+        'zhen_profit_sum': zhen_profit_sum,
+        'zhen_profit_mean': zhen_profit_mean,
+        'fu_profit_sum': fu_profit_sum,
+        'fu_profit_mean': fu_profit_mean,
         "profit_rate": profit_sum,
         "max_profit": max_single_profit,
         "min_profit": min_single_profit,
