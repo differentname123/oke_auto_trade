@@ -330,7 +330,7 @@ async def subscribe_channel(ws, inst_id):
         "args": [{"channel": "trades", "instId": inst_id}]
     }
     await ws.send(json.dumps(subscribe_msg))
-    print(f"📡 已订阅 {inst_id} 实时成交数据")
+    print(f"📡 已订阅 {inst_id} 实时数据")
 
 
 def process_open_orders(price, default_size, kai_reverse_map):

@@ -838,7 +838,7 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     start_time = time.time()
     # all_columns = all_columns[:100]
     print("开始预计算所有信号（采用稀疏存储）... 一共有 {} 个信号。".format(len(all_columns)))
-
+    print(key_name)
     # 根据系统的 CPU 数量创建进程池
     num_workers = multiprocessing.cpu_count()
 
