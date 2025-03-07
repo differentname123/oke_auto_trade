@@ -2126,7 +2126,7 @@ def gen_statistic_data(origin_good_df):
     origin_good_df["monthly_net_profit_detail"] = origin_good_df["monthly_net_profit_detail"].apply(safe_parse_dict)
     origin_good_df["monthly_trade_count_detail"] = origin_good_df["monthly_trade_count_detail"].apply(safe_parse_dict)
     print(f'待计算的数据量：{len(origin_good_df)}')
-    origin_good_df = filtering(origin_good_df, 'kai_count', 'net_profit_rate', 30)
+    origin_good_df = filtering(origin_good_df, 'kai_count', 'net_profit_rate', 50)
     print(f'过滤后的数据量：{len(origin_good_df)}')
 
 
@@ -2359,14 +2359,16 @@ def find_all_valid_groups(origin_good_df, threshold, sort_key='net_profit_rate')
 
     # --- 建立 sort_key 映射 ---
     # 假定 origin_good_df 的索引与 G 中节点名称一致
-    sort_key_mapping = origin_good_df[sort_key].to_dict()
+    sort_key_mapping = {str(k): v for k, v in origin_good_df.set_index("index")[sort_key].to_dict().items()}
+
 
     # --- 组装最终的 DataFrame ---
     results = []
     for group, avg_corr in groups_with_avg:
         row_len = len(group)
         # 计算组合中每个 row 对应的 sort_key 值的平均值
-        sort_values = [sort_key_mapping.get(r, np.nan) for r in group]
+        sort_values = [sort_key_mapping.get(str(r), np.nan) for r in group]
+
         avg_sort_key_value = np.nanmean(sort_values)
         min_corr = minimum_correlation(group)
         max_corr = maximum_correlation(group)
@@ -2429,7 +2431,7 @@ def debug():
         # # origin_good_df = choose_good_strategy_debug(inst_id)
         # # origin_good_df = calculate_final_score(origin_good_df)
         # # origin_good_df.to_csv(f'temp/{inst_id}_origin_good_op_false.csv', index=False)
-        # origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_false.csv')
+        # origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_false_close.csv')
         # # origin_good_df[sort_key] = -origin_good_df[sort_key]
         # # 删除kai_column和pin_column中包含 macross的行
         # # origin_good_df = origin_good_df[~origin_good_df['kai_column'].str.contains('abs') & ~origin_good_df['pin_column'].str.contains('macross')]
@@ -2465,7 +2467,7 @@ def debug():
         # # good_df = good_df.drop_duplicates(subset=['kai_column', 'kai_side'], keep='first')
         #
         # # good_df.to_csv('temp/final_good.csv', index=False)
-        # result, good_df = find_all_valid_groups(good_df, 10)
+        # result, good_df = find_all_valid_groups(good_df, 30)
         # good_df.to_csv('temp/final_good.csv', index=False)
         # return
 
@@ -2483,6 +2485,7 @@ def debug():
         file_list.append(f'kline_data/origin_data_1m_10000_{inst_id}-USDT-SWAP.csv')
         file_list.append(f'kline_data/origin_data_1m_3000_{inst_id}-USDT-SWAP.csv')
         file_list.append(f'kline_data/origin_data_1m_2000_{inst_id}-USDT-SWAP.csv')
+        good_df_list = []
 
         for file in file_list:
             df = pd.read_csv(file)
@@ -2545,10 +2548,13 @@ def debug():
             good_df['value_score'] = good_df['kai_value'] + good_df['pin_value']
             good_df['value_score1'] = good_df['kai_value'] * good_df['pin_value']
             good_df['total_chg'] = total_chg
+            good_df_list.append(good_df.copy())
             # 获取索引为109，876，926的行
             # row_list = [303, 4144, 3949]
             # 找到good_df中score字段值在row_list中的行
-            # good_df[good_df['index'].isin([303, 4144, 3949])]
+            # good_df[good_df['index'].isin([339, 990])]
+            # good_df_list[0][good_df_list[0]['index'].isin([339, 990])]
+            # find_all_valid_groups(good_df, 30)
 
 
 
