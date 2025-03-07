@@ -19,7 +19,7 @@ from numba import njit
 GLOBAL_SIGNALS = {}
 
 
-def compute_signal_old(df, col_name):
+def compute_signal(df, col_name):
     """
     计算给定信号名称对应的信号及其价格序列（均保留原始 float 精度）
     """
@@ -125,7 +125,7 @@ def compute_signal_old(df, col_name):
     else:
         raise ValueError(f"未知的信号类型: {signal_type}")
 
-def compute_signal(df, col_name):
+def compute_signal_old(df, col_name):
     """
     计算给定信号名称对应的信号及其价格序列（均保留原始 float 精度）
     """
@@ -659,7 +659,7 @@ def process_tasks(task_chunk, df, is_filter):
     results = []
     for long_column, short_column in task_chunk:
         _, stat_long = get_detail_backtest_result_op(df, long_column, short_column, is_filter)
-        # _, stat_long_reverse = get_detail_backtest_result_op(df, long_column, short_column, is_filter, is_reverse=True)
+        _, stat_long_reverse = get_detail_backtest_result_op(df, long_column, short_column, is_filter, is_reverse=True)
         results.append(stat_long)
         # results.append(stat_long_reverse)
     print(f"处理 {len(task_chunk)} 个任务，耗时 {time.time() - start_time:.2f} 秒。")
@@ -845,7 +845,7 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     # 用于存储最终预计算结果的字典
     precomputed_signals = {}
     # 定义结果文件保存路径
-    precomputed_file = f"temp/{base_name}_{key_name}_close.pkl"
+    precomputed_file = f"temp/{base_name}_{key_name}.pkl"
 
     # --- 尝试加载已有的预计算结果 ---
     if os.path.exists(precomputed_file):
@@ -910,9 +910,9 @@ def backtest_breakthrough_strategy(df, base_name, is_filter):
     print(f"任务分为 {len(big_task_chunks)} 大块。")
 
     pool_processes = max(1, multiprocessing.cpu_count())
-    with multiprocessing.Pool(processes=pool_processes - 12, initializer=init_worker, initargs=(precomputed_signals,)) as pool:
+    with multiprocessing.Pool(processes=pool_processes - 5, initializer=init_worker, initargs=(precomputed_signals,)) as pool:
         for i, task_chunk in enumerate(big_task_chunks):
-            output_path = os.path.join('temp', f"statistic_{base_name}_{key_name}_is_filter-{is_filter}part{i}_op_close.csv")
+            output_path = os.path.join('temp', f"statistic_{base_name}_{key_name}_is_filter-{is_filter}part{i}_op.csv")
             if os.path.exists(output_path):
                 print(f'已存在 {output_path}')
                 continue
@@ -972,7 +972,7 @@ def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
 def example():
     start_time = time.time()
     data_path_list = [
-        'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv',
+        # 'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv',
         'kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv',
         'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv',
         'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv',

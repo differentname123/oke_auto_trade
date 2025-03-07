@@ -2054,6 +2054,57 @@ def process_pair(pair):
         }
     return None
 
+
+def filtering(origin_good_df, target_column, sort_key, threshold):
+    """
+    对 DataFrame 进行预过滤，思路如下：
+      1. 按照 target_column 分组
+      2. 每个分组内部，根据 sort_key 降序排序（更优的记录先保留）
+      3. 每两行计算相关性，如果相关性大于 threshold，则删除 sort_key 较小（即后出现）的行
+
+    参数:
+      origin_good_df: pandas.DataFrame，原始数据
+      target_column: str，用于分组的列名
+      sort_key: str，用于比较优先级的列名，值较大者优先保留
+      threshold: float，相关性阈值，若两行的相关性大于该值，则认为两行高度相关
+
+    返回:
+      filtered_df: pandas.DataFrame，过滤后保留的记录
+    """
+    filtered_groups = []  # 存储每个分组过滤后的 DataFrame
+
+    # 按 target_column 分组
+    for group_value, group_df in origin_good_df.groupby(target_column):
+        # 按 sort_key 降序排序（大值优先）
+        group_sorted = group_df.sort_values(by=sort_key, ascending=False)
+        keep_rows = []  # 用于保存本组中保留的行（记录 Series）
+
+        # 遍历排序后的每一行
+        for idx, row in group_sorted.iterrows():
+            drop_flag = False
+            # 与已保留的每一行两两比较相关性
+            for kept_row in keep_rows:
+                # 计算两行相关性，排除掉 target_column 和 sort_key 列
+                corr = calculate_row_correlation(row, kept_row)
+                if corr > threshold:
+                    # 若相关性大于阈值，则当前行与已有行高度相关，且当前行的 sort_key 较小（因为排序中的后续行），直接舍弃当前行
+                    drop_flag = True
+                    break
+            if not drop_flag:
+                keep_rows.append(row)
+
+        # 将本组的保留行合并为 DataFrame
+        if keep_rows:
+            filtered_groups.append(pd.DataFrame(keep_rows))
+
+    # 合并所有组的过滤结果
+    if filtered_groups:
+        filtered_df = pd.concat(filtered_groups, ignore_index=True)
+    else:
+        filtered_df = pd.DataFrame(columns=origin_good_df.columns)
+    return filtered_df
+
+
 def gen_statistic_data(origin_good_df):
     """
     对原始 DataFrame 进行预处理：
@@ -2066,7 +2117,6 @@ def gen_statistic_data(origin_good_df):
       'Row1', 'Row2', 'Correlation', 以及其他额外信息列
     """
     start_time = time.time()
-    print(f'待计算的数据量：{len(origin_good_df)}')
 
     # 重置索引，并保存原始索引到 "index" 列
     origin_good_df = origin_good_df.reset_index(drop=True)
@@ -2075,6 +2125,10 @@ def gen_statistic_data(origin_good_df):
     # 对指定字段进行解析
     origin_good_df["monthly_net_profit_detail"] = origin_good_df["monthly_net_profit_detail"].apply(safe_parse_dict)
     origin_good_df["monthly_trade_count_detail"] = origin_good_df["monthly_trade_count_detail"].apply(safe_parse_dict)
+    print(f'待计算的数据量：{len(origin_good_df)}')
+    origin_good_df = filtering(origin_good_df, 'kai_count', 'net_profit_rate', 30)
+    print(f'过滤后的数据量：{len(origin_good_df)}')
+
 
     # 转换为字典列表，保持 DataFrame 内的顺序
     parsed_rows = origin_good_df.to_dict("records")
@@ -2101,7 +2155,7 @@ def gen_statistic_data(origin_good_df):
     ]
     negative_corr_df = pd.DataFrame(results, columns=columns)
     print(f'计算耗时：{time.time() - start_time:.2f} 秒')
-    return negative_corr_df
+    return negative_corr_df, origin_good_df
 
 
 def filter_param(inst_id):
@@ -2236,7 +2290,7 @@ def gen_search_param(inst_id, is_reverse=False):
     return all_task_list, all_columns
 
 
-def find_all_valid_groups(origin_good_df, threshold):
+def find_all_valid_groups(origin_good_df, threshold, sort_key='net_profit_rate'):
     """
     枚举 origin_good_df 处理后的统计数据中所有满足条件的 row 组合，
     使得组合中任意两个 row 的 Correlation 都低于给定阈值。
@@ -2251,36 +2305,34 @@ def find_all_valid_groups(origin_good_df, threshold):
          avg_corr 为 float，该集合中所有两两关系的平均相关性
       df: 生成统计数据的 DataFrame
     """
-    # df = gen_statistic_data(origin_good_df)
+    # df, origin_good_df = gen_statistic_data(origin_good_df)
     # df.to_csv('temp/df.csv', index=False)
-    # return
+    # return origin_good_df,origin_good_df
 
 
     df = pd.read_csv('temp/df.csv')
-
     # --- 构造相关性字典及图 ---
-    # 使用向量化手段构建键：每行的 (Row1, Row2) 作为有序 tuple
+    # 构造键：每行的 (Row1, Row2) 作为有序 tuple
     df["key"] = df.apply(lambda row: tuple(sorted((row["Row1"], row["Row2"]))), axis=1)
     corr_dict = dict(zip(df["key"], df["Correlation"]))
 
-    # 构建图 G: 节点来自所有 Row1 与 Row2
+    # 构建无向图 G: 节点来自所有的 Row1 与 Row2
     nodes = set(df["Row1"]).union(set(df["Row2"]))
     G = nx.Graph()
     G.add_nodes_from(nodes)
 
-    # 通过过滤 DataFrame 添加边（相关性 >= threshold）
+    # 根据相关性过滤添加边：对相关性 >= threshold 的行作为边
     edge_df = df[df["Correlation"] >= threshold]
     edges = [tuple(x) for x in edge_df[["Row1", "Row2"]].to_numpy()]
     G.add_edges_from(edges)
 
-    # 构造补图 Gc，补图中的 clique 对应原图中的独立集
+    # 构造补图 Gc, 在补图中的 clique 就对应于原图中的独立集
     Gc = nx.complement(G)
     cliques = list(nx.find_cliques(Gc))
-
-    # 过滤掉长度小于 2 的集合
+    # 过滤掉长度小于 2 的组合
     cliques = [clique for clique in cliques if len(clique) >= 2]
 
-    # --- 计算每个 clique 的平均相关性 ---
+    # --- 计算每个 clique 的平均相关性和最小相关性 ---
     def average_correlation(group):
         combs = list(itertools.combinations(sorted(group), 2))
         if not combs:
@@ -2288,11 +2340,46 @@ def find_all_valid_groups(origin_good_df, threshold):
         total = sum(corr_dict.get(pair, 0) for pair in combs)
         return total / len(combs)
 
+    def minimum_correlation(group):
+        combs = list(itertools.combinations(sorted(group), 2))
+        if not combs:
+            return 0
+        values = [corr_dict.get(pair, 0) for pair in combs]
+        return min(values)
+    def maximum_correlation(group):
+        combs = list(itertools.combinations(sorted(group), 2))
+        if not combs:
+            return 0
+        values = [corr_dict.get(pair, 0) for pair in combs]
+        return max(values)
+
     groups_with_avg = [(clique, average_correlation(clique)) for clique in cliques]
-    # 排序：先按集合大小降序，再按平均相关性升序
+    # 排序：先按组合长度降序，再按平均相关性升序
     groups_with_avg.sort(key=lambda x: (-len(x[0]), x[1]))
 
-    return groups_with_avg, df
+    # --- 建立 sort_key 映射 ---
+    # 假定 origin_good_df 的索引与 G 中节点名称一致
+    sort_key_mapping = origin_good_df[sort_key].to_dict()
+
+    # --- 组装最终的 DataFrame ---
+    results = []
+    for group, avg_corr in groups_with_avg:
+        row_len = len(group)
+        # 计算组合中每个 row 对应的 sort_key 值的平均值
+        sort_values = [sort_key_mapping.get(r, np.nan) for r in group]
+        avg_sort_key_value = np.nanmean(sort_values)
+        min_corr = minimum_correlation(group)
+        max_corr = maximum_correlation(group)
+        results.append({
+            "row_list": group,
+            "avg_corr": avg_corr,
+            "row_len": row_len,
+            "avg_sort_key_value": avg_sort_key_value,
+            "min_corr": min_corr,
+            "max_corr": max_corr
+        })
+    final_df = pd.DataFrame(results)
+    return final_df, origin_good_df
 
 def debug():
     # good_df = pd.read_csv('temp/final_good.csv')
@@ -2339,46 +2426,51 @@ def debug():
 
 
 
-        # origin_good_df = choose_good_strategy_debug(inst_id)
-        # origin_good_df = calculate_final_score(origin_good_df)
-        # origin_good_df.to_csv(f'temp/{inst_id}_origin_good_op_false.csv', index=False)
-        origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_true.csv')
-        # origin_good_df[sort_key] = -origin_good_df[sort_key]
-        # 删除kai_column和pin_column中包含 macross的行
-        # origin_good_df = origin_good_df[~origin_good_df['kai_column'].str.contains('abs') & ~origin_good_df['pin_column'].str.contains('macross')]
-        # origin_good_df['zhen_fu_mean_score'] = -origin_good_df['zhen_profit_mean'] / origin_good_df['fu_profit_mean']
-        origin_good_df['monthly_trade_std_score'] = origin_good_df['monthly_trade_std'] / origin_good_df['kai_count'] * 22 * origin_good_df['active_month_ratio']
-        # origin_good_df = origin_good_df[(origin_good_df['monthly_trade_std_score'] < 0.3)]
-        origin_good_df = origin_good_df[(origin_good_df['profit_risk_score'] > 1000)]
-        origin_good_df = origin_good_df[(origin_good_df['hold_time_mean'] < 3000)]
-        # origin_good_df = origin_good_df[(origin_good_df['max_consecutive_loss'] > -10)]
-        # origin_good_df = origin_good_df[(origin_good_df['stability_score'] > 0.5)]
-        # origin_good_df = origin_good_df[(origin_good_df['avg_profit_rate'] > 70)]
-        origin_good_df = origin_good_df[(origin_good_df['net_profit_rate'] > 300)]
-        # good_df = pd.read_csv('temp/final_good.csv')
-
-        # # kai_column和pin_column相同的时候取第一行
-        # origin_good_df = origin_good_df.drop_duplicates(subset=['kai_column', 'pin_column'], keep='first')
-        # good_df = origin_good_df.sort_values(sort_key, ascending=False)
-        # long_good_strategy_df = good_df[good_df['kai_side'] == 'long']
-        # short_good_strategy_df = good_df[good_df['kai_side'] == 'short']
+        # # origin_good_df = choose_good_strategy_debug(inst_id)
+        # # origin_good_df = calculate_final_score(origin_good_df)
+        # # origin_good_df.to_csv(f'temp/{inst_id}_origin_good_op_false.csv', index=False)
+        # origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_false.csv')
+        # # origin_good_df[sort_key] = -origin_good_df[sort_key]
+        # # 删除kai_column和pin_column中包含 macross的行
+        # # origin_good_df = origin_good_df[~origin_good_df['kai_column'].str.contains('abs') & ~origin_good_df['pin_column'].str.contains('macross')]
+        # # origin_good_df['zhen_fu_mean_score'] = -origin_good_df['zhen_profit_mean'] / origin_good_df['fu_profit_mean']
+        # origin_good_df['monthly_trade_std_score'] = origin_good_df['monthly_trade_std'] / origin_good_df['kai_count'] * 22 * origin_good_df['active_month_ratio']
+        # # origin_good_df = origin_good_df[(origin_good_df['monthly_trade_std_score'] < 0.3)]
+        # # origin_good_df = origin_good_df[(origin_good_df['profit_risk_score'] > 1000)]
+        # # origin_good_df = origin_good_df[(origin_good_df['hold_time_mean'] < 3000)]
+        # # origin_good_df = origin_good_df[(origin_good_df['max_consecutive_loss'] > -10)]
+        # # origin_good_df = origin_good_df[(origin_good_df['stability_score'] > 0.5)]
+        # # origin_good_df = origin_good_df[(origin_good_df['avg_profit_rate'] > 70)]
+        # origin_good_df = origin_good_df[(origin_good_df['net_profit_rate'] > 300)]
+        # # good_df = pd.read_csv('temp/final_good.csv')
         #
-        # # 将long_good_strategy_df按照net_profit_rate_mult降序排列
-        # long_good_select_df = select_best_rows_in_ranges(long_good_strategy_df, range_size=range_size,
-        #                                                  sort_key=sort_key, range_key=range_key)
-        # short_good_select_df = select_best_rows_in_ranges(short_good_strategy_df, range_size=range_size,
-        #                                                   sort_key=sort_key, range_key=range_key)
-        # good_df = pd.concat([long_good_select_df, short_good_select_df])
-
-
-        good_df = origin_good_df.sort_values(sort_key, ascending=False)
-        # good_df = good_df.sort_values(by=sort_key, ascending=True)
-        # good_df = good_df.drop_duplicates(subset=['kai_column', 'kai_side'], keep='first')
-
+        # # # kai_column和pin_column相同的时候取第一行
+        # # origin_good_df = origin_good_df.drop_duplicates(subset=['kai_column', 'pin_column'], keep='first')
+        # # good_df = origin_good_df.sort_values(sort_key, ascending=False)
+        # # long_good_strategy_df = good_df[good_df['kai_side'] == 'long']
+        # # short_good_strategy_df = good_df[good_df['kai_side'] == 'short']
+        # #
+        # # # 将long_good_strategy_df按照net_profit_rate_mult降序排列
+        # # long_good_select_df = select_best_rows_in_ranges(long_good_strategy_df, range_size=range_size,
+        # #                                                  sort_key=sort_key, range_key=range_key)
+        # # short_good_select_df = select_best_rows_in_ranges(short_good_strategy_df, range_size=range_size,
+        # #                                                   sort_key=sort_key, range_key=range_key)
+        # # good_df = pd.concat([long_good_select_df, short_good_select_df])
+        #
+        #
+        # good_df = origin_good_df.sort_values(sort_key, ascending=False)
+        # # 重置good_df的索引
+        # good_df = good_df.reset_index(drop=True)
+        # # good_df = good_df.sort_values(by=sort_key, ascending=True)
+        # # good_df = good_df.drop_duplicates(subset=['kai_column', 'kai_side'], keep='first')
+        #
+        # # good_df.to_csv('temp/final_good.csv', index=False)
+        # result, good_df = find_all_valid_groups(good_df, 10)
         # good_df.to_csv('temp/final_good.csv', index=False)
-        # result = find_all_valid_groups(good_df, 30)
         # return
-        # good_df = pd.read_csv(f'temp/{inst_id}_filtered_data.csv')
+
+
+        good_df = pd.read_csv('temp/final_good.csv')
 
 
         is_filter = True
@@ -2453,6 +2545,12 @@ def debug():
             good_df['value_score'] = good_df['kai_value'] + good_df['pin_value']
             good_df['value_score1'] = good_df['kai_value'] * good_df['pin_value']
             good_df['total_chg'] = total_chg
+            # 获取索引为109，876，926的行
+            # row_list = [303, 4144, 3949]
+            # 找到good_df中score字段值在row_list中的行
+            # good_df[good_df['index'].isin([303, 4144, 3949])]
+
+
 
             print(inst_id)
     merged_df, temp_df = merge_dataframes(statistic_df_list)
