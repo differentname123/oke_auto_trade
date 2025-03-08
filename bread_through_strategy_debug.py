@@ -2104,17 +2104,19 @@ def filtering(origin_good_df, target_column, sort_key, threshold):
         filtered_df = pd.DataFrame(columns=origin_good_df.columns)
     return filtered_df
 
-
-def gen_statistic_data(origin_good_df):
+def gen_statistic_data(origin_good_df, threshold=99):
     """
     对原始 DataFrame 进行预处理：
       1. 重置索引并将原始索引保存到一列中；
       2. 对指标字段解析（调用 safe_parse_dict）；
       3. 计算所有行对的相关性（调用 calculate_row_correlation），采用并行化方法；
-      4. 返回记录 row 对相关性的 DataFrame。
+      4. 针对 negative_corr_df 中 Correlation 大于阈值的记录，
+         比较 net_profit_rate，保留 net_profit_rate 较大的那一行，
+         同时更新删除 origin_good_df 中对应的行；
+      5. 返回更新后的 negative_corr_df 和 origin_good_df。
 
-    返回的 DataFrame 包含以下列:
-      'Row1', 'Row2', 'Correlation', 以及其他额外信息列
+    返回的 negative_corr_df 包含以下列：
+      'Row1', 'Row2', 'Correlation', 以及其他额外信息列。
     """
     start_time = time.time()
 
@@ -2126,9 +2128,8 @@ def gen_statistic_data(origin_good_df):
     origin_good_df["monthly_net_profit_detail"] = origin_good_df["monthly_net_profit_detail"].apply(safe_parse_dict)
     origin_good_df["monthly_trade_count_detail"] = origin_good_df["monthly_trade_count_detail"].apply(safe_parse_dict)
     print(f'待计算的数据量：{len(origin_good_df)}')
-    origin_good_df = filtering(origin_good_df, 'kai_count', 'net_profit_rate', 50)
+    origin_good_df = filtering(origin_good_df, 'kai_count', 'net_profit_rate', 90)
     print(f'过滤后的数据量：{len(origin_good_df)}')
-
 
     # 转换为字典列表，保持 DataFrame 内的顺序
     parsed_rows = origin_good_df.to_dict("records")
@@ -2139,7 +2140,7 @@ def gen_statistic_data(origin_good_df):
 
     results = []
     # 使用 ProcessPoolExecutor 并行计算行对相关性
-    with ProcessPoolExecutor(max_workers=25, initializer=init_worker, initargs=(parsed_rows,)) as executor:
+    with ProcessPoolExecutor(max_workers=30, initializer=init_worker, initargs=(parsed_rows,)) as executor:
         for res in executor.map(process_pair, pair_indices, chunksize=1000):
             if res is not None:
                 results.append(res)
@@ -2154,7 +2155,32 @@ def gen_statistic_data(origin_good_df):
         "Row1_avg_profit_rate", "Row2_avg_profit_rate"
     ]
     negative_corr_df = pd.DataFrame(results, columns=columns)
+    negative_corr_df.to_csv('temp/negative_corr.csv', index=False)
+    origin_good_df.to_csv('temp/origin_good.csv', index=False)
     print(f'计算耗时：{time.time() - start_time:.2f} 秒')
+
+    # -------------------------------
+    # 根据阈值 threshold 处理负相关数据及更新原始数据
+    # -------------------------------
+
+    # 1. 标记需要删除的行 —— 对于 negative_corr_df 中 Correlation 大于阈值的记录，
+    #    比较 Row1_net_profit_rate 和 Row2_net_profit_rate，删除净利润较低者
+    indices_to_remove = set()
+    high_corr = negative_corr_df[negative_corr_df['Correlation'] > threshold]
+    for _, row in high_corr.iterrows():
+        if row['Row1_net_profit_rate'] >= row['Row2_net_profit_rate']:
+            remove_idx = row['Row2']
+        else:
+            remove_idx = row['Row1']
+        indices_to_remove.add(remove_idx)
+    print(f'需要删除的行数：{len(indices_to_remove)}')
+    # 2. 更新 origin_good_df：将被标记删除的行移除
+    origin_good_df = origin_good_df[~origin_good_df['index'].isin(indices_to_remove)]
+    origin_good_df = origin_good_df.reset_index(drop=True)
+
+    # 3. 更新 negative_corr_df：删除包含已删除行的记录
+    negative_corr_df = negative_corr_df[~(negative_corr_df['Row1'].isin(indices_to_remove) | negative_corr_df['Row2'].isin(indices_to_remove))]
+
     return negative_corr_df, origin_good_df
 
 
@@ -2290,7 +2316,7 @@ def gen_search_param(inst_id, is_reverse=False):
     return all_task_list, all_columns
 
 
-def find_all_valid_groups(origin_good_df, threshold, sort_key='net_profit_rate'):
+def find_all_valid_groups(origin_good_df, threshold, sort_key='net_profit_rate', min_group_size=3):
     """
     枚举 origin_good_df 处理后的统计数据中所有满足条件的 row 组合，
     使得组合中任意两个 row 的 Correlation 都低于给定阈值。
@@ -2305,83 +2331,129 @@ def find_all_valid_groups(origin_good_df, threshold, sort_key='net_profit_rate')
          avg_corr 为 float，该集合中所有两两关系的平均相关性
       df: 生成统计数据的 DataFrame
     """
-    # df, origin_good_df = gen_statistic_data(origin_good_df)
-    # df.to_csv('temp/df.csv', index=False)
-    # return origin_good_df,origin_good_df
+    df, origin_good_df = gen_statistic_data(origin_good_df)
+    df.to_csv('temp/df.csv', index=False)
+    return origin_good_df,origin_good_df,df
+    total_start = time.time()
 
+    ### 阶段1: 读取数据（优先读取 Parquet 文件）
+    csv_path = 'temp/df.csv'
+    print("[阶段1] 开始读取 CSV 文件...")
+    t_stage = time.time()
+    df = pd.read_csv(csv_path)
+    print(f"[阶段1] CSV 文件读取完成, 总记录数: {df.shape[0]}, 耗时 {time.time() - t_stage:.6f} 秒.")
 
-    df = pd.read_csv('temp/df.csv')
-    # --- 构造相关性字典及图 ---
-    # 构造键：每行的 (Row1, Row2) 作为有序 tuple
-    df["key"] = df.apply(lambda row: tuple(sorted((row["Row1"], row["Row2"]))), axis=1)
+    ### 阶段2: 生成 key 列（利用向量化计算）
+    print("[阶段2] 开始生成 min_vals、max_vals 及 key...")
+    t_stage = time.time()
+    min_vals = df[["Row1", "Row2"]].min(axis=1)
+    max_vals = df[["Row1", "Row2"]].max(axis=1)
+    df["key"] = list(zip(min_vals, max_vals))
+    print(f"[阶段2] 完成 key 生成, 耗时 {time.time() - t_stage:.6f} 秒.")
+
+    ### 阶段3: 构造相关性字典（保留所有记录，用于后续统计）
+    print("[阶段3] 构造相关性字典...")
+    t_stage = time.time()
+    # 为了保证 (a, b) 与 (b, a) 一致，以排序后的 tuple 作为 key
     corr_dict = dict(zip(df["key"], df["Correlation"]))
+    print(f"[阶段3] 完成构造相关性字典, 总记录数: {len(corr_dict)}, 耗时 {time.time() - t_stage:.6f} 秒.")
 
-    # 构建无向图 G: 节点来自所有的 Row1 与 Row2
-    nodes = set(df["Row1"]).union(set(df["Row2"]))
-    G = nx.Graph()
-    G.add_nodes_from(nodes)
-
-    # 根据相关性过滤添加边：对相关性 >= threshold 的行作为边
+    ### 阶段4: 利用阈值过滤边数据，并构造 igraph 图
+    print("[阶段4] 过滤相关性满足条件的边...")
+    t_stage = time.time()
     edge_df = df[df["Correlation"] >= threshold]
-    edges = [tuple(x) for x in edge_df[["Row1", "Row2"]].to_numpy()]
-    G.add_edges_from(edges)
+    print(f"[阶段4] 过滤后边数量: {edge_df.shape[0]}, 耗时 {time.time() - t_stage:.6f} 秒.")
 
-    # 构造补图 Gc, 在补图中的 clique 就对应于原图中的独立集
-    Gc = nx.complement(G)
-    cliques = list(nx.find_cliques(Gc))
-    # 过滤掉长度小于 2 的组合
-    cliques = [clique for clique in cliques if len(clique) >= 2]
+    print("[阶段4] 构建节点集合...")
+    t_stage = time.time()
+    nodes = list(set(df["Row1"]).union(set(df["Row2"])))
+    print(f"[阶段4] 节点集合构建完成, 总节点数: {len(nodes)}, 耗时 {time.time() - t_stage:.6f} 秒.")
 
-    # --- 计算每个 clique 的平均相关性和最小相关性 ---
-    def average_correlation(group):
-        combs = list(itertools.combinations(sorted(group), 2))
+    print("[阶段4] 构造 igraph 图...")
+    t_stage = time.time()
+    node_to_index = {node: idx for idx, node in enumerate(nodes)}
+    # 构造边列表，转换为节点索引对
+    edges_list = [(node_to_index[u], node_to_index[v])
+                  for u, v in edge_df[["Row1", "Row2"]].to_numpy()]
+    g = ig.Graph()
+    g.add_vertices(len(nodes))
+    g.add_edges(edges_list)
+    print(f"[阶段4] igraph 图构建完成, 边数量: {len(edges_list)}, 耗时 {time.time() - t_stage:.6f} 秒.")
+
+    ### 阶段5: 构造补图，并利用 igraph 高效求解 maximal cliques（对应原图独立集）
+    print("[阶段5] 构造补图...")
+    t_stage = time.time()
+    gc = g.complementer()
+    print(f"[阶段5] 补图构造完成, 节点数: {len(gc.vs)}, 边数: {len(gc.es)}, 耗时 {time.time() - t_stage:.6f} 秒.")
+
+    print("[阶段5] 求解满足条件的 maximal cliques (独立集)...")
+    t_stage = time.time()
+    all_cliques = gc.maximal_cliques()
+    cliques_raw = [clique for clique in all_cliques if len(clique) >= min_group_size]
+    print(f"[阶段5] 找到 clique 数量: {len(cliques_raw)}, 耗时 {time.time() - t_stage:.6f} 秒.")
+
+    print("[阶段5] 转换 igraph 顶点索引为节点名称...")
+    t_stage = time.time()
+    cliques = [[nodes[i] for i in clique] for clique in cliques_raw]
+    print(f"[阶段5] 转换完成, 耗时 {time.time() - t_stage:.6f} 秒.")
+
+    ### 阶段6: 依次计算每个 clique 的统计指标（顺序计算，不使用多进程）
+    print("[阶段6] 计算每个 clique 的统计指标 (平均、最小、最大相关性) - 顺序计算...")
+    t_stage = time.time()
+
+    def calc_stats(group):
+        """计算 group 内所有 pair 的相关性统计指标：平均、最小、最大"""
+        group_sorted = sorted(group)
+        combs = list(itertools.combinations(group_sorted, 2))
         if not combs:
-            return 0
-        total = sum(corr_dict.get(pair, 0) for pair in combs)
-        return total / len(combs)
+            return 0, 0, 0
+        # 确保 (a, b) 与 (b, a) 统一，直接对 pair 排序后查找 corr_dict
+        corr_values = [corr_dict.get(tuple(sorted(pair)), 0) for pair in combs]
+        avg_corr = np.mean(corr_values)
+        min_corr = np.min(corr_values)
+        max_corr = np.max(corr_values)
+        return avg_corr, min_corr, max_corr
 
-    def minimum_correlation(group):
-        combs = list(itertools.combinations(sorted(group), 2))
-        if not combs:
-            return 0
-        values = [corr_dict.get(pair, 0) for pair in combs]
-        return min(values)
-    def maximum_correlation(group):
-        combs = list(itertools.combinations(sorted(group), 2))
-        if not combs:
-            return 0
-        values = [corr_dict.get(pair, 0) for pair in combs]
-        return max(values)
+    groups_stats = []
+    for clique in cliques:
+        avg_corr, min_corr, max_corr = calc_stats(clique)
+        groups_stats.append((clique, avg_corr, min_corr, max_corr))
+    print(f"[阶段6] 完成统计指标计算, 处理组合数量: {len(groups_stats)}, 耗时 {time.time() - t_stage:.6f} 秒.")
 
-    groups_with_avg = [(clique, average_correlation(clique)) for clique in cliques]
-    # 排序：先按组合长度降序，再按平均相关性升序
-    groups_with_avg.sort(key=lambda x: (-len(x[0]), x[1]))
+    ### 阶段7: 对组合统计指标进行排序（先按组合大小降序，再按平均相关性升序）
+    print("[阶段7] 排序组合统计指标...")
+    t_stage = time.time()
+    groups_stats.sort(key=lambda x: (-len(x[0]), x[1]))
+    print(f"[阶段7] 排序完成, 耗时 {time.time() - t_stage:.6f} 秒.")
 
-    # --- 建立 sort_key 映射 ---
-    # 假定 origin_good_df 的索引与 G 中节点名称一致
+    ### 阶段8: 构建 sort_key 映射
+    print("[阶段8] 构建 sort_key 映射...")
+    t_stage = time.time()
     sort_key_mapping = {str(k): v for k, v in origin_good_df.set_index("index")[sort_key].to_dict().items()}
+    print(f"[阶段8] 映射构建完成, 总映射键数量: {len(sort_key_mapping)}, 耗时 {time.time() - t_stage:.6f} 秒.")
 
-
-    # --- 组装最终的 DataFrame ---
+    ### 阶段9: 组装最终结果
+    print("[阶段9] 组装最终结果...")
+    t_stage = time.time()
     results = []
-    for group, avg_corr in groups_with_avg:
-        row_len = len(group)
-        # 计算组合中每个 row 对应的 sort_key 值的平均值
-        sort_values = [sort_key_mapping.get(str(r), np.nan) for r in group]
-
+    for clique, avg_corr, min_corr, max_corr in groups_stats:
+        sort_values = [sort_key_mapping.get(str(r), np.nan) for r in clique]
         avg_sort_key_value = np.nanmean(sort_values)
-        min_corr = minimum_correlation(group)
-        max_corr = maximum_correlation(group)
         results.append({
-            "row_list": group,
+            "row_list": clique,
             "avg_corr": avg_corr,
-            "row_len": row_len,
+            "row_len": len(clique),
             "avg_sort_key_value": avg_sort_key_value,
             "min_corr": min_corr,
             "max_corr": max_corr
         })
+    print(f"[阶段9] 组装完成, 最终组合数量: {len(results)}, 耗时 {time.time() - t_stage:.6f} 秒.")
+
     final_df = pd.DataFrame(results)
-    return final_df, origin_good_df
+    total_time = time.time() - total_start
+    print(f"[完成] 所有阶段完成，总耗时 {total_time:.6f} 秒.")
+
+    return final_df, origin_good_df, df
 
 def debug():
     # good_df = pd.read_csv('temp/final_good.csv')
@@ -2428,60 +2500,63 @@ def debug():
 
 
 
-        # # origin_good_df = choose_good_strategy_debug(inst_id)
-        # # origin_good_df = calculate_final_score(origin_good_df)
-        # # origin_good_df.to_csv(f'temp/{inst_id}_origin_good_op_false.csv', index=False)
-        # origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_false_close.csv')
-        # # origin_good_df[sort_key] = -origin_good_df[sort_key]
-        # # 删除kai_column和pin_column中包含 macross的行
-        # # origin_good_df = origin_good_df[~origin_good_df['kai_column'].str.contains('abs') & ~origin_good_df['pin_column'].str.contains('macross')]
-        # # origin_good_df['zhen_fu_mean_score'] = -origin_good_df['zhen_profit_mean'] / origin_good_df['fu_profit_mean']
-        # origin_good_df['monthly_trade_std_score'] = origin_good_df['monthly_trade_std'] / origin_good_df['kai_count'] * 22 * origin_good_df['active_month_ratio']
-        # # origin_good_df = origin_good_df[(origin_good_df['monthly_trade_std_score'] < 0.3)]
-        # # origin_good_df = origin_good_df[(origin_good_df['profit_risk_score'] > 1000)]
-        # # origin_good_df = origin_good_df[(origin_good_df['hold_time_mean'] < 3000)]
-        # # origin_good_df = origin_good_df[(origin_good_df['max_consecutive_loss'] > -10)]
-        # # origin_good_df = origin_good_df[(origin_good_df['stability_score'] > 0.5)]
-        # # origin_good_df = origin_good_df[(origin_good_df['avg_profit_rate'] > 70)]
-        # origin_good_df = origin_good_df[(origin_good_df['net_profit_rate'] > 300)]
-        # # good_df = pd.read_csv('temp/final_good.csv')
-        #
-        # # # kai_column和pin_column相同的时候取第一行
-        # # origin_good_df = origin_good_df.drop_duplicates(subset=['kai_column', 'pin_column'], keep='first')
-        # # good_df = origin_good_df.sort_values(sort_key, ascending=False)
-        # # long_good_strategy_df = good_df[good_df['kai_side'] == 'long']
-        # # short_good_strategy_df = good_df[good_df['kai_side'] == 'short']
-        # #
-        # # # 将long_good_strategy_df按照net_profit_rate_mult降序排列
-        # # long_good_select_df = select_best_rows_in_ranges(long_good_strategy_df, range_size=range_size,
-        # #                                                  sort_key=sort_key, range_key=range_key)
-        # # short_good_select_df = select_best_rows_in_ranges(short_good_strategy_df, range_size=range_size,
-        # #                                                   sort_key=sort_key, range_key=range_key)
-        # # good_df = pd.concat([long_good_select_df, short_good_select_df])
-        #
-        #
+        # origin_good_df = choose_good_strategy_debug(inst_id)
+        # origin_good_df = calculate_final_score(origin_good_df)
+        # origin_good_df.to_csv(f'temp/{inst_id}_origin_good_op_false.csv', index=False)
+        origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_false.csv')
+        # origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_false.csv')
+        # origin_good_df = pd.concat([origin_good_df, origin_good_df1])
+        # origin_good_df[sort_key] = -origin_good_df[sort_key]
+        # 删除kai_column和pin_column中包含 macross的行
+        # origin_good_df = origin_good_df[~origin_good_df['kai_column'].str.contains('abs') & ~origin_good_df['pin_column'].str.contains('macross')]
+        # origin_good_df['zhen_fu_mean_score'] = -origin_good_df['zhen_profit_mean'] / origin_good_df['fu_profit_mean']
+        origin_good_df['monthly_trade_std_score'] = origin_good_df['monthly_trade_std'] / origin_good_df['kai_count'] * 22 * origin_good_df['active_month_ratio']
+        # origin_good_df = origin_good_df[(origin_good_df['monthly_trade_std_score'] < 0.3)]
+        # origin_good_df = origin_good_df[(origin_good_df['profit_risk_score'] > 700)]
+        origin_good_df = origin_good_df[(origin_good_df['hold_time_mean'] < 3000)]
+        # origin_good_df = origin_good_df[(origin_good_df['hold_time_std'] < origin_good_df['hold_time_mean'])]
+        # origin_good_df = origin_good_df[(origin_good_df['max_consecutive_loss'] > -10)]
+        # origin_good_df = origin_good_df[(origin_good_df['stability_score'] > 0)]
+        origin_good_df = origin_good_df[(origin_good_df['avg_profit_rate'] > 50)]
+        origin_good_df = origin_good_df[(origin_good_df['net_profit_rate'] > 300)]
+        # good_df = pd.read_csv('temp/final_good.csv')
+
+
+        # # kai_column和pin_column相同的时候取第一行
+        # origin_good_df = origin_good_df.drop_duplicates(subset=['kai_column', 'pin_column'], keep='first')
         # good_df = origin_good_df.sort_values(sort_key, ascending=False)
-        # # 重置good_df的索引
-        # good_df = good_df.reset_index(drop=True)
-        # # good_df = good_df.sort_values(by=sort_key, ascending=True)
-        # # good_df = good_df.drop_duplicates(subset=['kai_column', 'kai_side'], keep='first')
+        # long_good_strategy_df = good_df[good_df['kai_side'] == 'long']
+        # short_good_strategy_df = good_df[good_df['kai_side'] == 'short']
         #
-        # # good_df.to_csv('temp/final_good.csv', index=False)
-        # result, good_df = find_all_valid_groups(good_df, 30)
+        # # 将long_good_strategy_df按照net_profit_rate_mult降序排列
+        # long_good_select_df = select_best_rows_in_ranges(long_good_strategy_df, range_size=range_size,
+        #                                                  sort_key=sort_key, range_key=range_key)
+        # short_good_select_df = select_best_rows_in_ranges(short_good_strategy_df, range_size=range_size,
+        #                                                   sort_key=sort_key, range_key=range_key)
+        # good_df = pd.concat([long_good_select_df, short_good_select_df])
+
+
+        good_df = origin_good_df.sort_values(sort_key, ascending=False)
+        # 重置good_df的索引
+        good_df = good_df.reset_index(drop=True)
+        # good_df = good_df.sort_values(by=sort_key, ascending=True)
+        # good_df = good_df.drop_duplicates(subset=['kai_column', 'kai_side'], keep='first')
+
         # good_df.to_csv('temp/final_good.csv', index=False)
-        # return
+        result, good_df, df = find_all_valid_groups(good_df, 30)
+        good_df.to_csv('temp/final_good.csv', index=False)
+        return
 
 
         good_df = pd.read_csv('temp/final_good.csv')
-
 
         is_filter = True
         is_detail = False
         file_list = []
         file_list.append(f'kline_data/origin_data_1m_50000_{inst_id}-USDT-SWAP.csv')
         file_list.append(f'kline_data/origin_data_1m_40000_{inst_id}-USDT-SWAP.csv')
-        file_list.append(f'kline_data/origin_data_1m_30000_{inst_id}-USDT-SWAP.csv')
-        file_list.append(f'kline_data/origin_data_1m_20000_{inst_id}-USDT-SWAP.csv')
+        # file_list.append(f'kline_data/origin_data_1m_30000_{inst_id}-USDT-SWAP.csv')
+        # file_list.append(f'kline_data/origin_data_1m_20000_{inst_id}-USDT-SWAP.csv')
         file_list.append(f'kline_data/origin_data_1m_10000_{inst_id}-USDT-SWAP.csv')
         file_list.append(f'kline_data/origin_data_1m_3000_{inst_id}-USDT-SWAP.csv')
         file_list.append(f'kline_data/origin_data_1m_2000_{inst_id}-USDT-SWAP.csv')
@@ -2509,7 +2584,7 @@ def debug():
                 else:
                     is_reverse = row['is_reverse']
                 # long_column = 'ma_1_low_short'
-                # short_column = 'relate_1_1_high_long'
+                # short_column = 'abs_1920_0.5_low_short'
                 kai_data_df, statistic_dict = get_detail_backtest_result_op(22, df, long_column, short_column, signal_cache,
                                                                             is_filter, is_detail, is_reverse)
                 # 为每一行添加统计数据，需要修改到原始数据中
@@ -2554,7 +2629,7 @@ def debug():
             # 找到good_df中score字段值在row_list中的行
             # good_df[good_df['index'].isin([339, 990])]
             # good_df_list[0][good_df_list[0]['index'].isin([339, 990])]
-            # find_all_valid_groups(good_df, 30)
+            result = find_all_valid_groups(good_df, 100)
 
 
 
