@@ -3,6 +3,8 @@
 """
 import itertools
 import math
+from multiprocessing import Pool
+
 import multiprocessing
 import os
 import time
@@ -2055,53 +2057,107 @@ def process_pair(pair):
     return None
 
 
+def process_group(args):
+    """
+    处理一个目标分组：
+      - 根据 group_keys 筛选原始数据；
+      - 根据 sort_key 降序排序；
+      - 遍历排序后的记录，比较每行与已保留记录的相关性；
+      - 相关性高于 threshold 则舍弃该行，否则保留。
+    """
+    group_keys, origin_good_df, target_column, sort_key, threshold = args
+    group_df = origin_good_df[origin_good_df[target_column].isin(group_keys)]
+    start_time = time.time()
+    group_sorted = group_df.sort_values(by=sort_key, ascending=False)
+    keep_rows = []
+
+    for _, row in group_sorted.iterrows():
+        drop_flag = False
+        for kept_row in keep_rows:
+            corr = calculate_row_correlation(row, kept_row)
+            if corr > threshold:
+                drop_flag = True
+                break
+        if not drop_flag:
+            keep_rows.append(row)
+
+    print(f"分组 {group_keys} 处理耗时：{time.time() - start_time:.2f} 秒 原始长度：{len(group_df)} 保留长度：{len(keep_rows)}")
+    if keep_rows:
+        return pd.DataFrame(keep_rows)
+    else:
+        # 返回空 DataFrame，列名与原始 DataFrame 保持一致
+        return pd.DataFrame(columns=origin_good_df.columns)
+
+
 def filtering(origin_good_df, target_column, sort_key, threshold):
     """
-    对 DataFrame 进行预过滤，思路如下：
-      1. 按照 target_column 分组
-      2. 每个分组内部，根据 sort_key 降序排序（更优的记录先保留）
-      3. 每两行计算相关性，如果相关性大于 threshold，则删除 sort_key 较小（即后出现）的行
+    对 DataFrame 进行预过滤，并使用多进程处理每个分组。处理逻辑如下：
+      1. 对 target_column 升序排序，对唯一值进行分组。分组规则：
+         - 相邻 target_column 值与当前组首个值的差值 <= 2；
+         - 并且累计行数不超过 1000 行，累计行数基于各唯一值在原始数据中的出现次数计算。
+         例如：若唯一值为 [55, 56, 57, 58, ...]，且 55 对应 400 行、56 对应 350 行，
+         57 对应 300 行，则 [55, 56] 的累计为 750 行，加入 57 后累计达到 1050 行，超过限制，
+         所以 57 单独起一个新组，即使 57-55 <= 2。
+      2. 对每个分组内部根据 sort_key 降序排序后，依次比较各记录与已保留记录的相关性，
+         若相关性大于 threshold，则该记录将被舍弃。
+      3. 使用多进程（设置进程数为 5）同时处理各分组，提高过滤效率。
 
     参数:
       origin_good_df: pandas.DataFrame，原始数据
-      target_column: str，用于分组的列名
+      target_column: str，用于分组的列名（要求数据为数值类型）
       sort_key: str，用于比较优先级的列名，值较大者优先保留
       threshold: float，相关性阈值，若两行的相关性大于该值，则认为两行高度相关
 
     返回:
       filtered_df: pandas.DataFrame，过滤后保留的记录
     """
-    filtered_groups = []  # 存储每个分组过滤后的 DataFrame
+    # 先按照 target_column 升序排序
+    origin_good_df = origin_good_df.sort_values(by=target_column, ascending=True)
 
-    # 按 target_column 分组
-    for group_value, group_df in origin_good_df.groupby(target_column):
-        # 按 sort_key 降序排序（大值优先）
-        group_sorted = group_df.sort_values(by=sort_key, ascending=False)
-        keep_rows = []  # 用于保存本组中保留的行（记录 Series）
+    # 提取 target_column 的所有唯一值，并保证升序
+    unique_keys = sorted(origin_good_df[target_column].unique())
+    # 获取每个唯一值对应的行数
+    counts = origin_good_df[target_column].value_counts().to_dict()
 
-        # 遍历排序后的每一行
-        for idx, row in group_sorted.iterrows():
-            drop_flag = False
-            # 与已保留的每一行两两比较相关性
-            for kept_row in keep_rows:
-                # 计算两行相关性，排除掉 target_column 和 sort_key 列
-                corr = calculate_row_correlation(row, kept_row)
-                if corr > threshold:
-                    # 若相关性大于阈值，则当前行与已有行高度相关，且当前行的 sort_key 较小（因为排序中的后续行），直接舍弃当前行
-                    drop_flag = True
-                    break
-            if not drop_flag:
-                keep_rows.append(row)
+    # 根据「目标值差值 <= 2」以及累计行数不超过 1000 行的规则进行分组
+    grouped_keys = []  # 存储所有分组，每个分组为一组 target_column 值列表
+    current_group = []
+    current_group_count = 0
 
-        # 将本组的保留行合并为 DataFrame
-        if keep_rows:
-            filtered_groups.append(pd.DataFrame(keep_rows))
+    for key in unique_keys:
+        if not current_group:
+            current_group = [key]
+            current_group_count = counts.get(key, 0)
+        else:
+            # 如果当前 key 与组首的差值不超过 2 且累计行数+当前 key 的行数不超过 1000，则放入同一组
+            if (key - current_group[0] <= 200) and (current_group_count + counts.get(key, 0) <= 1000):
+                current_group.append(key)
+                current_group_count += counts.get(key, 0)
+            else:
+                grouped_keys.append(current_group)
+                current_group = [key]
+                current_group_count = counts.get(key, 0)
 
-    # 合并所有组的过滤结果
+    if current_group:
+        grouped_keys.append(current_group)
+
+    # 为每个分组准备处理时的参数列表
+    pool_input_args = [
+        (group_keys, origin_good_df, target_column, sort_key, threshold)
+        for group_keys in grouped_keys
+    ]
+    print(f"分组数量：{len(pool_input_args)}")
+    # 使用进程数为 5 的多进程池处理各个分组
+    with Pool(processes=10) as pool:
+        results = pool.map(process_group, pool_input_args)
+
+    # 合并所有分组的过滤结果
+    filtered_groups = [df for df in results if not df.empty]
     if filtered_groups:
         filtered_df = pd.concat(filtered_groups, ignore_index=True)
     else:
         filtered_df = pd.DataFrame(columns=origin_good_df.columns)
+
     return filtered_df
 
 def gen_statistic_data(origin_good_df, threshold=99):
@@ -2503,7 +2559,7 @@ def debug():
         # origin_good_df = choose_good_strategy_debug(inst_id)
         # origin_good_df = calculate_final_score(origin_good_df)
         # origin_good_df.to_csv(f'temp/{inst_id}_origin_good_op_false.csv', index=False)
-        origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_false.csv')
+        origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_true_close.csv')
         # origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_false.csv')
         # origin_good_df = pd.concat([origin_good_df, origin_good_df1])
         # origin_good_df[sort_key] = -origin_good_df[sort_key]
@@ -2517,8 +2573,8 @@ def debug():
         # origin_good_df = origin_good_df[(origin_good_df['hold_time_std'] < origin_good_df['hold_time_mean'])]
         # origin_good_df = origin_good_df[(origin_good_df['max_consecutive_loss'] > -10)]
         # origin_good_df = origin_good_df[(origin_good_df['stability_score'] > 0)]
-        origin_good_df = origin_good_df[(origin_good_df['avg_profit_rate'] > 50)]
-        origin_good_df = origin_good_df[(origin_good_df['net_profit_rate'] > 300)]
+        # origin_good_df = origin_good_df[(origin_good_df['avg_profit_rate'] > 100)]
+        origin_good_df = origin_good_df[(origin_good_df['net_profit_rate'] > 200)]
         # good_df = pd.read_csv('temp/final_good.csv')
 
 
