@@ -21,343 +21,538 @@ from scipy.stats import spearmanr
 from sklearn.preprocessing import MinMaxScaler
 import ast
 
-def get_next_threshold_abs(df, col_name):
+def iterative_search(func, base, step, max_range, tol):
+    """
+    在 [base - max_range, base + max_range] 内以步长 step 遍历，寻找使 func(candidate) 接近 0（|f(candidate)| < tol）的 candidate，
+    若找到则返回该 candidate，否则返回 None。
+    """
+    candidates = np.arange(base - max_range, base + max_range + step, step)
+    best_candidate = None
+    best_val = float('inf')
+    for candidate in candidates:
+        val = abs(func(candidate))
+        if val < tol:
+            return candidate
+        if val < best_val:
+            best_val = val
+            best_candidate = candidate
+    return best_candidate if best_val < tol * 10 else None
+
+
+def compute_future_signal(df, col_name):
+    """
+    根据历史行情数据 (df) 和信号名称 (col_name)，计算未来一个周期触发该信号所需的目标价格及比较方向。
+    若上周期未满足前置条件，则返回 (None, None) 表示无效信号。
+
+    参数:
+      df: pandas.DataFrame，至少包含 "close", "high", "low" 列，
+         数据按时间顺序排列（旧数据在前，新数据在后）。
+      col_name: 信号名称字符串，格式为 "signalType_param1_param2_..._direction"，
+                举例: "abs_20_2_long"、"boll_20_2_long"、"macross_12_26_long"、"macd_12_26_9_short"、
+                "rsi_5_30_long"（RSI 设定在超卖 30）或 "cci_5_long"（CCI 长仓默认目标 -100）
+
+    返回:
+      tuple: (target_price, op)
+         - target_price: float，未来周期需要达到/触发信号时的目标价格（四舍五入到小数点后4位）；若前置条件不满足，则为 None
+         - op: str，对于多头信号，op 为 ">"，表示未来价格大于 target_price 时触发信号；
+               对于空头信号，op 为 "<"；若前置条件不满足则返回 (None, None)。
+    """
     parts = col_name.split('_')
+    signal_type = parts[0]
     direction = parts[-1]
-    period = int(parts[1])
-    abs_value = float(parts[2])
 
-    if len(df) < period + 1:
-        return None  # 数据不足，无法计算
+    # ------------------------ abs 信号 ------------------------
+    if signal_type == 'abs':
+        period = int(parts[1])
+        abs_rate = float(parts[2]) / 100.0
 
-    last_high = df['high'].iloc[-1]  # 当前 K 线的最高价
-    last_low = df['low'].iloc[-1]    # 当前 K 线的最低价
+        if len(df) < period + 1:
+            raise ValueError("数据不足，无足够历史数据计算 abs 信号")
 
-    if direction == "long":
-        # 计算过去 period 根 K 线的最低价（不包括当前 K 线）
-        min_low_prev = df['low'].iloc[-(period+1):-1].min()
-        threshold_price = round(min_low_prev * (1 + abs_value / 100), 4)
-
-        # 确保当前 K 线有可能触发信号
-        if last_high < threshold_price:
-            return threshold_price, ">="
+        if direction == "long":
+            min_low = df['low'].iloc[-(period + 1):-1].min()
+            target_price = round(min_low * (1 + abs_rate), 4)
+            return target_price, ">"
         else:
-            return None  # 价格未突破，不会触发信号
+            max_high = df['high'].iloc[-(period + 1):-1].max()
+            target_price = round(max_high * (1 - abs_rate), 4)
+            return target_price, "<"
 
-    elif direction == "short":
-        # 计算过去 period 根 K 线的最高价（不包括当前 K 线）
-        max_high_prev = df['high'].iloc[-(period+1):-1].max()
-        threshold_price = round(max_high_prev * (1 - abs_value / 100), 4)
+    # ------------------------ relate 信号 ------------------------
+    elif signal_type == 'relate':
+        period = int(parts[1])
+        percent = float(parts[2]) / 100.0
 
-        # 确保当前 K 线有可能触发信号
-        if last_low > threshold_price:
-            return threshold_price, "<="
+        if len(df) < period + 1:
+            raise ValueError("数据不足，无足够历史数据计算 relate 信号")
+
+        min_low = df['low'].iloc[-(period + 1):-1].min()
+        max_high = df['high'].iloc[-(period + 1):-1].max()
+
+        if direction == "long":
+            target_price = round(min_low + percent * (max_high - min_low), 4)
+            return target_price, ">"
         else:
-            return None  # 价格未跌破，不会触发信号
+            target_price = round(max_high - percent * (max_high - min_low), 4)
+            return target_price, "<"
 
-    return None  # 方向无效
+    # ------------------------ donchian 信号 ------------------------
+    elif signal_type == 'donchian':
+        period = int(parts[1])
+        if len(df) < period + 1:
+            raise ValueError("数据不足，无足够历史数据计算 donchian 信号")
 
+        if direction == "long":
+            highest_high = df['high'].iloc[-(period + 1):-1].max()
+            target_price = round(highest_high, 4)
+            return target_price, ">"
+        else:
+            lowest_low = df['low'].iloc[-(period + 1):-1].min()
+            target_price = round(lowest_low, 4)
+            return target_price, "<"
 
-def get_next_threshold_relate(df, col_name):
-    parts = col_name.split('_')
-    direction = parts[-1]
-    period = int(parts[1])
-    abs_value = float(parts[2])
+    # ------------------------ boll 信号 ------------------------
+    elif signal_type == 'boll':
+        period = int(parts[1])
+        std_multiplier = float(parts[2])
+        if len(df) < period:
+            raise ValueError("数据不足，无足够历史数据计算 boll 信号")
 
-    last_high = df['high'].iloc[-1]  # 当前 K 线的最高价
-    last_low = df['low'].iloc[-1]    # 当前 K 线的最低价
+        # 计算上周期 Bollinger 带（窗口取倒数 period+1 至倒数第1 行）
+        hist_window = df['close'].iloc[-(period + 1):-1]
+        if len(hist_window) < period:
+            raise ValueError("数据不足，无足够历史数据计算 Bollinger 上周期指标")
+        pre_ma = hist_window.mean()
+        pre_std = hist_window.std(ddof=1)
+        pre_lower = pre_ma - std_multiplier * pre_std
+        pre_upper = pre_ma + std_multiplier * pre_std
 
-    # 检查数据是否足够（由于 shift(1) 后会丢失最新数据，需至少 period+1 行）
-    if df.shape[0] < period + 1:
-        return None
+        # 前置条件检查：多头要求上周期收盘价低于下轨；空头要求上周期收盘价高于上轨
+        if direction == "long":
+            if df['close'].iloc[-2] >= pre_lower:
+                return None, None
+        else:
+            if df['close'].iloc[-2] <= pre_upper:
+                return None, None
 
-    if direction == "long":
-        # 取前一周期数据（所有计算基于 shift(1)）
-        min_low = df['low'].shift(1).rolling(window=period).min().iloc[-1]
-        max_high = df['high'].shift(1).rolling(window=period).max().iloc[-1]
-        target_price = round(min_low + abs_value / 100 * (max_high - min_low), 4)
-        comp = ">"  # 下一周期若 high > target_price 则突破成功
-        if last_high < target_price:
-            return target_price, comp
+        # 模拟未来周期：新的窗口由最近 (period-1) 个收盘价加上未来价格 candidate 组成
+        recent = df['close'].iloc[-(period - 1):]
+        base = df['close'].iloc[-1]
+        step = base * 0.001  # 0.1% 步长
+        max_range = base * 0.1  # 最大 ±10%
+
+        if direction == "long":
+            # 对多头：要求 candidate = new_ma - std_multiplier * new_std
+            def f(x):
+                arr = np.append(recent.values, x)
+                new_ma = arr.mean()
+                new_std = np.std(arr, ddof=1)
+                return x - (new_ma - std_multiplier * new_std)
+
+            candidate = iterative_search(f, base, step, max_range, tol=1e-4)
+            if candidate is None:
+                return None, None
+            return round(candidate, 4), ">"
+        else:
+            # 对空头：要求 candidate = new_ma + std_multiplier * new_std
+            def f(x):
+                arr = np.append(recent.values, x)
+                new_ma = arr.mean()
+                new_std = np.std(arr, ddof=1)
+                return x - (new_ma + std_multiplier * new_std)
+
+            candidate = iterative_search(f, base, step, max_range, tol=1e-4)
+            if candidate is None:
+                return None, None
+            return round(candidate, 4), "<"
+
+    # ------------------------ macross 信号 ------------------------
+    elif signal_type == 'macross':
+        fast_period = int(parts[1])
+        slow_period = int(parts[2])
+        if fast_period >= slow_period:
+            raise ValueError("macross 信号中 fast_period 必须小于 slow_period")
+        if len(df) < slow_period:
+            raise ValueError("数据不足，无足够历史数据计算 macross 信号")
+
+        # 计算上周期的均值
+        fast_ma_prev = df['close'].iloc[-fast_period:].mean()
+        slow_ma_prev = df['close'].iloc[-slow_period:].mean()
+        # 前置条件：多头要求上周期 fast_ma < slow_ma；空头相反
+        if direction == "long":
+            if fast_ma_prev >= slow_ma_prev:
+                return None, None
+        else:
+            if fast_ma_prev <= slow_ma_prev:
+                return None, None
+
+        # 模拟未来周期：新快均线 = (sum(最近 fast_period-1 个数据) + x)/fast_period，
+        # 新慢均线 = (sum(最近 slow_period-1 个数据) + x)/slow_period，
+        # 令两者相等求 x 的闭合解
+        if fast_period > 1:
+            fast_window = df['close'].iloc[-(fast_period - 1):]
+            sum_fast = fast_window.sum()
+        else:
+            sum_fast = 0.0
+        if slow_period > 1:
+            slow_window = df['close'].iloc[-(slow_period - 1):]
+            sum_slow = slow_window.sum()
+        else:
+            sum_slow = 0.0
+        denominator = slow_period - fast_period
+        x = (fast_period * sum_slow - slow_period * sum_fast) / denominator
+        return round(x, 4), ">" if direction == "long" else "<"
+
+    # ------------------------ macd 信号 ------------------------
+    elif signal_type == 'macd':
+        fast_period = int(parts[1])
+        slow_period = int(parts[2])
+        signal_period = int(parts[3])
+        if len(df) < 1:
+            raise ValueError("数据不足，无足够历史数据计算 macd 信号")
+
+        fast_ema = df['close'].ewm(span=fast_period, adjust=False).mean()
+        slow_ema = df['close'].ewm(span=slow_period, adjust=False).mean()
+        macd_line = fast_ema - slow_ema
+        signal_line = macd_line.ewm(span=signal_period, adjust=False).mean()
+        prev_macd = macd_line.iloc[-1]
+        prev_signal = signal_line.iloc[-1]
+
+        # 前置条件：对于多头，要求上周期 MACD < signal；空头相反
+        if direction == "long":
+            if prev_macd >= prev_signal:
+                return None, None
+        else:
+            if prev_macd <= prev_signal:
+                return None, None
+
+        # 根据 EMA 的递推公式模拟未来一周期
+        alpha_fast = 2 / (fast_period + 1)
+        alpha_slow = 2 / (slow_period + 1)
+        A = alpha_fast - alpha_slow
+        B = fast_ema.iloc[-1] * (1 - alpha_fast) - slow_ema.iloc[-1] * (1 - alpha_slow)
+        if A == 0:
+            raise ValueError("macd 参数错误，导致除零")
+        x = (prev_signal - B) / A
+        return round(x, 4), ">" if direction == "long" else "<"
+
+    # ------------------------ rsi 信号 ------------------------
+    elif signal_type == 'rsi':
+        period = int(parts[1])
+        overbought = int(parts[2])
+        oversold = int(parts[3])
+        if len(df) < period + 1:
+            raise ValueError("数据不足，无足够历史数据计算 rsi 信号")
+
+        # 利用最近 period+1 个数据计算上周期 RSI
+        window_prev = df['close'].iloc[-(period + 1):].values
+        diffs = np.diff(window_prev)
+        gains = np.maximum(diffs, 0)
+        losses = -np.minimum(diffs, 0)
+        avg_gain = gains.mean()
+        avg_loss = losses.mean() if losses.mean() != 0 else 1e-6
+        prev_rsi = 100 - 100 / (1 + avg_gain / avg_loss)
+
+        # 前置条件：多头要求上周期 RSI < oversold；空头要求上周期 RSI > overbought
+        if direction == "long":
+            if prev_rsi >= oversold:
+                return None, None
+            # 未来窗口：取最近 period 个收盘价，加上 candidate 作为未来周期数据
+            hist = df['close'].iloc[-period:].values
+            base = df['close'].iloc[-1]
+            step = base * 0.001
+            max_range = base * 0.1
+
+            def f(x):
+                window_new = np.append(hist, x)
+                d = np.diff(window_new)
+                gains_new = np.maximum(d, 0)
+                losses_new = -np.minimum(d, 0)
+                avg_gain_new = gains_new.mean()
+                avg_loss_new = losses_new.mean() if losses_new.mean() != 0 else 1e-6
+                rsi_new = 100 - 100 / (1 + avg_gain_new / avg_loss_new)
+                return rsi_new - oversold
+
+            candidate = iterative_search(f, base, step, max_range, tol=1e-2)
+            if candidate is None:
+                return None, None
+            return round(candidate, 4), ">"
+        else:
+            if prev_rsi <= overbought:
+                return None, None
+            hist = df['close'].iloc[-period:].values
+            base = df['close'].iloc[-1]
+            step = base * 0.001
+            max_range = base * 0.1
+
+            def f(x):
+                window_new = np.append(hist, x)
+                d = np.diff(window_new)
+                gains_new = np.maximum(d, 0)
+                losses_new = -np.minimum(d, 0)
+                avg_gain_new = gains_new.mean()
+                avg_loss_new = losses_new.mean() if losses_new.mean() != 0 else 1e-6
+                rsi_new = 100 - 100 / (1 + avg_gain_new / avg_loss_new)
+                return rsi_new - overbought
+
+            candidate = iterative_search(f, base, step, max_range, tol=1e-2)
+            if candidate is None:
+                return None, None
+            return round(candidate, 4), "<"
+
+    # ------------------------ cci 信号 ------------------------
+    elif signal_type == 'cci':
+        period = int(parts[1])
+        constant = 0.015
+        tp = (df['high'] + df['low'] + df['close']) / 3
+        if len(tp) < period:
+            raise ValueError("数据不足，无足够历史数据计算 cci 信号")
+        hist_window = tp.iloc[-period:]
+        pre_ma = hist_window.mean()
+        pre_md = hist_window.apply(lambda x: abs(x - pre_ma)).mean()
+        pre_cci = (tp.iloc[-1] - pre_ma) / (constant * pre_md) if pre_md != 0 else 0
+
+        # 前置条件：多头要求上周期 CCI < -100；空头要求上周期 CCI > 100
+        if direction == "long":
+            if pre_cci >= -100:
+                return None, None
+            hist_tp = tp.iloc[-(period - 1):].values  # 最近 period-1 个历史典型价格
+            base = df['close'].iloc[-1]  # 以最后收盘价作为基准
+            step = base * 0.001
+            max_range = base * 0.1
+
+            def f(x):
+                # 假设未来周期 high, low, close 均等于 x, 则典型价格即为 x
+                window_new = np.append(hist_tp, x)
+                new_ma = window_new.mean()
+                new_md = np.mean(np.abs(window_new - new_ma))
+                new_cci = (x - new_ma) / (constant * new_md) if new_md != 0 else 0
+                # 希望 new_cci 刚好达到 -100
+                return new_cci + 100
+
+            candidate = iterative_search(f, base, step, max_range, tol=1e-2)
+            if candidate is None:
+                return None, None
+            return round(candidate, 4), ">"
+        else:
+            if pre_cci <= 100:
+                return None, None
+            hist_tp = tp.iloc[-(period - 1):].values
+            base = df['close'].iloc[-1]
+            step = base * 0.001
+            max_range = base * 0.1
+
+            def f(x):
+                window_new = np.append(hist_tp, x)
+                new_ma = window_new.mean()
+                new_md = np.mean(np.abs(window_new - new_ma))
+                new_cci = (x - new_ma) / (constant * new_md) if new_md != 0 else 0
+                return new_cci - 100
+
+            candidate = iterative_search(f, base, step, max_range, tol=1e-2)
+            if candidate is None:
+                return None, None
+            return round(candidate, 4), "<"
+
+    # ------------------------ atr 信号 ------------------------
+    elif signal_type == 'atr':
+        period = int(parts[1])
+        high_low = df['high'] - df['low']
+        high_close = abs(df['high'] - df['close'].shift(1))
+        low_close = abs(df['low'] - df['close'].shift(1))
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        atr = tr.rolling(period).mean()
+        atr_ma = atr.rolling(period).mean()
+        if direction == "long":
+            if atr.iloc[-2] >= atr_ma.iloc[-2]:
+                return None, None
+        else:
+            if atr.iloc[-2] <= atr_ma.iloc[-2]:
+                return None, None
+        target_price = round(df['close'].iloc[-1], 4)
+        return target_price, ">" if direction == "long" else "<"
+
     else:
-        max_high = df['high'].shift(1).rolling(window=period).max().iloc[-1]
-        min_low = df['low'].shift(1).rolling(window=period).min().iloc[-1]
-        target_price = round(max_high - abs_value / 100 * (max_high - min_low), 4)
-        comp = "<"  # 下一周期若 low < target_price 则突破成功
-        if last_low > target_price:
-            return target_price, comp
-    return None
-
-def get_next_threshold_rsi(df, col_name):
-    parts = col_name.split('_')
-    direction = parts[-1]
-    period = int(parts[1])
-    overbought = int(parts[2])
-    oversold = int(parts[3])
-
-    if len(df) < period + 1:
-        return None
-
-    # 计算价格变化
-    delta = df['close'].diff(1).astype(np.float64)
-
-    # 获取最近 `period` 个数据
-    diffs = delta.iloc[-period:]
-
-    if diffs.isnull().any():
-        return None
-
-    # 计算涨跌幅
-    gains = diffs.clip(lower=0)
-    losses = -diffs.clip(upper=0)
-
-    S_gain = gains.sum()
-    S_loss = losses.sum()
-
-    # 如果 S_loss 为 0，避免除零错误
-    if S_loss == 0:
-        rs = float('inf')
-    else:
-        rs = S_gain / S_loss
-
-    rsi = 100 - (100 / (1 + rs))
-
-    # 获取最后的 RSI 值
-    df.loc[df.index[-1], 'rsi'] = rsi
-    last_rsi = df['rsi'].iloc[-1]
-
-    # 获取最新收盘价
-    C_last = df['close'].iloc[-1]
-
-    # 计算门槛价格
-    d0 = diffs.iloc[0]
-    g0 = max(d0, 0)
-    l0 = -min(d0, 0)
-
-    if direction == "short":
-        OS = oversold
-        threshold_price = C_last + (OS / (100 - OS)) * (S_loss - l0) - (S_gain - g0)
-        if last_rsi < OS:
-            return threshold_price, ">"
-    elif direction == "long":
-        OB = overbought
-        threshold_price = C_last - ((S_gain - g0) * ((100 - OB) / OB) - (S_loss - l0))
-        if last_rsi > OB:
-            return threshold_price, "<"
-
-    return None
+        raise ValueError(f"未知信号类型: {signal_type}")
 
 def compute_signal(df, col_name):
     """
-    计算给定信号名称对应的信号及其价格序列（均保留原始 float 精度）
+    根据历史行情数据(df)和指定信号名称(col_name)，生成交易信号和对应目标价格。
+
+    当前支持的信号类型包括：
+      - abs: 绝对百分比突破信号
+          示例："abs_20_2_long" (20周期内最低价向上2%多头突破)
+      - relate: 相对区间百分比突破信号
+          示例："relate_20_50_short" (20周期区间顶部向下50%空头突破)
+      - donchian: 唐奇安通道突破信号（实时价格触发优化）
+          示例："donchian_20_long" (20周期最高价向上突破多头信号)
+      - macd: MACD交叉信号
+          示例："macd_12_26_9_long" (MACD经典参数多头交叉)
+      - cci: 商品通道指数超买超卖反转信号
+          示例："cci_20_short" (20周期CCI从超买回落空头信号)
+      - atr: ATR波动率突破信号
+          示例："atr_14_long" (14周期ATR值上穿其移动均线，波动增加多头信号)
+
+    参数:
+      df: pandas.DataFrame，必须包含这些列：
+          "close": 收盘价
+          "high": 最高价
+          "low": 最低价
+      col_name: 信号名称，格式如 "signalType_param1_param2_..._direction"
+
+    返回:
+      tuple:
+        - signal_series: pandas.Series(bool), 发生信号时为True
+        - trade_price_series: pandas.Series(float), 信号触发时推荐执行的交易价格
     """
+
     parts = col_name.split('_')
-    period = int(parts[1])
     signal_type = parts[0]
-    direction = parts[-1]  # "long" 或 "short"
+    direction = parts[-1]
 
-    if signal_type == 'peak':
-        if direction == "long":
-            price_series = df['high'].shift(1).rolling(window=period).max()
-            signal_series = df['high'] > price_series
-        else:
-            price_series = df['low'].shift(1).rolling(window=period).min()
-            signal_series = df['low'] < price_series
-        # 可选：对价格保留4位小数
-        price_series = price_series.round(4)
-        return signal_series, price_series
-
-    elif signal_type == 'continue':
-        if direction == "long":
-            condition = df['chg'] > 0
-        else:
-            condition = df['chg'] < 0
-        rolling_sum = condition.rolling(window=period).sum()
-        valid_count = df['chg'].rolling(window=period).count()
-        signal_series = (rolling_sum == period) & (valid_count == period)
-        price_series = df['close']
-        return signal_series, price_series
-
-    elif signal_type == 'abs':
-        abs_value = float(parts[2])
-        if direction == "long":
-            min_low_series = df['low'].shift(1).rolling(window=period).min()
-            target_price = min_low_series * (1 + abs_value / 100)
-            target_price = target_price.round(4)
-            signal_series = (df['high'].shift(1) <= target_price) & (df['high'] > target_price)
-            return signal_series, target_price
-        else:
-            max_high_series = df['high'].shift(1).rolling(window=period).max()
-            target_price = max_high_series * (1 - abs_value / 100)
-            target_price = target_price.round(4)
-            signal_series = (df['low'].shift(1) >= target_price) & (df['low'] < target_price)
-            return signal_series, target_price
-
-    elif signal_type == 'ma':
-        moving_avg = df['close'].shift(1).rolling(window=period).mean()
-        moving_avg = moving_avg.round(4)
-        if direction == "long":
-            signal_series = (df['high'].shift(1) <= moving_avg) & (df['high'] > moving_avg)
-        else:
-            signal_series = (df['low'].shift(1) >= moving_avg) & (df['low'] < moving_avg)
-        return signal_series, moving_avg
-
-    elif signal_type == 'macross':
-        fast_period = int(parts[1])
-        slow_period = int(parts[2])
-        fast_ma = df['close'].rolling(window=fast_period).mean().shift(1)
-        slow_ma = df['close'].rolling(window=slow_period).mean().shift(1)
-        fast_ma = fast_ma.round(4)
-        slow_ma = slow_ma.round(4)
-        if direction == "long":
-            signal_series = (fast_ma.shift(1) <= slow_ma.shift(1)) & (fast_ma > slow_ma)
-        else:
-            signal_series = (fast_ma.shift(1) >= slow_ma.shift(1)) & (fast_ma < slow_ma)
-        # 直接返回 close 价格作为交易价格
-        return signal_series, df['close']
-
-    elif signal_type == 'rsi':
+    if signal_type == 'abs':
         period = int(parts[1])
-        overbought = int(parts[2])
-        oversold = int(parts[3])
-        delta = df['close'].diff(1).astype(np.float32)
-        gain = delta.clip(lower=0)
-        loss = -delta.clip(upper=0)
-        avg_gain = gain.rolling(window=period).mean()
-        avg_loss = loss.rolling(window=period).mean()
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
+        abs_value = float(parts[2]) / 100
         if direction == "long":
-            signal_series = (rsi.shift(1) > overbought) & (rsi <= overbought)
+            min_low_series = df['low'].shift(1).rolling(period).min()
+            target_price = (min_low_series * (1 + abs_value)).round(4)
+            signal_series = df['high'] > target_price
         else:
-            signal_series = (rsi.shift(1) < oversold) & (rsi >= oversold)
-        return signal_series, df['close']
+            max_high_series = df['high'].shift(1).rolling(period).max()
+            target_price = (max_high_series * (1 - abs_value)).round(4)
+            signal_series = df['low'] < target_price
+        return signal_series, target_price
 
     elif signal_type == 'relate':
-        abs_value = float(parts[2])
+        period = int(parts[1])
+        percent = float(parts[2]) / 100
+        min_low_series = df['low'].shift(1).rolling(period).min()
+        max_high_series = df['high'].shift(1).rolling(period).max()
         if direction == "long":
-            min_low_series = df['low'].shift(1).rolling(window=period).min()
-            max_high_series = df['high'].shift(1).rolling(window=period).max()
-            target_price = min_low_series + abs_value / 100 * (max_high_series - min_low_series)
-            target_price = target_price.round(4)
-            signal_series = (df['high'].shift(1) <= target_price) & (df['high'] > target_price)
-            return signal_series, target_price
+            target_price = (min_low_series + percent * (max_high_series - min_low_series)).round(4)
+            signal_series = df['high'] > target_price
         else:
-            max_high_series = df['high'].shift(1).rolling(window=period).max()
-            min_low_series = df['low'].shift(1).rolling(window=period).min()
-            target_price = max_high_series - abs_value / 100 * (max_high_series - min_low_series)
-            target_price = target_price.round(4)
-            signal_series = (df['low'].shift(1) >= target_price) & (df['low'] < target_price)
-            return signal_series, target_price
+            target_price = (max_high_series - percent * (max_high_series - min_low_series)).round(4)
+            signal_series = df['low'] < target_price
+        return signal_series, target_price
 
-    else:
-        raise ValueError(f"未知的信号类型: {signal_type}")
-
-def compute_signal_old(df, col_name):
-    """
-    计算给定信号名称对应的信号及其价格序列（均保留原始 float 精度）
-    """
-    parts = col_name.split('_')
-    period = int(parts[1])
-    signal_type = parts[0]
-    direction = parts[-1]  # "long" 或 "short"
-
-    if signal_type == 'peak':
+    elif signal_type == 'donchian':
+        period = int(parts[1])
         if direction == "long":
-            price_series = df['high'].shift(1).rolling(window=period).max()
-            signal_series = df['high'] > price_series
+            highest_high = df['high'].shift(1).rolling(period).max()
+            # 实时价格优化：以high实时触发信号，触发后立即以突破位价格买入
+            signal_series = df['high'] > highest_high
+            trade_price_series = highest_high
         else:
-            price_series = df['low'].shift(1).rolling(window=period).min()
-            signal_series = df['low'] < price_series
-        # 可选：对价格保留4位小数
-        price_series = price_series.round(4)
-        return signal_series, price_series
+            lowest_low = df['low'].shift(1).rolling(period).min()
+            signal_series = df['low'] < lowest_low
+            trade_price_series = lowest_low
+        return signal_series, trade_price_series.round(4)
 
-    elif signal_type == 'continue':
-        if direction == "long":
-            condition = df['chg'] > 0
-        else:
-            condition = df['chg'] < 0
-        rolling_sum = condition.rolling(window=period).sum()
-        valid_count = df['chg'].rolling(window=period).count()
-        signal_series = (rolling_sum == period) & (valid_count == period)
-        price_series = df['close']
-        return signal_series, price_series
 
-    elif signal_type == 'abs':
-        abs_value = float(parts[2])
+    elif signal_type == 'boll':
+        period = int(parts[1])
+        std_multiplier = float(parts[2])
+        ma = df['close'].rolling(window=period, min_periods=period).mean()
+        std_dev = df['close'].rolling(window=period, min_periods=period).std()
+        upper_band = (ma + std_multiplier * std_dev).round(4)
+        lower_band = (ma - std_multiplier * std_dev).round(4)
         if direction == "long":
-            min_low_series = df['low'].shift(1).rolling(window=period).min()
-            target_price = min_low_series * (1 + abs_value / 100)
-            target_price = target_price.round(4)
-            signal_series = (df['close'].shift(1) <= target_price) & (df['high'] > target_price)
-            return signal_series, target_price
-        else:
-            max_high_series = df['high'].shift(1).rolling(window=period).max()
-            target_price = max_high_series * (1 - abs_value / 100)
-            target_price = target_price.round(4)
-            signal_series = (df['close'].shift(1) >= target_price) & (df['low'] < target_price)
-            return signal_series, target_price
-
-    elif signal_type == 'ma':
-        moving_avg = df['close'].shift(1).rolling(window=period).mean()
-        moving_avg = moving_avg.round(4)
-        if direction == "long":
-            signal_series = (df['close'].shift(1) <= moving_avg) & (df['high'] > moving_avg)
-        else:
-            signal_series = (df['close'].shift(1) >= moving_avg) & (df['low'] < moving_avg)
-        return signal_series, moving_avg
+            signal_series = (df['close'].shift(1) < lower_band.shift(1)) & (df['close'] >= lower_band)
+        else:  # short
+            signal_series = (df['close'].shift(1) > upper_band.shift(1)) & (df['close'] <= upper_band)
+        return signal_series, df["close"]
 
     elif signal_type == 'macross':
+        # MACROSS 信号 (双均线交叉信号):
         fast_period = int(parts[1])
         slow_period = int(parts[2])
-        fast_ma = df['close'].rolling(window=fast_period).mean().shift(1)
-        slow_ma = df['close'].rolling(window=slow_period).mean().shift(1)
-        fast_ma = fast_ma.round(4)
-        slow_ma = slow_ma.round(4)
+
+        # 分别计算当前周期的快慢均线
+        fast_ma = df["close"].rolling(window=fast_period, min_periods=fast_period).mean().round(4)
+        slow_ma = df["close"].rolling(window=slow_period, min_periods=slow_period).mean().round(4)
+
         if direction == "long":
-            signal_series = (fast_ma.shift(1) <= slow_ma.shift(1)) & (fast_ma > slow_ma)
-        else:
-            signal_series = (fast_ma.shift(1) >= slow_ma.shift(1)) & (fast_ma < slow_ma)
-        # 直接返回 close 价格作为交易价格
-        return signal_series, df['close']
+            # 多头信号：黄金交叉
+            # 上一周期快均线在慢均线下方，当前周期快均线在慢均线上方
+            signal_series = (fast_ma.shift(1) < slow_ma.shift(1)) & (fast_ma >= slow_ma)
+        else:  # direction == "short"
+            # 空头信号：死亡交叉
+            # 上一周期快均线在慢均线上方，当前周期快均线在慢均线下方
+            signal_series = (fast_ma.shift(1) > slow_ma.shift(1)) & (fast_ma <= slow_ma)
+
+        trade_price = df["close"]  # 交易价格使用当前周期收盘价
+        return signal_series, trade_price
+
 
     elif signal_type == 'rsi':
+        # RSI 信号 (RSI 超买超卖反转信号):
         period = int(parts[1])
-        overbought = int(parts[2])
-        oversold = int(parts[3])
-        delta = df['close'].diff(1).astype(np.float32)
-        gain = delta.clip(lower=0)
-        loss = -delta.clip(upper=0)
-        avg_gain = gain.rolling(window=period).mean()
-        avg_loss = loss.rolling(window=period).mean()
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
+        overbought = int(parts[2])  # 超买线
+        oversold = int(parts[3])  # 超卖线
+
+        # 计算 RSI
+        delta = df['close'].diff(1).astype(np.float32)  # 价格变化
+        gain = delta.clip(lower=0)  # 上涨部分
+        loss = -delta.clip(upper=0)  # 下跌部分
+        avg_gain = gain.rolling(window=period, min_periods=period).mean()  # 平均上涨
+        avg_loss = loss.rolling(window=period, min_periods=period).mean()  # 平均下跌
+        rs = avg_gain / avg_loss  # 相对强度
+        rsi = 100 - (100 / (1 + rs))  # RSI 值
+
         if direction == "long":
-            signal_series = (rsi.shift(1) > overbought) & (rsi <= overbought)
-        else:
+            # 多头信号：RSI 从超卖区反转向上
+            # 上一周期 RSI 低于超卖线，当前周期 RSI 上穿超卖线
             signal_series = (rsi.shift(1) < oversold) & (rsi >= oversold)
+        else:  # direction == "short"
+            # 空头信号：RSI 从超买区反转向下
+            # 上一周期 RSI 高于超买线，当前周期 RSI 下穿超买线
+            signal_series = (rsi.shift(1) > overbought) & (rsi <= overbought)
+
+        return signal_series, df['close']  # 价格序列使用收盘价
+
+    elif signal_type == 'macd':
+        fast_period, slow_period, signal_period = map(int, parts[1:4])
+        fast_ema = df['close'].ewm(span=fast_period, adjust=False).mean()
+        slow_ema = df['close'].ewm(span=slow_period, adjust=False).mean()
+        macd_line = fast_ema - slow_ema
+        signal_line = macd_line.ewm(span=signal_period, adjust=False).mean()
+        if direction == "long":
+            signal_series = (macd_line.shift(1) < signal_line.shift(1)) & (macd_line >= signal_line)
+        else:
+            signal_series = (macd_line.shift(1) > signal_line.shift(1)) & (macd_line <= signal_line)
+        return signal_series, df["close"]
+
+    elif signal_type == 'cci':
+        period = int(parts[1])
+        constant = float(parts[2]) / 100
+        tp = (df['high'] + df['low'] + df['close']) / 3
+        ma = tp.rolling(period).mean()
+        md = tp.rolling(period).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+        cci = (tp - ma) / (constant * md)
+        if direction == "long":
+            signal_series = (cci.shift(1) < -100) & (cci >= -100)
+        else:
+            signal_series = (cci.shift(1) > 100) & (cci <= 100)
         return signal_series, df['close']
 
-    elif signal_type == 'relate':
-        abs_value = float(parts[2])
+    elif signal_type == 'atr':
+        period = int(parts[1])
+        tr = pd.concat([
+            df['high'] - df['low'],
+            abs(df['high'] - df['close'].shift(1)),
+            abs(df['low'] - df['close'].shift(1))
+        ], axis=1).max(axis=1)
+        atr = tr.rolling(period).mean()
+        atr_ma = atr.rolling(period).mean()
         if direction == "long":
-            min_low_series = df['low'].shift(1).rolling(window=period).min()
-            max_high_series = df['high'].shift(1).rolling(window=period).max()
-            target_price = min_low_series + abs_value / 100 * (max_high_series - min_low_series)
-            target_price = target_price.round(4)
-            signal_series = (df['close'].shift(1) <= target_price) & (df['high'] > target_price)
-            return signal_series, target_price
+            signal_series = (atr.shift(1) < atr_ma.shift(1)) & (atr >= atr_ma)
         else:
-            max_high_series = df['high'].shift(1).rolling(window=period).max()
-            min_low_series = df['low'].shift(1).rolling(window=period).min()
-            target_price = max_high_series - abs_value / 100 * (max_high_series - min_low_series)
-            target_price = target_price.round(4)
-            signal_series = (df['close'].shift(1) >= target_price) & (df['low'] < target_price)
-            return signal_series, target_price
+            signal_series = (atr.shift(1) > atr_ma.shift(1)) & (atr <= atr_ma)
+        return signal_series, df['close']
 
     else:
-        raise ValueError(f"未知的信号类型: {signal_type}")
+        raise ValueError(f"未知信号类型: {signal_type}")
 
 
 def calculate_max_sequence(kai_data_df):
@@ -1582,7 +1777,7 @@ def choose_good_strategy_debug(inst_id='BTC'):
     # count_L()
     # 找到temp下面所有包含False的文件
     file_list = os.listdir('temp')
-    file_list = [file for file in file_list if 'True' in file and inst_id in file and '_is_filter-True_is_reverse-Falsepart' in file and 'close' not in file]
+    file_list = [file for file in file_list if 'True' in file and inst_id in file and 'peak_1_10_3_continue_1_20_1_ma_1_100_20_relate_1_200_9_1_10_3_macross_1_10_5_1_10_5_abs_1_200_5_1_40_2_rsi_1_100_10_' in file and 'close' not in file]
     # file_list = file_list[0:1]
     df_list = []
     df_map = {}
@@ -1617,11 +1812,11 @@ def choose_good_strategy_debug(inst_id='BTC'):
         # df = df[~(df['kai_column'].str.contains('abs')) & ~(df['pin_column'].str.contains('abs'))]
 
         # df = df[(df['true_profit_std'] < 10)]
-        df = df[(df['max_consecutive_loss'] > -20)]
+        # df = df[(df['max_consecutive_loss'] > -20)]
         # df = df[(df['pin_side'] != df['kai_side'])]
         # df = df[(df['profit_risk_score_pure'] > 1)]
         df = df[(df['net_profit_rate'] > 50)]
-        # df = df[(df['avg_profit_rate'] > 10)]
+        df = df[(df['avg_profit_rate'] > 10)]
 
         # df = df[(df['monthly_net_profit_std'] < 10)]
         # df = df[(df['same_count_rate'] < 1)]
@@ -2556,9 +2751,9 @@ def debug():
 
 
 
-        # origin_good_df = choose_good_strategy_debug(inst_id)
-        # origin_good_df = calculate_final_score(origin_good_df)
-        # origin_good_df.to_csv(f'temp/{inst_id}_origin_good_op_false.csv', index=False)
+        origin_good_df = choose_good_strategy_debug(inst_id)
+        origin_good_df = calculate_final_score(origin_good_df)
+        origin_good_df.to_csv(f'temp/{inst_id}_origin_good_op_all.csv', index=False)
         origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_true_close.csv')
         # origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_false.csv')
         # origin_good_df = pd.concat([origin_good_df, origin_good_df1])
