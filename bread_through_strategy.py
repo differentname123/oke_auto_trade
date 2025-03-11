@@ -378,28 +378,33 @@ def compute_signal(df, col_name):
     """
     根据历史行情数据(df)和指定信号名称(col_name)，生成交易信号和对应目标价格。
 
-    当前支持的信号类型包括：
-      - abs: 绝对百分比突破信号
-          示例："abs_20_2_long" (20周期内最低价向上2%多头突破)
-      - relate: 相对区间百分比突破信号
-          示例："relate_20_50_short" (20周期区间顶部向下50%空头突破)
-      - donchian: 唐奇安通道突破信号（实时价格触发优化）
-          示例："donchian_20_long" (20周期最高价向上突破多头信号)
-      - boll: 布林带信号
-          示例："boll_20_2_long" 或 "boll_20_2_short"
-      - macross: MACROSS 信号 (双均线交叉信号)
-          示例："macross_10_20_long"
-      - rsi: RSI 超买超卖反转信号
-          示例："rsi_14_70_30_long"
-      - macd: MACD交叉信号
-          示例："macd_12_26_9_long"
-      - cci: 商品通道指数超买超卖反转信号
-          示例："cci_20_short"
-      - atr: ATR波动率突破信号
-          示例："atr_14_long"
+    说明：
+      - 信号的目标价格不再使用 clip() 调整，
+        而是在判断目标价格是否落在当前bar的 low 和 high 区间内，
+        若目标价格超出区间，则认为信号无效（不产生信号）。
+      - 当前支持的信号类型包括：
+          - abs: 绝对百分比突破信号
+              示例："abs_20_2_long" (20周期内最低价向上2%多头突破)
+          - relate: 相对区间百分比突破信号
+              示例："relate_20_50_short" (20周期区间顶部向下50%空头突破)
+          - donchian: 唐奇安通道突破信号（实时价格触发优化）
+              示例："donchian_20_long" (20周期最高价向上突破多头信号)
+          - boll: 布林带信号
+              示例："boll_20_2_long" 或 "boll_20_2_short"
+          - macross: MACROSS 信号 (双均线交叉信号)
+              示例："macross_10_20_long"
+          - rsi: RSI 超买超卖反转信号
+              示例："rsi_14_70_30_long"
+          - macd: MACD交叉信号
+              示例："macd_12_26_9_long"
+          - cci: 商品通道指数超买超卖反转信号
+              示例："cci_20_short"
+              （若传入参数不足，则采用默认常数0.015）
+          - atr: ATR波动率突破信号
+              示例："atr_14_long"
 
     参数:
-      df: pandas.DataFrame，必须包含这些列：
+      df: pandas.DataFrame，必须包含以下列：
           "close": 收盘价
           "high": 最高价
           "low": 最低价
@@ -407,9 +412,9 @@ def compute_signal(df, col_name):
 
     返回:
       tuple:
-        - signal_series: pandas.Series(bool), 当满足信号条件时置为 True
-        - trade_price_series: pandas.Series(float), 信号触发时推荐执行的交易价格，
-          此价格经过剪裁，确保一定处于当前 bar 的 low 和 high 之间。
+        - signal_series: pandas.Series(bool)，当满足信号条件时为 True，否则为 False。
+        - trade_price_series: pandas.Series(float)，信号触发时建议的目标交易价格；
+          若目标价格超出当前bar的 low 和 high，则不产生信号。
     """
 
     parts = col_name.split('_')
@@ -427,8 +432,16 @@ def compute_signal(df, col_name):
             max_high_series = df['high'].shift(1).rolling(period).max()
             target_price = (max_high_series * (1 - abs_value)).round(4)
             signal_series = df['low'] < target_price
-        # 确保返回的价格位于当前 bar 的 low 与 high 之间
-        trade_price_series = target_price.clip(lower=df['low'], upper=df['high'])
+
+        # 检查目标价格是否落在当前bar的low与high之间
+        valid_price = (target_price >= df['low']) & (target_price <= df['high'])
+        signal_series = signal_series & valid_price
+        trade_price_series = target_price  # 直接使用计算的目标价格
+
+        # 可选调试记录
+        df['target_price'] = target_price
+        df['signal_series'] = signal_series
+        df['trade_price_series'] = trade_price_series
         return signal_series, trade_price_series
 
     elif signal_type == 'relate':
@@ -442,7 +455,10 @@ def compute_signal(df, col_name):
         else:
             target_price = (max_high_series - percent * (max_high_series - min_low_series)).round(4)
             signal_series = df['low'] < target_price
-        trade_price_series = target_price.clip(lower=df['low'], upper=df['high'])
+
+        valid_price = (target_price >= df['low']) & (target_price <= df['high'])
+        signal_series = signal_series & valid_price
+        trade_price_series = target_price
         return signal_series, trade_price_series
 
     elif signal_type == 'donchian':
@@ -455,7 +471,10 @@ def compute_signal(df, col_name):
             lowest_low = df['low'].shift(1).rolling(period).min()
             signal_series = df['low'] < lowest_low
             target_price = lowest_low
-        trade_price_series = target_price.clip(lower=df['low'], upper=df['high']).round(4)
+
+        valid_price = (target_price >= df['low']) & (target_price <= df['high'])
+        signal_series = signal_series & valid_price
+        trade_price_series = target_price.round(4)
         return signal_series, trade_price_series
 
     elif signal_type == 'boll':
@@ -469,7 +488,7 @@ def compute_signal(df, col_name):
             signal_series = (df['close'].shift(1) < lower_band.shift(1)) & (df['close'] >= lower_band)
         else:  # short
             signal_series = (df['close'].shift(1) > upper_band.shift(1)) & (df['close'] <= upper_band)
-        # 这里交易价格使用收盘价；通常close位于low和high之间
+        # 此处直接返回收盘价作为交易价格
         return signal_series, df["close"]
 
     elif signal_type == 'macross':
@@ -493,7 +512,8 @@ def compute_signal(df, col_name):
         loss = -delta.clip(upper=0)
         avg_gain = gain.rolling(window=period, min_periods=period).mean()
         avg_loss = loss.rolling(window=period, min_periods=period).mean()
-        rs = avg_gain / avg_loss
+        # 防止除0错误
+        rs = avg_gain / (avg_loss.replace(0, np.nan))
         rsi = 100 - (100 / (1 + rs))
         if direction == "long":
             signal_series = (rsi.shift(1) < oversold) & (rsi >= oversold)
@@ -515,7 +535,11 @@ def compute_signal(df, col_name):
 
     elif signal_type == 'cci':
         period = int(parts[1])
-        constant = float(parts[2]) / 100
+        # 若参数不足，采用默认常数0.015
+        if len(parts) == 3:
+            constant = 0.015
+        else:
+            constant = float(parts[2]) / 100
         tp = (df['high'] + df['low'] + df['close']) / 3
         ma = tp.rolling(period).mean()
         md = tp.rolling(period).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
@@ -681,7 +705,16 @@ def optimize_parameters(df, tp_range=None, sl_range=None):
         'min_optimal_loss_rate': best_sl_loss_rate
     }
 
-
+def op_signal(df, sig):
+    s, p = compute_signal(df, sig)
+    s_np = s.to_numpy(copy=False) if hasattr(s, "to_numpy") else np.asarray(s)
+    p_np = p.to_numpy(copy=False) if hasattr(p, "to_numpy") else np.asarray(p)
+    if p_np.dtype == np.float64:
+        p_np = p_np.astype(np.float32)
+    indices = np.nonzero(s_np)[0]
+    if indices.size < 100:
+        return None
+    return (indices.astype(np.int32), p_np[indices])
 
 def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is_detail=False, is_reverse=False):
     """
@@ -705,7 +738,8 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         kai_idx, kai_prices = GLOBAL_SIGNALS[kai_column]
         pin_idx, pin_prices = GLOBAL_SIGNALS[pin_column]
     except KeyError:
-        return None, None
+        kai_idx, kai_prices = op_signal(df, kai_column)
+        pin_idx, pin_prices = op_signal(df, pin_column)
 
     # 如果信号数量较少，则直接返回
     if kai_idx.size < 100 or pin_idx.size < 100:
@@ -752,36 +786,6 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     else:
         is_long = "long" in kai_column.lower()
 
-    # 若要求详细计算，用已缓存的 NumPy 数组及向量化操作计算区间最低和最高价格，进而计算收益率区间
-    if is_detail:
-        df_index_arr = np.asarray(df.index)
-        low_array = df["low"].values
-        high_array = df["high"].values
-
-        start_times = np.asarray(kai_data_df.index)
-        end_times = np.asarray(matched_pin.index)
-        start_pos = np.searchsorted(df_index_arr, start_times, side="left")
-        end_pos = np.searchsorted(df_index_arr, end_times, side="right") - 1
-
-        low_min_arr = compute_low_min_range(low_array, start_pos, end_pos)
-        high_max_arr = compute_high_max_range(high_array, start_pos, end_pos)
-        kai_data_df["low_min"] = low_min_arr
-        kai_data_df["high_max"] = high_max_arr
-
-        if is_long:
-            kai_data_df["max_true_profit"] = (
-                    ((kai_data_df["high_max"] - kai_data_df["kai_price"]) / kai_data_df["kai_price"] * 100) - 0.07
-            ).round(4)
-            kai_data_df["min_true_profit"] = (
-                    ((kai_data_df["low_min"] - kai_data_df["kai_price"]) / kai_data_df["kai_price"] * 100) - 0.07
-            ).round(4)
-        else:
-            kai_data_df["max_true_profit"] = (
-                    ((kai_data_df["kai_price"] - kai_data_df["low_min"]) / kai_data_df["kai_price"] * 100) - 0.07
-            ).round(4)
-            kai_data_df["min_true_profit"] = (
-                    ((kai_data_df["kai_price"] - kai_data_df["high_max"]) / kai_data_df["kai_price"] * 100) - 0.07
-            ).round(4)
 
     # 若需要过滤，则对结果按 timestamp 排序，并根据 pin_time 去重
     if is_filter:
@@ -810,14 +814,9 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
 
 
 
-    if is_detail and trade_count > 0:
-        max_single_profit = kai_data_df["max_true_profit"].max()
-        min_single_profit = kai_data_df["min_true_profit"].min()
-        temp_dict = optimize_parameters(kai_data_df) if trade_count > 0 else {}
-    else:
-        max_single_profit = kai_data_df["true_profit"].max()
-        min_single_profit = kai_data_df["true_profit"].min()
-        temp_dict = {}
+    max_single_profit = kai_data_df["true_profit"].max()
+    min_single_profit = kai_data_df["true_profit"].min()
+    temp_dict = {}
 
     true_profit_std = kai_data_df["true_profit"].std()
     true_profit_mean = kai_data_df["true_profit"].mean() * 100 if trade_count > 0 else 0
@@ -869,9 +868,51 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     monthly_net_profit_max = monthly_agg["sum"].max()
     monthly_loss_rate = (monthly_agg["sum"] < 0).sum() / active_months if active_months else 0
 
-    # 新增指标：每个月净利润和交易个数
-    # monthly_net_profit_detail = {str(month): round(val, 4) for month, val in monthly_agg["sum"].to_dict().items()}
-    # monthly_trade_count_detail = {str(month): int(val) for month, val in monthly_agg["count"].to_dict().items()}
+    # 若要求详细计算，用已缓存的 NumPy 数组及向量化操作计算区间最低和最高价格，进而计算收益率区间
+    if is_detail:
+        df_index_arr = np.asarray(df.index)
+        low_array = df["low"].values
+        high_array = df["high"].values
+
+        start_times = np.asarray(kai_data_df.index)
+        end_times = np.asarray(matched_pin.index)
+        start_pos = np.searchsorted(df_index_arr, start_times, side="left")
+        end_pos = np.searchsorted(df_index_arr, end_times, side="right") - 1
+
+        low_min_arr = compute_low_min_range(low_array, start_pos, end_pos)
+        high_max_arr = compute_high_max_range(high_array, start_pos, end_pos)
+        kai_data_df["low_min"] = low_min_arr
+        kai_data_df["high_max"] = high_max_arr
+
+        if is_long:
+            kai_data_df["max_true_profit"] = (
+                    ((kai_data_df["high_max"] - kai_data_df["kai_price"]) / kai_data_df["kai_price"] * 100) - 0.07
+            ).round(4)
+            kai_data_df["min_true_profit"] = (
+                    ((kai_data_df["low_min"] - kai_data_df["kai_price"]) / kai_data_df["kai_price"] * 100) - 0.07
+            ).round(4)
+        else:
+            kai_data_df["max_true_profit"] = (
+                    ((kai_data_df["kai_price"] - kai_data_df["low_min"]) / kai_data_df["kai_price"] * 100) - 0.07
+            ).round(4)
+            kai_data_df["min_true_profit"] = (
+                    ((kai_data_df["kai_price"] - kai_data_df["high_max"]) / kai_data_df["kai_price"] * 100) - 0.07
+            ).round(4)
+        max_single_profit = kai_data_df["max_true_profit"].max()
+        min_single_profit = kai_data_df["min_true_profit"].min()
+        temp_dict = optimize_parameters(kai_data_df) if trade_count > 0 else {}
+
+        # 新增指标：每个月净利润和交易个数
+        monthly_net_profit_detail = {str(month): round(val, 4) for month, val in monthly_agg["sum"].to_dict().items()}
+        monthly_trade_count_detail = {str(month): int(val) for month, val in monthly_agg["count"].to_dict().items()}
+        # 获取kai_data_df每一行的index，hold_time，true_profit保存成为一个元组列表，相当于这个列表的元素是(index, hold_time, true_profit)
+        kai_data_df_tuples = [(row.Index, row.hold_time, row.true_profit) for row in kai_data_df.itertuples()]
+
+        temp_dict.update({
+            "monthly_net_profit_detail": monthly_net_profit_detail,
+            "monthly_trade_count_detail": monthly_trade_count_detail,
+            "kai_data_df_tuples": kai_data_df_tuples
+        })
 
     hold_time_std = kai_data_df["hold_time"].std()
 
@@ -940,11 +981,9 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         "top_profit_ratio": round(top_profit_ratio, 4),
         "top_loss_ratio": round(top_loss_ratio, 4),
         'is_reverse':is_reverse
-        # 新增的每月净利润和交易个数的详细数据
-        # "monthly_net_profit_detail": monthly_net_profit_detail,
-        # "monthly_trade_count_detail": monthly_trade_count_detail
     }
     statistic_dict.update(temp_dict)
+    kai_data_df = kai_data_df[['hold_time', 'true_profit']]
     return kai_data_df, statistic_dict
 
 
@@ -973,13 +1012,11 @@ def generate_numbers(start, end, number, even=True):
     return final_result[:number]
 
 
-def process_tasks(task_chunk, df, is_filter):
+def process_tasks(task_chunk, df, is_filter, is_reverse=False, is_detail=False):
     start_time = time.time()
     results = []
     for long_column, short_column in task_chunk:
-        _, stat_long = get_detail_backtest_result_op(df, long_column, short_column, is_filter)
-        _, stat_long_reverse = get_detail_backtest_result_op(df, long_column, short_column, is_filter, is_reverse=True)
-        results.append(stat_long)
+        _, stat_long_reverse = get_detail_backtest_result_op(df, long_column, short_column, is_filter, is_reverse=is_reverse, is_detail=is_detail)
         results.append(stat_long_reverse)
     print(f"处理 {len(task_chunk)} 个任务，耗时 {time.time() - start_time:.2f} 秒。")
     return results
@@ -1119,8 +1156,8 @@ def gen_macross_signal_name(start_period, end_period, step, start_period1, end_p
 
 
 def worker_func(args):
-    chunk, df, is_filter = args
-    return process_tasks(chunk, df, is_filter)
+    chunk, df, is_filter, is_reverse, is_detail = args
+    return process_tasks(chunk, df, is_filter, is_reverse, is_detail)
 
 
 def init_worker(precomputed_signals):
@@ -1183,31 +1220,31 @@ def generate_all_signals():
     """
     column_list = []
 
-    abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 1000, 25, 1, 40, 2)
+    abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 2000, 25, 1, 40, 2)
     column_list.append((abs_long_columns, abs_short_columns, abs_key_name))
 
-    relate_long_columns, relate_short_columns, relate_key_name = gen_relate_signal_name(1, 1000, 50, 1, 30, 3)
+    relate_long_columns, relate_short_columns, relate_key_name = gen_relate_signal_name(1, 2000, 50, 1, 30, 3)
     column_list.append((relate_long_columns, relate_short_columns, relate_key_name))
 
     donchian_long_columns, donchian_short_columns, donchian_key_name = gen_donchian_signal_name(1, 20, 1)
     column_list.append((donchian_long_columns, donchian_short_columns, donchian_key_name))
 
-    boll_long_columns, boll_short_columns, boll_key_name = gen_boll_signal_name(1, 1000, 25, 1, 40, 2)
+    boll_long_columns, boll_short_columns, boll_key_name = gen_boll_signal_name(1, 2000, 25, 1, 40, 2)
     column_list.append((boll_long_columns, boll_short_columns, boll_key_name))
 
-    macross_long_columns, macross_short_columns, macross_key_name = gen_macross_signal_name(1, 1000, 20, 1, 1000, 25)
+    macross_long_columns, macross_short_columns, macross_key_name = gen_macross_signal_name(1, 2000, 20, 1, 2000, 25)
     column_list.append((macross_long_columns, macross_short_columns, macross_key_name))
 
-    rsi_long_columns, rsi_short_columns, rsi_key_name = gen_rsi_signal_name(1, 1000, 50)
+    rsi_long_columns, rsi_short_columns, rsi_key_name = gen_rsi_signal_name(1, 2000, 50)
     column_list.append((rsi_long_columns, rsi_short_columns, rsi_key_name))
 
-    macd_long_columns, macd_short_columns, macd_key_name = gen_macd_signal_name(1, 1000, 15)
+    macd_long_columns, macd_short_columns, macd_key_name = gen_macd_signal_name(1, 2000, 15)
     column_list.append((macd_long_columns, macd_short_columns, macd_key_name))
 
-    cci_long_columns, cci_short_columns, cci_key_name = gen_cci_signal_name(1, 1000, 25, 1, 40, 2)
+    cci_long_columns, cci_short_columns, cci_key_name = gen_cci_signal_name(1, 2000, 25, 1, 40, 2)
     column_list.append((cci_long_columns, cci_short_columns, cci_key_name))
 
-    atr_long_columns, atr_short_columns, atr_key_name = gen_atr_signal_name(1, 1000, 100)
+    atr_long_columns, atr_short_columns, atr_key_name = gen_atr_signal_name(1, 2000, 100)
     column_list.append((atr_long_columns, atr_short_columns, atr_key_name))
 
     # 按多头信号数量升序排序
@@ -1292,6 +1329,9 @@ def process_batch_pair(i, j, batches, df, is_filter, base_name, key_name, pool_p
       - 生成任务列表：即两个批次内信号的笛卡尔积，保证任务数量与直接对全信号计算一致。
       - 任务列表首先按照 100000 任务为一大块分块，再进一步细分为更小的块传入 worker 进行计算。
     """
+    is_detail = False
+    is_reverse = False
+    is_search = True
     # 加载批次预计算结果（利用缓存）
     precomputed_i = get_precomputed(i, batches, df, base_name, key_name, batch_cache)
     if i == j:
@@ -1336,7 +1376,7 @@ def process_batch_pair(i, j, batches, df, is_filter, base_name, key_name, pool_p
 
         # 根据当前大块任务数计算小块大小，保证每个小块至少有 50 个任务，
         # 同时根据 pool_processes 动态调整小块数（这里用 pool_processes*12 拆分小块）
-        small_chunk_size = max(50, int(np.ceil(len(big_chunk) / (pool_processes * 12))))
+        small_chunk_size = max(50, int(np.ceil(len(big_chunk) / (pool_processes * 15))))
         small_chunks = [big_chunk[l:l + small_chunk_size] for l in range(0, len(big_chunk), small_chunk_size)]
         print(f'当前时间 {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}  批次对 ({i}, {j}) - 大块 {chunk_index + 1}/{len(big_chunks)}：任务数 {len(big_chunk)}，拆分为 {len(small_chunks)} 个小块（每块约 {small_chunk_size} 个任务）。')
 
@@ -1344,18 +1384,20 @@ def process_batch_pair(i, j, batches, df, is_filter, base_name, key_name, pool_p
         # 多进程处理当前大块内的小块任务
         with multiprocessing.Pool(processes=pool_processes - 3, initializer=init_worker,
                                   initargs=(combined_precomputed,)) as pool:
-            tasks_args = [(chunk, df, is_filter) for chunk in small_chunks]
+            tasks_args = [(chunk, df, is_filter, is_reverse, is_detail) for chunk in small_chunks]
+            if is_search:
+                tasks_args.extend([(chunk, df, is_filter, not is_reverse, is_detail) for chunk in small_chunks])
             for result in pool.imap_unordered(worker_func, tasks_args, chunksize=1):
                 statistic_dict_list.extend(result)
         statistic_dict_list = [x for x in statistic_dict_list if x is not None]
 
         # 保存当前大块的结果到 CSV 文件
         pd.DataFrame(statistic_dict_list).to_csv(output_path, index=False)
-        print(f'当前时间 {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}  批次对 ({i}, {j}) 大块 {chunk_index + 1} 完成，耗时 {time.time() - start_time:.2f} 秒 {len(small_chunks)} 小块任务处理。结果保存至：{output_path}')
+        print(f'当前时间 {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}  批次对 ({i}, {j}) 大块 {chunk_index + 1} 任务数 {len(big_chunk)} 完成，耗时 {time.time() - start_time:.2f} 秒 {len(small_chunks)} 小块任务处理。结果保存至：{output_path}')
 
     # 可在合适时清理缓存，降低内存占用（示例中仅清理当前批次 i）
-    if i in batch_cache:
-        batch_cache.pop(i)
+    if j in batch_cache:
+        batch_cache.pop(j)
 
 
 ##########################################
@@ -1404,6 +1446,72 @@ def backtest_breakthrough_strategy(df, base_name, is_filter, batch_size=500):
 
     print("\n所有批次组合任务计算完成。")
 
+def backtest_breakthrough_strategy_target_detail(df,good_df, base_name, is_filter, is_reverse):
+    is_detail = True
+    is_search = False
+    pool_processes = multiprocessing.cpu_count() - 2
+    # 获取good_df的kai_column与pin_column
+    task_list = []
+    good_df_len = good_df.shape[0]
+    for index, row in good_df.iterrows():
+        kai_column = row['kai_column']
+        pin_column = row['pin_column']
+        task_list.append((kai_column, pin_column))
+
+    # 按照大块方式分块：每 100000 个任务为一块
+    BIG_CHUNK_SIZE = 100000
+    big_chunks = [task_list[k:k + BIG_CHUNK_SIZE] for k in range(0, len(task_list), BIG_CHUNK_SIZE)]
+
+    # 针对每个大块进一步细分为小块后调用 worker_func
+    for chunk_index, big_chunk in enumerate(big_chunks):
+        start_time = time.time()
+        output_path = os.path.join("temp", f"{base_name}_is_detail_{is_detail}_is_reverse_{is_reverse}_{good_df_len}_{chunk_index}.csv")
+        if os.path.exists(output_path):
+            print(f"{output_path} 大块 {chunk_index + 1} 结果文件已存在，跳过。")
+            continue
+        np.random.shuffle(big_chunk)
+
+        # 根据当前大块任务数计算小块大小，保证每个小块至少有 50 个任务，
+        # 同时根据 pool_processes 动态调整小块数（这里用 pool_processes*12 拆分小块）
+        small_chunk_size = max(50, int(np.ceil(len(big_chunk) / (pool_processes * 15))))
+        small_chunks = [big_chunk[l:l + small_chunk_size] for l in range(0, len(big_chunk), small_chunk_size)]
+        print(
+            f'当前时间 {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())} - 大块 {chunk_index + 1}/{len(big_chunks)}：任务数 {len(big_chunk)}，拆分为 {len(small_chunks)} 个小块（每块约 {small_chunk_size} {output_path}个任务）。')
+
+        statistic_dict_list = []
+        # 多进程处理当前大块内的小块任务
+        with multiprocessing.Pool(processes=pool_processes - 3) as pool:
+            tasks_args = [(chunk, df, is_filter, is_reverse, is_detail) for chunk in small_chunks]
+            if is_search:
+                tasks_args.extend([(chunk, df, is_filter, not is_reverse, is_detail) for chunk in small_chunks])
+            for result in pool.imap_unordered(worker_func, tasks_args, chunksize=1):
+                statistic_dict_list.extend(result)
+        statistic_dict_list = [x for x in statistic_dict_list if x is not None]
+
+        # 保存当前大块的结果到 CSV 文件
+        pd.DataFrame(statistic_dict_list).to_csv(output_path, index=False)
+        print(
+            f'当前时间 {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}  大块 {chunk_index + 1} 任务数 {len(big_chunk)} 完成，耗时 {time.time() - start_time:.2f} 秒 {len(small_chunks)} 小块任务处理。结果保存至：{output_path}')
+
+
+def backtest_breakthrough_strategy_target(df, base_name, is_filter):
+    """
+    直接加载指定的信号列表，不再生成信号。
+    :param df:
+    :param base_name:
+    :param is_filter:
+    :param batch_size:
+    :return:
+    """
+    origin_good_df = pd.read_csv('temp/SOL_origin_good_op_all.csv')
+    good_df = origin_good_df[(origin_good_df['net_profit_rate'] > 300)]
+    # 将good_df按照is_reverse进行分组
+    good_df = good_df.groupby('is_reverse')
+    for is_reverse, temp_df in good_df:
+        print(f'开始处理is_reverse={is_reverse}的数据 长度为{temp_df.shape[0]}')
+        backtest_breakthrough_strategy_target_detail(df, temp_df, base_name, is_filter, is_reverse)
+
+
 
 def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
     """
@@ -1434,7 +1542,7 @@ def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
     df = df[(df_monthly != min_df_month) & (df_monthly != max_df_month)]
     print(f'开始回测 {base_name} ... 数据长度 {df.shape[0]} 当前时间 {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}')
     backtest_breakthrough_strategy(df, base_name, is_filter)
-
+    # backtest_breakthrough_strategy_target(df, base_name, is_filter)
 
 def example():
     start_time = time.time()
