@@ -5,13 +5,14 @@ import itertools
 import json
 import math
 from multiprocessing import Pool
-
+import igraph as ig
 import multiprocessing
 import os
 import time
 import traceback
 from concurrent.futures import ProcessPoolExecutor
 from itertools import product
+import multiprocessing as mp
 
 import networkx as nx
 import numpy as np
@@ -23,6 +24,7 @@ from sklearn.preprocessing import MinMaxScaler
 import ast
 
 from tqdm import tqdm
+
 def custom_merge_intervals(intervals):
     """
     归并区间 (忽略 revenue 信息，只处理 [start, end])，
@@ -41,9 +43,6 @@ def custom_merge_intervals(intervals):
     return merged
 
 
-# ------------------------------
-# 2. 定义计算重叠指标的函数（两路指针扫描），包括重叠时长、收益和重叠区间计数
-#    改名为 custom_compute_overlapping_metrics
 def custom_compute_overlapping_metrics(intervals, union_intervals):
     """
     使用两路指针扫描计算重叠时长、重叠收益和重叠区间数量。
@@ -82,8 +81,6 @@ def custom_compute_overlapping_metrics(intervals, union_intervals):
     return total_overlap_time, total_overlap_revenue, overlap_count
 
 
-# ------------------------------
-# 3. 用于（每一行）预计算的函数（改名为 preprocess_row_custom）
 def preprocess_row_custom(kai_data):
     """
     对每一行的 kai_data_df_tuples 进行解析（如果为字符串则转换），
@@ -109,31 +106,31 @@ def preprocess_row_custom(kai_data):
     }
 
 
-# ------------------------------
-# 全局变量，用于存放所有行的预处理结果（改名为 unique_precomputed_data）
+# 全局变量，用于存放所有行的预处理结果
 unique_precomputed_data = []
 
 
-# ------------------------------
-# 4. 进程池初始化回调函数，将预计算的数据填入全局变量（改名为 init_custom_worker）
 def init_custom_worker(pre_data):
     global unique_precomputed_data
     unique_precomputed_data = pre_data
 
 
-# ------------------------------
-# 5. 修改后的 process_pair 函数：直接利用预计算的全局数据
-#    改名为 process_pair_custom
 def process_pair_custom(pair):
     """
     每个 pair 的任务：
       参数为 (i, j)，直接从全局 unique_precomputed_data 中取出两行数据，
       分别对 row i 和 row j 计算重叠指标。
       同时统计重叠区间的个数及其占比（相对于各自的总区间个数）。
+    注意：row1_index 和 row2_index 的取值由 df 中的 "index" 列获取。
     """
     i, j = pair
+    threshold = 1
     data1 = unique_precomputed_data[i]
     data2 = unique_precomputed_data[j]
+
+    # 从预处理数据中取出 df 中的 "index" 列值
+    row1_index_val = data1["df_index"]
+    row2_index_val = data2["df_index"]
 
     # 计算 row1 与 row2 的重叠情况
     overlap_time1, overlap_rev1, overlap_count1 = custom_compute_overlapping_metrics(data1['intervals'], data2['union'])
@@ -145,14 +142,21 @@ def process_pair_custom(pair):
     overlap_rev_ratio1 = overlap_rev1 / data1['total_revenue'] if data1['total_revenue'] > 0 else 0
     overlap_rev_ratio2 = overlap_rev2 / data2['total_revenue'] if data2['total_revenue'] > 0 else 0
 
+    # 判断是否需要保存该记录（重叠比例大于 0.5 则跳过）
+    if overlap_ratio1 > threshold or overlap_ratio2 > threshold:
+        return None
+
     total_intervals1 = len(data1['intervals'])
     total_intervals2 = len(data2['intervals'])
     overlap_count_ratio1 = overlap_count1 / total_intervals1 if total_intervals1 > 0 else 0
     overlap_count_ratio2 = overlap_count2 / total_intervals2 if total_intervals2 > 0 else 0
 
+    key_name_val = f"{min(row1_index_val, row2_index_val)},{max(row1_index_val, row2_index_val)}"
+
     return {
-        "row1_index": i,
-        "row2_index": j,
+        "row1_index": row1_index_val,
+        "row2_index": row2_index_val,
+        "key_name": key_name_val,
         "total_holding1": data1['total_holding'],
         "total_holding2": data2['total_holding'],
         "overlapping_time1": overlap_time1,
@@ -170,6 +174,58 @@ def process_pair_custom(pair):
         "overlap_count_ratio1": overlap_count_ratio1,
         "overlap_count_ratio2": overlap_count_ratio2,
     }
+
+def get_metrics_df(df):
+    start_time = time.time()
+    print("开始处理数据...长度为", len(df))
+    # 预处理每一行数据，使用 tqdm 显示进度，并同时将 df 的 "index" 列的值保存到预处理结果中。
+    custom_pre_data = [
+        {**preprocess_row_custom(row["kai_data_df_tuples"]), "df_index": row["index"]}
+        for _, row in tqdm(df.iterrows(), total=len(df), desc="预处理行数据", unit="row")
+    ]
+
+    num_rows = len(custom_pre_data)
+    # 构造所有的两两组合（所有行两两比较）
+    pairs = itertools.combinations(range(num_rows), 2)
+    total_tasks = num_rows * (num_rows - 1) // 2  # 总组合数量
+
+    max_workers = os.cpu_count() or 1
+    factor = 20  # 可调参数，factor 越大，chunksize 越小
+    chunksize = max(10000, total_tasks // (max_workers * factor))
+    print(f"总任务数: {total_tasks}, 工作进程数: {max_workers}, 动态计算 chunksize: {chunksize}")
+
+    # 使用 ProcessPoolExecutor，并在初始化时传入 custom_pre_data
+    with ProcessPoolExecutor(max_workers=30, initializer=init_custom_worker, initargs=(custom_pre_data,)) as executor:
+        # 使用 tqdm 包裹 executor.map 返回结果显示进度（单位为 pair）
+        results = list(tqdm(
+            executor.map(process_pair_custom, pairs, chunksize=chunksize),
+            total=total_tasks,
+            desc="处理 pairs",
+            unit="pair"
+        ))
+
+    # 过滤掉返回值为 None 的记录（即重叠比例大于 0.5 的记录）
+    results = [r for r in results if r is not None]
+
+    # 将结果转换成 DataFrame，并计算其他指标后保存为 CSV
+    metrics_df = pd.DataFrame(results)
+
+    metrics_df['overlap_count_ratio'] = metrics_df[['overlap_count_ratio1', 'overlap_count_ratio2']].max(axis=1)
+    metrics_df['overlap_ratio'] = metrics_df[['overlap_ratio1', 'overlap_ratio2']].max(axis=1)
+    metrics_df['overlapping_revenue_ratio'] = metrics_df[
+        ['overlapping_revenue_ratio1', 'overlapping_revenue_ratio2']].max(axis=1)
+    metrics_df['score'] = metrics_df['overlap_ratio'] + metrics_df['overlapping_revenue_ratio']
+    metrics_df['score1'] = metrics_df['overlap_ratio'] * metrics_df['overlapping_revenue_ratio']
+
+    # 这里根据 df 本身的数据计算了一些其它的 rate 信息
+    metrics_df['rate1'] = 100 * (metrics_df['total_holding1']) / 1000000
+    metrics_df['rate2'] = 100 * (metrics_df['total_holding2']) / 1000000
+    metrics_df['min_rate'] = metrics_df[['rate1', 'rate2']].min(axis=1)
+    metrics_df['rate'] = 100 * (metrics_df['total_holding1'] + metrics_df['total_holding2'] - metrics_df['overlapping_time1']) / 1000000
+
+    # 保存结果到 CSV
+    metrics_df.to_csv("temp/metrics_df.csv", index=False)
+    print(f'行组合数量: {metrics_df.shape[0]} 完成, 总耗时 {time.time() - start_time:.2f} 秒.')
 
 
 def iterative_search(func, base, step, max_range, tol):
@@ -1902,121 +1958,48 @@ def calculate_final_score(result_df: pd.DataFrame) -> pd.DataFrame:
     # 删除final_score小于0的
     # df = df[(df['final_score'] > 0)]
     return df
-
-def choose_good_strategy_debug(inst_id='BTC'):
-    # df = pd.read_csv('temp/temp.csv')
-    # count_L()
-    # 找到temp下面所有包含False的文件
-    file_list = os.listdir('temp')
-    file_list = [file for file in file_list if 'True' in file and inst_id in file and 'peak_1_10_3_continue_1_20_1_ma_1_100_20_relate_1_200_9_1_10_3_macross_1_10_5_1_10_5_abs_1_200_5_1_40_2_rsi_1_100_10_' in file and 'close' not in file]
-    # file_list = file_list[0:1]
-    df_list = []
-    df_map = {}
-    for file in file_list:
-        file_key = file.split('_')[4]
+def process_file(file):
+    """ 处理单个文件的函数 """
+    try:
         df = pd.read_csv(f'temp/{file}')
-        # 删除monthly_net_profit_detail和monthly_trade_count_detail两列
-        # df = df.drop(columns=['monthly_net_profit_detail', 'monthly_trade_count_detail','total_count','trade_rate','profit_rate','max_loss_start_time','max_loss_end_time','max_profit_start_time','max_profit_end_time'])
-        # df = df.drop(columns=['total_count','trade_rate','profit_rate','max_loss_start_time','max_loss_end_time','max_profit_start_time','max_profit_end_time'])
-
-
-        # 去除最大的偶然利润
-        # df['net_profit_rate'] = df['net_profit_rate'] - 1 * df['max_profit']
-        # df['avg_profit_rate'] = df['net_profit_rate'] / df['kai_count'] * 100
-        # df['max_beilv'] = df['net_profit_rate'] / df['max_profit']
-        # df['loss_beilv'] = -df['net_profit_rate'] / df['max_consecutive_loss']
-        # df['score'] = (df['true_profit_std']) / df['avg_profit_rate'] * 100
-
-        # df = df[(df['is_reverse'] == False)]
-        # df = add_reverse(df)
-        # df['kai_period'] = df['kai_column'].apply(lambda x: int(x.split('_')[0]))
-        # df['pin_period'] = df['pin_column'].apply(lambda x: int(x.split('_')[0]))
-
+        df['net_profit_rate'] = df['net_profit_rate'] - df['fix_profit']
         df['filename'] = file.split('_')[5]
         df['profit_risk_score_con'] = -df['net_profit_rate'] / df['max_consecutive_loss'] * df['net_profit_rate']
         df['profit_risk_score'] = -df['net_profit_rate'] / df['fu_profit_sum'] * df['net_profit_rate']
         df['profit_risk_score_pure'] = -df['net_profit_rate'] / df['fu_profit_sum']
-        # df['pin_side'] = df['pin_column'].apply(lambda x: x.split('_')[-1])
-        # 删除kai_column和pin_column中不包含 ma的行
-        # df = df[(df['kai_column'].str.contains('ma')) & (df['pin_column'].str.contains('ma'))]
-        # 删除kai_column和pin_column中包含 abs的行
-        # df = df[~(df['kai_column'].str.contains('abs')) & ~(df['pin_column'].str.contains('abs'))]
 
-        # df = df[(df['true_profit_std'] < 10)]
-        # df = df[(df['max_consecutive_loss'] > -20)]
-        # df = df[(df['pin_side'] != df['kai_side'])]
-        # df = df[(df['profit_risk_score_pure'] > 1)]
-        df = df[(df['net_profit_rate'] > 50)]
-        df = df[(df['avg_profit_rate'] > 10)]
+        # 过滤数据
+        df = df[(df['net_profit_rate'] > 10)]
+        df = df[(df['avg_profit_rate'] > 1)]
+        # df = df[(df['hold_time_mean'] < 5000)]
+        df = df[(df['kai_side'] == 'short')]
 
-        # df = df[(df['monthly_net_profit_std'] < 10)]
-        # df = df[(df['same_count_rate'] < 1)]
-        # df = df[(df['same_count_rate'] < 1)]
-        # df['monthly_trade_std_score'] = df['monthly_trade_std'] / (df['kai_count']) * 22
-        #
-        # df['monthly_net_profit_std_score'] = df['monthly_net_profit_std'] / (df['net_profit_rate']) * 22
-        # df['monthly_avg_profit_std_score'] = df['monthly_avg_profit_std'] / (df['avg_profit_rate']) * 100
-        # df = df[(df['monthly_net_profit_std_score'] < 50)]
-        # df = df[(df['score'] > 2)]
-        # df = df[(df['avg_profit_rate'] > 5)]
-        # df = df[(df['kai_side'] == 'short')]
-
-        df = df[(df['hold_time_mean'] < 5000)]
-        # df = df[(df['max_beilv'] > 5)]
-        # df = df[(df['loss_beilv'] > 1)]
-        # df = df[(df['kai_count'] > 50)]
-        # df = df[(df['same_count_rate'] < 1)]
-        # df = df[(df['pin_period'] < 50)]
-        if file_key not in df_map:
-            df_map[file_key] = []
-        # df['score'] = df['max_consecutive_loss']
-        # df['score1'] = df['avg_profit_rate'] / (df['hold_time_mean'] + 20) * 1000
-        # df['score2'] = df['avg_profit_rate'] / (
-        #         df['hold_time_mean'] + 20) * 1000 * (df['trade_rate'] + 0.001)
-        # df['score3'] = df['avg_profit_rate'] * (df['trade_rate'] + 0.0001)
-        # df['score4'] = (df['trade_rate'] + 0.0001) / df['loss_rate']
-        # loss_rate_max = df['loss_rate'].max()
-        # loss_time_rate_max = df['loss_time_rate'].max()
-        # avg_profit_rate_max = df['avg_profit_rate'].max()
-        # max_beilv_max = df['max_beilv'].max()
-        # df['loss_score'] = 5 * (loss_rate_max - df['loss_rate']) / loss_rate_max + 1 * (loss_time_rate_max - df['loss_time_rate']) / loss_time_rate_max - 1 * (avg_profit_rate_max - df['avg_profit_rate']) / avg_profit_rate_max
-
-        # # 找到所有包含failure_rate_的列，然后计算平均值
-        # failure_rate_columns = [column for column in df.columns if 'failure_rate_' in column]
-        # df['failure_rate_mean'] = df[failure_rate_columns].mean(axis=1)
-        #
-        # df['loss_score'] = 1 - df['loss_rate']
-        #
-        # df['beilv_score'] = 0 - (max_beilv_max - df['max_beilv']) / max_beilv_max - (
-        #             avg_profit_rate_max - df['avg_profit_rate']) / avg_profit_rate_max
-        df_map[file_key].append(df)
-    for key in df_map:
-        df = pd.concat(df_map[key])
-        df_list.append(df)
         return df
+    except Exception as e:
+        print(f"处理文件 {file} 时报错: {e}")
+        return None
 
-    temp = pd.merge(df_list[0], df_list[1], on=['kai_side', 'kai_column', 'pin_column'], how='inner')
-    # 需要计算的字段前缀
-    fields = ['avg_profit_rate', 'net_profit_rate', 'max_beilv']
 
-    # 遍历字段前缀，统一计算
-    for field in fields:
-        x_col = f"{field}_x"
-        y_col = f"{field}_y"
+def choose_good_strategy_debug(inst_id='BTC'):
+    file_list = os.listdir('temp')
+    file_list = [file for file in file_list if inst_id in file and
+                 'donchian_1_20_1_atr_1_2000_100_macd_1_2000_15_rsi_1_2000_50_relate_1_2000_50_1_30_3_abs_1_2000_25_1_40_2_boll_1_2000_25_1_40_2_cci_1_2000_25_1_40_2_macross_1_2000_20_' in file and
+                 'pkl' not in file]
 
-        temp[f"{field}_min"] = temp[[x_col, y_col]].min(axis=1)
-        temp[f"{field}_mean"] = temp[[x_col, y_col]].mean(axis=1)
-        temp[f"{field}_plus"] = temp[x_col] + temp[y_col]
-        temp[f"{field}_cha"] = temp[x_col] - temp[y_col]
-        temp[f"{field}_mult"] = np.where(
-            (temp[x_col] < 0) & (temp[y_col] < 0),
-            0,  # 如果两个都小于 0，则赋值 0
-            temp[x_col] * temp[y_col]  # 否则正常相乘
-        )
+    # 使用多进程池并行处理文件
+    with mp.Pool(processes=30) as pool:
+        df_list = pool.map(process_file, file_list)
 
-    # temp = temp[(temp['avg_profit_rate_min'] > 0)]
-    # temp.to_csv('temp/temp.csv', index=False)
-    return temp
+    # 过滤掉 None 值
+    df_list = [df for df in df_list if df is not None]
+
+    # 合并所有 DataFrame
+    if df_list:
+        result_df = pd.concat(df_list, ignore_index=True)
+        return result_df
+    else:
+        print("没有符合条件的数据")
+        return pd.DataFrame()
 
 
 def delete_rows_based_on_sort_key(result_df, sort_key, range_key):
@@ -2456,7 +2439,7 @@ def filtering(origin_good_df, target_column, sort_key, threshold):
             current_group_count = counts.get(key, 0)
         else:
             # 如果当前 key 与组首的差值不超过 2 且累计行数+当前 key 的行数不超过 1000，则放入同一组
-            if (key - current_group[0] <= 200) and (current_group_count + counts.get(key, 0) <= 1000):
+            if (key - current_group[0] <= 20) and (current_group_count + counts.get(key, 0) <= 1000):
                 current_group.append(key)
                 current_group_count += counts.get(key, 0)
             else:
@@ -2474,7 +2457,7 @@ def filtering(origin_good_df, target_column, sort_key, threshold):
     ]
     print(f"分组数量：{len(pool_input_args)}")
     # 使用进程数为 5 的多进程池处理各个分组
-    with Pool(processes=10) as pool:
+    with Pool(processes=20) as pool:
         results = pool.map(process_group, pool_input_args)
 
     # 合并所有分组的过滤结果
@@ -2510,7 +2493,7 @@ def gen_statistic_data(origin_good_df, threshold=99):
     origin_good_df["monthly_net_profit_detail"] = origin_good_df["monthly_net_profit_detail"].apply(safe_parse_dict)
     origin_good_df["monthly_trade_count_detail"] = origin_good_df["monthly_trade_count_detail"].apply(safe_parse_dict)
     print(f'待计算的数据量：{len(origin_good_df)}')
-    origin_good_df = filtering(origin_good_df, 'kai_count', 'net_profit_rate', 90)
+    origin_good_df = filtering(origin_good_df, 'kai_count', 'net_profit_rate', 99)
     print(f'过滤后的数据量：{len(origin_good_df)}')
 
     # 转换为字典列表，保持 DataFrame 内的顺序
@@ -2837,43 +2820,6 @@ def find_all_valid_groups(origin_good_df, threshold, sort_key='net_profit_rate',
 
     return final_df, origin_good_df, df
 
-def get_metrics_df(df):
-    # # debug
-    # df = pd.read_csv("temp/metrics_df.csv")
-    # # 获取df['overlap_ratio1']和df['overlap_ratio2']中小的值作为新的一列
-    # df['overlap_ratio'] = df[['overlap_ratio1', 'overlap_ratio2']].max(axis=1)
-    # df['overlapping_revenue_ratio'] = df[['overlapping_revenue_ratio1', 'overlapping_revenue_ratio2']].max(axis=1)
-    # df['score'] = df['overlap_ratio'] + df['overlapping_revenue_ratio']
-    # df['score1'] = df['overlap_ratio'] * df['overlapping_revenue_ratio']
-    # # 找到index为[584,3207]的行
-    # print(df.loc[[584, 3207]])
-    start_time = time.time()
-
-    # 采用列表解析预计算所有行的数据（比迭代字典稍快）
-    custom_pre_data = [preprocess_row_custom(row["kai_data_df_tuples"]) for _, row in df.iterrows()]
-
-    # 构造所有的两两组合（保证使用连续的索引）
-    num_rows = len(custom_pre_data)
-    pairs = itertools.combinations(range(num_rows), 2)
-
-    # 设置并行 worker 数量，利用所有 CPU 核心
-    max_workers = os.cpu_count() or 1
-    print(f'开始计算，使用 {max_workers} 个 worker... 预计任务数: {num_rows * (num_rows - 1) // 2}')
-
-    # 使用 ProcessPoolExecutor，并在初始化时传入 custom_pre_data
-    with ProcessPoolExecutor(max_workers=30, initializer=init_custom_worker, initargs=(custom_pre_data,)) as executor:
-        # 根据数据量调整 chunksize，这里依然设置为 10000
-        results = list(executor.map(process_pair_custom, pairs, chunksize=10000))
-
-    # 将结果转换为 DataFrame，并写入 CSV
-    metrics_df = pd.DataFrame(results)
-    metrics_df['overlap_count_ratio'] = metrics_df[['overlap_count_ratio1', 'overlap_count_ratio2']].max(axis=1)
-    metrics_df['overlap_ratio'] = metrics_df[['overlap_ratio1', 'overlap_ratio2']].max(axis=1)
-    metrics_df['overlapping_revenue_ratio'] = metrics_df[['overlapping_revenue_ratio1', 'overlapping_revenue_ratio2']].max(axis=1)
-    metrics_df['score'] = metrics_df['overlap_ratio'] + metrics_df['overlapping_revenue_ratio']
-    metrics_df['score1'] = metrics_df['overlap_ratio'] * metrics_df['overlapping_revenue_ratio']
-    metrics_df.to_csv("temp/metrics_df.csv", index=False)
-    print(f'行组合数量: {metrics_df.shape[0]} 完成, 总耗时 {time.time() - start_time:.2f} 秒.')
 
 def debug():
     # good_df = pd.read_csv('temp/final_good.csv')
@@ -2923,6 +2869,19 @@ def debug():
         # origin_good_df = choose_good_strategy_debug(inst_id)
         # origin_good_df = calculate_final_score(origin_good_df)
         # origin_good_df.to_csv(f'temp/{inst_id}_origin_good_op_all.csv', index=False)
+        # origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_all_filter.csv')
+        # origin_good_df['net_profit_rate'] = origin_good_df['net_profit_rate'] - origin_good_df['fix_profit']
+        #
+        # origin_good_df['profit_risk_score_con'] = -origin_good_df['net_profit_rate'] / origin_good_df['max_consecutive_loss'] * origin_good_df['net_profit_rate']
+        # origin_good_df['profit_risk_score'] = -origin_good_df['net_profit_rate'] / origin_good_df['fu_profit_sum'] * origin_good_df['net_profit_rate']
+        # origin_good_df['profit_risk_score_pure'] = -origin_good_df['net_profit_rate'] / origin_good_df['fu_profit_sum']
+        #
+        # origin_good_df = origin_good_df[(origin_good_df['profit_risk_score_pure'] > 0.5)]
+        #
+        # origin_good_df = origin_good_df[(origin_good_df['net_profit_rate'] > 50)]
+        # origin_good_df = origin_good_df[(origin_good_df['max_consecutive_loss'] > -50)]
+        # origin_good_df.to_csv(f'temp/{inst_id}_origin_good_op_all_filter.csv', index=False)
+
         # origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_true_close.csv')
         # # origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_false.csv')
         # # origin_good_df = pd.concat([origin_good_df, origin_good_df1])
@@ -2962,7 +2921,8 @@ def debug():
         # # good_df = good_df.sort_values(by=sort_key, ascending=True)
         # # good_df = good_df.drop_duplicates(subset=['kai_column', 'kai_side'], keep='first')
         #
-        good_df = pd.read_csv('temp/all_statistic_df.csv')
+        good_df = pd.read_csv(f'temp/1m_10000000_TON_is_detail_True_is_reverse_False_403_0.csv')
+        # good_df = good_df[(good_df['net_profit_rate'] > 300)]
         result, good_df, df = find_all_valid_groups(good_df, 30)
         good_df.to_csv('temp/final_good.csv', index=False)
         get_metrics_df(good_df)

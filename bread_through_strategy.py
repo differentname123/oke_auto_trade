@@ -809,21 +809,27 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     kai_data_df["profit"] = profit_series
     kai_data_df["true_profit"] = profit_series - 0.07
     profit_sum = profit_series.sum()
-
-    fix_profit = round(kai_data_df[mapped_prices.notna()]["true_profit"].sum(), 4)  # 收到影响的交易的收益，实盘交易时可以设置不得连续开平来避免。也就是将fix_profit减去就是正常的利润
-
-
-
     max_single_profit = kai_data_df["true_profit"].max()
     min_single_profit = kai_data_df["true_profit"].min()
     temp_dict = {}
 
     true_profit_std = kai_data_df["true_profit"].std()
     true_profit_mean = kai_data_df["true_profit"].mean() * 100 if trade_count > 0 else 0
+    if profit_sum < 200 or true_profit_mean < 10 or min_single_profit < -10:
+        return None, None
+
+    fix_profit = round(kai_data_df[mapped_prices.notna()]["true_profit"].sum(), 4)  # 收到影响的交易的收益，实盘交易时可以设置不得连续开平来避免。也就是将fix_profit减去就是正常的利润
+
+
+
+
 
     profits_arr = kai_data_df["true_profit"].values
     max_loss, max_loss_start_idx, max_loss_end_idx, loss_trade_count = calculate_max_sequence_numba(profits_arr)
     max_profit, max_profit_start_idx, max_profit_end_idx, profit_trade_count = calculate_max_profit_numba(profits_arr)
+
+    if max_loss < -50:
+        return None, None
 
     # 根据索引获取最大连续亏损的起止时间和持仓时长
     if trade_count > 0 and max_loss_start_idx < len(kai_data_df) and max_loss_end_idx < len(kai_data_df):
@@ -1220,32 +1226,32 @@ def generate_all_signals():
     """
     column_list = []
 
-    abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 2000, 25, 1, 40, 2)
+    abs_long_columns, abs_short_columns, abs_key_name = gen_abs_signal_name(1, 200, 50, 1, 50, 1)
     column_list.append((abs_long_columns, abs_short_columns, abs_key_name))
 
-    relate_long_columns, relate_short_columns, relate_key_name = gen_relate_signal_name(1, 2000, 50, 1, 30, 3)
-    column_list.append((relate_long_columns, relate_short_columns, relate_key_name))
+    # relate_long_columns, relate_short_columns, relate_key_name = gen_relate_signal_name(1, 3000, 60, 1, 40, 3)
+    # column_list.append((relate_long_columns, relate_short_columns, relate_key_name))
+    #
+    # donchian_long_columns, donchian_short_columns, donchian_key_name = gen_donchian_signal_name(1, 20, 1)
+    # column_list.append((donchian_long_columns, donchian_short_columns, donchian_key_name))
 
-    donchian_long_columns, donchian_short_columns, donchian_key_name = gen_donchian_signal_name(1, 20, 1)
-    column_list.append((donchian_long_columns, donchian_short_columns, donchian_key_name))
+    # boll_long_columns, boll_short_columns, boll_key_name = gen_boll_signal_name(1, 3000, 100, 1, 50, 1)
+    # column_list.append((boll_long_columns, boll_short_columns, boll_key_name))
 
-    boll_long_columns, boll_short_columns, boll_key_name = gen_boll_signal_name(1, 2000, 25, 1, 40, 2)
-    column_list.append((boll_long_columns, boll_short_columns, boll_key_name))
+    # macross_long_columns, macross_short_columns, macross_key_name = gen_macross_signal_name(1, 3000, 30, 1, 3000, 30)
+    # column_list.append((macross_long_columns, macross_short_columns, macross_key_name))
 
-    macross_long_columns, macross_short_columns, macross_key_name = gen_macross_signal_name(1, 2000, 20, 1, 2000, 25)
-    column_list.append((macross_long_columns, macross_short_columns, macross_key_name))
+    # rsi_long_columns, rsi_short_columns, rsi_key_name = gen_rsi_signal_name(1, 3000, 60)
+    # column_list.append((rsi_long_columns, rsi_short_columns, rsi_key_name))
+    #
+    # macd_long_columns, macd_short_columns, macd_key_name = gen_macd_signal_name(1, 3000, 25)
+    # column_list.append((macd_long_columns, macd_short_columns, macd_key_name))
 
-    rsi_long_columns, rsi_short_columns, rsi_key_name = gen_rsi_signal_name(1, 2000, 50)
-    column_list.append((rsi_long_columns, rsi_short_columns, rsi_key_name))
+    # cci_long_columns, cci_short_columns, cci_key_name = gen_cci_signal_name(1, 3000, 100, 1, 50, 1)
+    # column_list.append((cci_long_columns, cci_short_columns, cci_key_name))
 
-    macd_long_columns, macd_short_columns, macd_key_name = gen_macd_signal_name(1, 2000, 15)
-    column_list.append((macd_long_columns, macd_short_columns, macd_key_name))
-
-    cci_long_columns, cci_short_columns, cci_key_name = gen_cci_signal_name(1, 2000, 25, 1, 40, 2)
-    column_list.append((cci_long_columns, cci_short_columns, cci_key_name))
-
-    atr_long_columns, atr_short_columns, atr_key_name = gen_atr_signal_name(1, 2000, 100)
-    column_list.append((atr_long_columns, atr_short_columns, atr_key_name))
+    # atr_long_columns, atr_short_columns, atr_key_name = gen_atr_signal_name(1, 3000, 100)
+    # column_list.append((atr_long_columns, atr_short_columns, atr_key_name))
 
     # 按多头信号数量升序排序
     column_list = sorted(column_list, key=lambda x: len(x[0]))
@@ -1362,7 +1368,7 @@ def process_batch_pair(i, j, batches, df, is_filter, base_name, key_name, pool_p
     task_list = list(product(list_i, list_j))
 
     # 按照大块方式分块：每 100000 个任务为一块
-    BIG_CHUNK_SIZE = 100000
+    BIG_CHUNK_SIZE = 1000000
     big_chunks = [task_list[k:k + BIG_CHUNK_SIZE] for k in range(0, len(task_list), BIG_CHUNK_SIZE)]
 
     # 针对每个大块进一步细分为小块后调用 worker_func
@@ -1403,7 +1409,7 @@ def process_batch_pair(i, j, batches, df, is_filter, base_name, key_name, pool_p
 ##########################################
 # 主函数
 ##########################################
-def backtest_breakthrough_strategy(df, base_name, is_filter, batch_size=500):
+def backtest_breakthrough_strategy(df, base_name, is_filter, batch_size=5000):
     """
     回测函数（重构版）：
       1. 依据不同策略函数生成各个信号，并合并为一个 all_signals 列表，同时构造 key_name 标识；
@@ -1473,10 +1479,10 @@ def backtest_breakthrough_strategy_target_detail(df,good_df, base_name, is_filte
 
         # 根据当前大块任务数计算小块大小，保证每个小块至少有 50 个任务，
         # 同时根据 pool_processes 动态调整小块数（这里用 pool_processes*12 拆分小块）
-        small_chunk_size = max(50, int(np.ceil(len(big_chunk) / (pool_processes * 15))))
+        small_chunk_size = max(10, int(np.ceil(len(big_chunk) / (pool_processes * 15))))
         small_chunks = [big_chunk[l:l + small_chunk_size] for l in range(0, len(big_chunk), small_chunk_size)]
         print(
-            f'当前时间 {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())} - 大块 {chunk_index + 1}/{len(big_chunks)}：任务数 {len(big_chunk)}，拆分为 {len(small_chunks)} 个小块（每块约 {small_chunk_size} {output_path}个任务）。')
+            f'当前时间 {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())} - 大块 {chunk_index + 1}/{len(big_chunks)}：任务数 {len(big_chunk)}，拆分为 {len(small_chunks)} 个小块（每块约 {small_chunk_size} 个任务）。{output_path}')
 
         statistic_dict_list = []
         # 多进程处理当前大块内的小块任务
@@ -1503,8 +1509,14 @@ def backtest_breakthrough_strategy_target(df, base_name, is_filter):
     :param batch_size:
     :return:
     """
-    origin_good_df = pd.read_csv('temp/SOL_origin_good_op_all.csv')
-    good_df = origin_good_df[(origin_good_df['net_profit_rate'] > 300)]
+    inst_id = base_name.split('_')[2]
+    # origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_all.csv')
+    origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_all_filter.csv')
+    origin_good_df = origin_good_df[(origin_good_df['net_profit_rate'] > 200)]
+    # origin_good_df = origin_good_df[(origin_good_df['hold_time_mean'] < 2000)]
+    # origin_good_df = origin_good_df[(origin_good_df['max_consecutive_loss'] > -20)]
+    good_df = origin_good_df[(origin_good_df['profit_risk_score_pure'] > 0)]
+
     # 将good_df按照is_reverse进行分组
     good_df = good_df.groupby('is_reverse')
     for is_reverse, temp_df in good_df:
@@ -1547,11 +1559,15 @@ def gen_breakthrough_signal(data_path='temp/TON_1m_2000.csv'):
 def example():
     start_time = time.time()
     data_path_list = [
+        'kline_data/origin_data_5m_10000000_SOL-USDT-SWAP.csv',
         'kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv',
+        'kline_data/origin_data_5m_10000000_BTC-USDT-SWAP.csv',
         'kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv',
-        # 'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv',
-        # 'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv',
-        # 'kline_data/origin_data_1m_10000000_DOGE-USDT-SWAP.csv',
+        'kline_data/origin_data_5m_10000000_ETH-USDT-SWAP.csv',
+        'kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv',
+        'kline_data/origin_data_5m_10000000_TON-USDT-SWAP.csv',
+        'kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv',
+        # 'kline_data/origin_data_1m_10000000_DOGE-USDT-SWAP.cs v',
         # 'kline_data/origin_data_1m_10000000_XRP-USDT-SWAP.csv',
         # 'kline_data/origin_data_1m_10000000_PEPE-USDT-SWAP.csv',
     ]
