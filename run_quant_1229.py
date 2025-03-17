@@ -1181,7 +1181,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                     if "sorted_fitness" in islands[i] and "sorted_fitness" in islands[j]:
                         sorted_fit1 = islands[i]["sorted_fitness"]
                         sorted_fit2 = islands[j]["sorted_fitness"]
-                        n = len(sorted_fit1) // 5  # 只取前50%的个体
+                        n = len(sorted_fit1) // 2  # 只取前50%的个体
                         if n > 0:
                             sim = sum(abs(a - b) for a, b in zip(sorted_fit1[:n], sorted_fit2[:n])) / n
                         else:
