@@ -1231,7 +1231,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
 
             print(f"第 {gen} 代全局最优个体: {overall_best}，适应度: {overall_best_fitness}，耗时 {elapsed_gen:.2f} 秒。连续 {global_no_improve_count} 代无改进。 当前全局评价组合数: {len(global_generated_individuals)}")
 
-            if global_no_improve_count >= 2:
+            if global_no_improve_count >= 20:
                 overall_best_fitness = -1e9
                 print(f"连续 {global_no_improve_count} 代全局最优未改进，进行全局重启。")
                 for idx, island in enumerate(islands):
