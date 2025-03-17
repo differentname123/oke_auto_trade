@@ -1135,10 +1135,13 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                 mutated_population = [mutate(ind, island["adaptive_mutation_rate"],
                                              candidate_long_signals, candidate_short_signals)
                                       for ind in next_population]
+                filter_mutated_population = []
                 # 将交叉/变异产生的个体记录到全局集合中（用于判重）
                 for candidate in mutated_population:
                     if candidate not in global_generated_individuals:
+                        filter_mutated_population.append(candidate)
                         global_generated_individuals.add(candidate)
+                mutated_population = filter_mutated_population
 
                 # 多样性注入：动态注入随机个体
                 diversity_percent = 0.1 + (0.05 * island["no_improve_count"])
@@ -1355,7 +1358,7 @@ def ga_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
     best_candidate, best_fitness, history = genetic_algorithm_optimization(
         df_local, all_signals, all_signals,
         population_size=population_size, generations=1000,
-        crossover_rate=0.8, mutation_rate=0.2,
+        crossover_rate=0.9, mutation_rate=0.2,
         key_name=f'{base_name}_{key_name}',
         islands_count=8, migration_interval=10, migration_rate=0.05
     )
