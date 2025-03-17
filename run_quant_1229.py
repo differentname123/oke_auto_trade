@@ -1255,7 +1255,11 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
             # ----------------- 保存当前代统计信息 -----------------
             if island_stats_list:
                 df_stats = pd.DataFrame(island_stats_list)
+
+                print(f"保存第 {gen} 代统计信息 ...长度 {df_stats.shape[0]}")
                 df_stats = df_stats.drop_duplicates(subset=["kai_column", "pin_column"])
+                print(f"去重后长度 {df_stats.shape[0]}")
+
                 file_name = os.path.join(checkpoint_dir, f"{key_name}_{gen}_stats.csv")
                 df_stats.to_csv(file_name, index=False)
 
