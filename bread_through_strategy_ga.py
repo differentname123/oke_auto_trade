@@ -841,7 +841,7 @@ def load_or_compute_precomputed_signals(df, signals, key_name):
     """
     尝试从 temp 目录加载预计算结果，若无或加载出错则重新计算并保存。
     """
-    file_path = os.path.join("temp", f"precomputed_signals_{key_name}_{len(signals)}.pkl")
+    file_path = os.path.join("temp_back", f"precomputed_signals_{key_name}_{len(signals)}.pkl")
     if os.path.exists(file_path):
         try:
             with open(file_path, "rb") as f:
@@ -962,7 +962,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                                    population_size=50, generations=20,
                                    crossover_rate=0.8, mutation_rate=0.1, key_name="default",
                                    islands_count=4, migration_interval=10, migration_rate=0.1,
-                                   restart_similarity_threshold=1):
+                                   restart_similarity_threshold=10):
     """
     利用遗传算法结合岛屿模型搜索净利率较高的 (长信号, 短信号) 组合，
     取消了每个岛内的 generated_individuals 维护，而使用全局的 generated_individuals 集合，
@@ -1226,10 +1226,11 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                 global_no_improve_count = 0
             prev_overall_best = overall_best
 
-            print(f"第 {gen} 代全局最优个体: {overall_best}，适应度: {overall_best_fitness}，耗时 {elapsed_gen:.2f} 秒。 连续 {global_no_improve_count} 代全局最优个体未变化")
+            print(f"第 {gen} 代全局最优个体: {overall_best}，适应度: {overall_best_fitness}，耗时 {elapsed_gen:.2f} 秒。 连续 {global_no_improve_count} 代全局最优个体未变化 已计算组合长度为{len(global_generated_individuals)}")
 
             # 若连续20代全局最优没有变化，则重启所有岛屿
             if global_no_improve_count >= 20:
+                overall_best_fitness = -1e9
                 print(f"连续 {global_no_improve_count} 代全局最优个体未变化，进行全局重启所有岛屿。")
                 for idx, island in enumerate(islands):
                     new_population = []
