@@ -952,25 +952,16 @@ def get_unique_candidate(candidate_long_signals, candidate_short_signals,
     """
     辅助函数：补充 candidate_list 直至其长度达到 target_size。
 
-    参数说明：
-      - candidate_long_signals: 长信号候选集合（列表）。
-      - candidate_short_signals: 短信号候选集合（列表）。
-      - global_generated_individuals: 已评价的候选个体集合（全局集合）。
-      - candidate_list: 现有候选个体列表（可能已部分填充）。
-      - target_size: 期望候选个体列表的长度。
-
-    在补充过程中，只有当生成的新候选个体既不在 global_generated_individuals
-    中，也不在 candidate_list 中时，才将其添加到 candidate_list 中。
-
-    返回：
-      - 补充后的 candidate_list，当其长度达到 target_size 时返回。
+    注意：利用候选个体的散列值进行重复检测，避免将整个个体存入全局集合，从而降低内存占用。
     """
     while len(candidate_list) < target_size:
         candidate = (random.choice(candidate_long_signals), random.choice(candidate_short_signals))
-        if candidate in global_generated_individuals or candidate in candidate_list:
+        candidate_hash = hash(candidate)
+        if candidate_hash in global_generated_individuals or candidate in candidate_list:
             continue
         candidate_list.append(candidate)
     return candidate_list
+
 
 def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_signals,
                                    population_size=50, generations=20,
@@ -979,17 +970,8 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                                    restart_similarity_threshold=10):
     """
     利用遗传算法结合岛屿模型搜索净利率较高的 (长信号, 短信号) 组合。
-    全局已评价个体集合 global_generated_individuals 仅在每个岛种群评价后更新，
-    其生成的新候选个体通过 get_unique_candidate 辅助函数确保不重复，
-    并且只在评价后统一更新全局集合记录。
-
-    参数说明：
-      - candidate_long_signals: 长信号候选集合。
-      - candidate_short_signals: 短信号候选集合。
-      - islands_count: 岛屿数量。
-      - migration_interval: 每隔多少代进行一次迁移。
-      - migration_rate: 迁移时迁出个体占岛内个体比例。
-      - restart_similarity_threshold: 岛屿间相似性阈值，相似性低于此阈值则重启岛屿。
+    全局已评价个体集合 global_generated_individuals 采用候选个体散列值（散列值为整数）
+    进行记录，从而降低内存占用。
     """
     # 确保断点存储目录存在
     checkpoint_dir = "temp"
@@ -1002,7 +984,8 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     precomputed = load_or_compute_precomputed_signals(df, all_signals, key_name)
     total_size = sys.getsizeof(precomputed)
     for sig, (s_np, p_np) in precomputed.items():
-        total_size += sys.getsizeof(sig) + s_np.nbytes + p_np.nbytes
+        total_size += sys.getsizeof(sig) + (s_np.nbytes if hasattr(s_np, "nbytes") else 0) + (
+            p_np.nbytes if hasattr(p_np, "nbytes") else 0)
     print(f"precomputed_signals 占用内存总大小: {total_size / (1024 * 1024):.2f} MB")
 
     global GLOBAL_SIGNALS
@@ -1013,7 +996,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     candidate_long_signals = list(GLOBAL_SIGNALS.keys())
     candidate_short_signals = list(GLOBAL_SIGNALS.keys())
 
-    # 定义全局已评价候选个体集合，用于判重
+    # 定义全局已评价候选个体集合，存储候选个体的散列值（整型）
     global_generated_individuals = set()
 
     # 尝试加载断点续跑数据
@@ -1066,7 +1049,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     elite_fraction = 0.05  # 保留前 5%
     no_improvement_threshold = 3  # 连续 3 代无改进则提升变异率
     restart_threshold = 5  # 连续 5 代无改进则进行局部重启
-    max_memory = 45
+    max_memory = 45  # GB
     pool_processes = min(32, int(max_memory * 1024 * 1024 * 1024 / total_size) if total_size > 0 else 1)
     print(f"进程数限制为 {pool_processes}，根据内存限制调整。")
 
@@ -1086,11 +1069,11 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
             # ----------------- 各岛进化操作 -----------------
             for idx, island in enumerate(islands):
                 population = island["population"]
-                # 评价当前岛种群，评价后统一更新全局已评价集合
+                # 评价当前岛种群，每个候选个体评价完后统一更新全局集合（采用散列值）
                 pop_batches = [population[i:i + batch_size] for i in range(0, len(population), batch_size)]
                 results_batches = pool.map(evaluate_candidate_batch, pop_batches)
-                # 在评价后将当前岛内所有候选个体更新到全局集合中
-                global_generated_individuals.update(population)
+                # 更新全局已评价集合：存储候选个体的散列值
+                global_generated_individuals.update(hash(ind) for ind in population)
 
                 fitness_results = []
                 for batch_res in results_batches:
@@ -1143,12 +1126,11 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                 mutated_population = [mutate(ind, island["adaptive_mutation_rate"],
                                              candidate_long_signals, candidate_short_signals)
                                       for ind in next_population]
-                # 注意：这里不更新全局集合，只在评价后统一更新
                 # 多样性注入：注入一定比例的随机个体
                 diversity_percent = 0.1 + (0.05 * island["no_improve_count"])
                 diversity_count = max(1, int(diversity_percent * island_pop_size))
                 for _ in range(diversity_count):
-                    # 单个新候选个体：调用后返回列表，所以取第一个元素
+                    # 单个新候选个体：调用 get_unique_candidate 返回列表，取第一个元素
                     new_candidate = get_unique_candidate(candidate_long_signals, candidate_short_signals,
                                                          global_generated_individuals, candidate_list=[],
                                                          target_size=1)[0]
@@ -1220,7 +1202,8 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                 global_no_improve_count = 0
             prev_overall_best = overall_best
 
-            print(f"第 {gen} 代全局最优个体: {overall_best}，适应度: {overall_best_fitness}，耗时 {elapsed_gen:.2f} 秒。连续 {global_no_improve_count} 代无改进。 当前全局评价组合数: {len(global_generated_individuals)}")
+            print(
+                f"第 {gen} 代全局最优个体: {overall_best}，适应度: {overall_best_fitness}，耗时 {elapsed_gen:.2f} 秒。连续 {global_no_improve_count} 代无改进。 当前全局评价组合散列数: {len(global_generated_individuals)}")
 
             if global_no_improve_count >= 20:
                 overall_best_fitness = -1e9
@@ -1261,7 +1244,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                     worst_tgt = {ind for (fit, ind, stat) in sorted_tgt[:migration_num]}
                     new_target_population = [ind for ind in target_island["population"] if ind not in worst_tgt]
                     new_target_population.extend(emigrants)
-                    # 利用新函数补充迁移后不足的个体
+                    # 利用 get_unique_candidate 补充迁移后不足的个体
                     new_target_population = get_unique_candidate(candidate_long_signals, candidate_short_signals,
                                                                  global_generated_individuals,
                                                                  candidate_list=new_target_population,
