@@ -894,7 +894,7 @@ def evaluate_candidate_batch(candidates):
     for candidate in candidates:
         long_sig, short_sig = candidate
         _, stat = get_detail_backtest_result_op(df, long_sig, short_sig, is_filter=True, is_detail=False,
-                                                is_reverse=False)
+                                                is_reverse=True)
         fitness = get_fitness(stat)
         batch_results.append((fitness, candidate, stat))
     return batch_results
@@ -1082,7 +1082,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     prev_overall_best = overall_best
     global_no_improve_count = 0
 
-    with multiprocessing.Pool(processes=10, initializer=init_worker_ga,
+    with multiprocessing.Pool(processes=pool_processes, initializer=init_worker_ga,
                               initargs=(GLOBAL_SIGNALS, df)) as pool:
         for gen in range(start_gen, generations):
             start_time = time.time()
