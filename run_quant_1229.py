@@ -1092,7 +1092,8 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
             # ----------------- 各岛进化操作 -----------------
             for idx, island in enumerate(islands):
                 population = island["population"]
-
+                result2 = overall_best in population
+                print(f"开始岛 {idx} 种群的进化，{overall_best} 是否存在 {result2} 当前种群大小: {len(population)} ")
                 # 评价当前岛种群，评价后统一更新全局已评价集合
                 pop_batches = [population[i:i + batch_size] for i in range(0, len(population), batch_size)]
                 results_batches = pool.map(evaluate_candidate_batch, pop_batches)
@@ -1162,9 +1163,9 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                     replace_index = random.randint(0, len(mutated_population) - 1)
                     mutated_population[replace_index] = new_candidate
                 # 合并精英与变异个体，并去重（确保岛内个体不重复）
+                mutated_population = filter_existing_individuals(mutated_population, global_generated_individuals)
                 unique_population = elites + mutated_population
                 # 删除mutated_population中的重复元素
-                mutated_population = filter_existing_individuals(mutated_population, global_generated_individuals)
                 unique_population = list({ind: None for ind in unique_population}.keys())
                 # 利用新的 get_unique_candidate 补充个体直到达到 island_pop_size
                 unique_population = get_unique_candidate(candidate_long_signals, candidate_short_signals,
@@ -1215,6 +1216,8 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                             islands[restart_idx]["adaptive_mutation_rate"] = mutation_rate
                             islands[restart_idx].pop("sorted_fitness", None)
 
+
+
             # ----------------- 更新全局最优及全局重启 -----------------
             for island in islands:
                 if island["best_fitness"] > overall_best_fitness:
@@ -1233,6 +1236,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
 
             if global_no_improve_count >= 20:
                 overall_best_fitness = -1e9
+                overall_best = None
                 print(f"连续 {global_no_improve_count} 代全局最优未改进，进行全局重启。")
                 for idx, island in enumerate(islands):
                     new_population = get_unique_candidate(candidate_long_signals, candidate_short_signals,
@@ -1365,7 +1369,7 @@ def example():
     """
     start_time = time.time()
     data_path_list = [
-        # "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
