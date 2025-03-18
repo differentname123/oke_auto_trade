@@ -375,7 +375,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     # 利用 numba 计算连续亏损与连续盈利数据
     profits_arr = kai_data_df["true_profit"].values
     max_loss, max_loss_start_idx, max_loss_end_idx, loss_trade_count = calculate_max_sequence_numba(profits_arr)
-    if max_loss < -20 or net_profit_rate < 50:
+    if max_loss < -10 or net_profit_rate < 50:
         # 若连续亏损太大，则舍弃该组合
         return None, None
 
@@ -880,10 +880,10 @@ def get_fitness(stat):
     else:
         net_profit_rate = stat.get("net_profit_rate", -10000)
         # monthly_net_profit_std = stat.get("monthly_net_profit_std", 10000)
-        max_consecutive_loss = stat.get("max_consecutive_loss", -100000)
-        # fitness = net_profit_rate
+        # max_consecutive_loss = stat.get("max_consecutive_loss", -100000)
+        fitness = net_profit_rate
         # fitness = 1 - monthly_net_profit_std / (net_profit_rate) * 22
-        fitness = -net_profit_rate * net_profit_rate / max_consecutive_loss
+        # fitness = -net_profit_rate * net_profit_rate / max_consecutive_loss
         return fitness
 
 def evaluate_candidate_batch(candidates):
@@ -1072,7 +1072,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     elite_fraction = 0.05  # 保留前 5%
     no_improvement_threshold = 3  # 连续 3 代无改进则提升变异率
     restart_threshold = 5  # 连续 5 代无改进则进行局部重启
-    max_memory = 45
+    max_memory = 40
     pool_processes = min(32, int(max_memory * 1024 * 1024 * 1024 / total_size) if total_size > 0 else 1)
     print(f"进程数限制为 {pool_processes}，根据内存限制调整。")
 
@@ -1080,7 +1080,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
 
     # 初始化全局最优追踪变量，用于全局重启判断
     prev_overall_best = overall_best
-    global_no_improve_count = 0
+    global_no_improve_count = 20
 
     with multiprocessing.Pool(processes=pool_processes, initializer=init_worker_ga,
                               initargs=(GLOBAL_SIGNALS, df)) as pool:
