@@ -1355,7 +1355,7 @@ def ga_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
     # 调用遗传算法搜索最佳信号组合（使用岛屿模型，参数可根据需求调整）
     best_candidate, best_fitness, history = genetic_algorithm_optimization(
         df_local, all_signals, all_signals,
-        population_size=population_size, generations=1000,
+        population_size=population_size, generations=200,
         crossover_rate=0.9, mutation_rate=0.2,
         key_name=f'{base_name}_{key_name}',
         islands_count=8, migration_interval=10, migration_rate=0.05
