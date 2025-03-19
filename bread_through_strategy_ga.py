@@ -23,6 +23,7 @@ import pickle
 import random
 import traceback
 from itertools import product
+from functools import partial
 
 import numpy as np
 import pandas as pd
@@ -683,7 +684,6 @@ def generate_all_signals():
     column_list.append((rsi_long_columns, rsi_short_columns, rsi_key_name))
     # # 369M
 
-
     macd_long_columns, macd_short_columns, macd_key_name = gen_macd_signal_name(300, 1000, 50)
     column_list.append((macd_long_columns, macd_short_columns, macd_key_name))
     # 367M
@@ -879,25 +879,68 @@ def get_fitness(stat):
         return -10000
     else:
         net_profit_rate = stat.get("net_profit_rate", -10000)
-        # fitness = net_profit_rate
-
-        # monthly_net_profit_std = stat.get("monthly_net_profit_std", 10000)
         max_consecutive_loss = stat.get("max_consecutive_loss", -100000)
-
-        # fitness = 1 - monthly_net_profit_std / (net_profit_rate) * 22
         fitness = -net_profit_rate * net_profit_rate / max_consecutive_loss
         return fitness
 
-def evaluate_candidate_batch(candidates):
+def get_fitness_fu_profit_sum(stat):
+    """
+    从统计结果中提取适应度值。
+    """
+    if stat is None:
+        return -10000
+    else:
+        net_profit_rate = stat.get("net_profit_rate", -10000)
+        fu_profit_sum = stat.get("fu_profit_sum", -100000)
+        fitness = -net_profit_rate * net_profit_rate / fu_profit_sum
+        return fitness
+
+def get_fitness_monthly_net_profit_min(stat):
+    """
+    从统计结果中提取适应度值。
+    """
+    if stat is None:
+        return -10000
+    else:
+        monthly_net_profit_min = stat.get("monthly_net_profit_min", -10000)
+        fitness = monthly_net_profit_min
+        return fitness
+def get_fitness_net(stat):
+    """
+    从统计结果中提取适应度值。
+    """
+    if stat is None:
+        return -10000
+    else:
+        net_profit_rate = stat.get("net_profit_rate", -10000)
+        return net_profit_rate
+
+
+def get_fitness_monthly_net_profit_std(stat):
+    """
+    从统计结果中提取适应度值。
+    """
+    if stat is None:
+        return -10000
+    else:
+        net_profit_rate = stat.get("net_profit_rate", -10000)
+        monthly_net_profit_std = stat.get("monthly_net_profit_std", 10000)
+        fitness = 1 - monthly_net_profit_std / (net_profit_rate) * 22
+        return fitness
+
+get_fitness_list = [get_fitness, get_fitness_fu_profit_sum, get_fitness_monthly_net_profit_min, get_fitness_net, get_fitness_monthly_net_profit_std]
+
+def evaluate_candidate_batch(candidates, fitness_func=get_fitness):
     """
     对一批候选个体进行评价，返回列表 [(fitness, candidate, stat), ...]。
+    现在适应度计算函数由 fitness_func 参数传入，而不是固定调用 get_fitness。
     """
     batch_results = []
     for candidate in candidates:
         long_sig, short_sig = candidate
         _, stat = get_detail_backtest_result_op(df, long_sig, short_sig, is_filter=True, is_detail=False,
-                                                is_reverse=True)
-        fitness = get_fitness(stat)
+                                                  is_reverse=True)
+        fitness = fitness_func(stat)
         batch_results.append((fitness, candidate, stat))
     return batch_results
 
@@ -984,7 +1027,8 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                                    population_size=50, generations=20,
                                    crossover_rate=0.8, mutation_rate=0.1, key_name="default",
                                    islands_count=4, migration_interval=10, migration_rate=0.1,
-                                   restart_similarity_threshold=10):
+                                   restart_similarity_threshold=10,
+                                   fitness_func=get_fitness):
     """
     利用遗传算法结合岛屿模型搜索净利率较高的 (长信号, 短信号) 组合。
     全局已评价个体集合 global_generated_individuals 仅在每个岛种群评价后更新，
@@ -998,6 +1042,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
       - migration_interval: 每隔多少代进行一次迁移。
       - migration_rate: 迁移时迁出个体占岛内个体比例。
       - restart_similarity_threshold: 岛屿间相似性阈值，相似性低于此阈值则重启岛屿。
+      - fitness_func: 适应度计算函数，传入统计结果 stat 后返回适应度值。
     """
     # 确保断点存储目录存在
     checkpoint_dir = "temp"
@@ -1084,6 +1129,9 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     prev_overall_best = overall_best
     global_no_improve_count = 20
 
+    # 使用 functools.partial 传入自定义适应度函数 fitness_func
+    partial_eval = partial(evaluate_candidate_batch, fitness_func=fitness_func)
+
     with multiprocessing.Pool(processes=pool_processes, initializer=init_worker_ga,
                               initargs=(GLOBAL_SIGNALS, df)) as pool:
         for gen in range(start_gen, generations):
@@ -1098,7 +1146,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                 print(f"开始岛 {idx} 种群的进化，{overall_best} 是否存在 {result2} 当前种群大小: {len(population)} ")
                 # 评价当前岛种群，评价后统一更新全局已评价集合
                 pop_batches = [population[i:i + batch_size] for i in range(0, len(population), batch_size)]
-                results_batches = pool.map(evaluate_candidate_batch, pop_batches)
+                results_batches = pool.map(partial_eval, pop_batches)
                 # 在评价后将当前岛内所有候选个体更新到全局集合中
                 global_generated_individuals.update(population)
 
@@ -1261,11 +1309,11 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                     target_island = islands[target_idx]
                     src_batches = [source_island["population"][j:j + batch_size]
                                    for j in range(0, len(source_island["population"]), batch_size)]
-                    src_results = pool.map(evaluate_candidate_batch, src_batches)
+                    src_results = pool.map(partial_eval, src_batches)
                     src_fitness_results = [item for batch in src_results for item in batch]
                     tgt_batches = [target_island["population"][j:j + batch_size]
                                    for j in range(0, len(target_island["population"]), batch_size)]
-                    tgt_results = pool.map(evaluate_candidate_batch, tgt_batches)
+                    tgt_results = pool.map(partial_eval, tgt_batches)
                     tgt_fitness_results = [item for batch in tgt_results for item in batch]
                     if not src_fitness_results or not tgt_fitness_results:
                         continue
@@ -1357,10 +1405,11 @@ def ga_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
     # 调用遗传算法搜索最佳信号组合（使用岛屿模型，参数可根据需求调整）
     best_candidate, best_fitness, history = genetic_algorithm_optimization(
         df_local, all_signals, all_signals,
-        population_size=population_size, generations=400,
+        population_size=population_size, generations=500,
         crossover_rate=0.9, mutation_rate=0.2,
         key_name=f'{base_name}_{key_name}',
         islands_count=8, migration_interval=10, migration_rate=0.05
+        # fitness_func 参数可以在此传入自定义的适应度计算函数
     )
     print(f"数据 {base_name} 最优信号组合: {best_candidate}，净利率: {best_fitness}")
 
