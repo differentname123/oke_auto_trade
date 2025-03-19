@@ -879,11 +879,13 @@ def get_fitness(stat):
         return -10000
     else:
         net_profit_rate = stat.get("net_profit_rate", -10000)
+        # fitness = net_profit_rate
+
         # monthly_net_profit_std = stat.get("monthly_net_profit_std", 10000)
-        # max_consecutive_loss = stat.get("max_consecutive_loss", -100000)
-        fitness = net_profit_rate
+        max_consecutive_loss = stat.get("max_consecutive_loss", -100000)
+
         # fitness = 1 - monthly_net_profit_std / (net_profit_rate) * 22
-        # fitness = -net_profit_rate * net_profit_rate / max_consecutive_loss
+        fitness = -net_profit_rate * net_profit_rate / max_consecutive_loss
         return fitness
 
 def evaluate_candidate_batch(candidates):
@@ -1355,7 +1357,7 @@ def ga_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
     # 调用遗传算法搜索最佳信号组合（使用岛屿模型，参数可根据需求调整）
     best_candidate, best_fitness, history = genetic_algorithm_optimization(
         df_local, all_signals, all_signals,
-        population_size=population_size, generations=200,
+        population_size=population_size, generations=400,
         crossover_rate=0.9, mutation_rate=0.2,
         key_name=f'{base_name}_{key_name}',
         islands_count=8, migration_interval=10, migration_rate=0.05
