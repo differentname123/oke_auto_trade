@@ -430,6 +430,11 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     monthly_net_profit_max = monthly_agg["sum"].max() if "sum" in monthly_agg else 0
     monthly_loss_rate = ((monthly_agg["sum"] < 0).sum() / active_months) if active_months else 0
 
+    # 新增指标：每个月净利润和交易个数
+    monthly_net_profit_detail = {str(month): round(val, 4) for month, val in monthly_agg["sum"].to_dict().items()}
+    monthly_trade_count_detail = {str(month): int(val) for month, val in monthly_agg["count"].to_dict().items()}
+
+
     hold_time_std = kai_data_df["hold_time"].std()
 
     # 计算盈利排行比例
@@ -498,7 +503,9 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         "monthly_avg_profit_std": safe_round(monthly_avg_profit_std, 4),
         "top_profit_ratio": safe_round(top_profit_ratio, 4),
         "top_loss_ratio": safe_round(top_loss_ratio, 4),
-        "is_reverse": is_reverse
+        "is_reverse": is_reverse,
+        "monthly_net_profit_detail": monthly_net_profit_detail,
+        "monthly_trade_count_detail": monthly_trade_count_detail
     }
     kai_data_df = kai_data_df[["hold_time", "true_profit"]]
     return kai_data_df, statistic_dict
@@ -928,7 +935,21 @@ def get_fitness_monthly_net_profit_std(stat):
         fitness = 1 - monthly_net_profit_std / (net_profit_rate) * 22
         return fitness
 
-get_fitness_list = [get_fitness, get_fitness_fu_profit_sum, get_fitness_monthly_net_profit_min, get_fitness_net, get_fitness_monthly_net_profit_std]
+def get_fitness_stability_score(stat):
+    """
+    从统计结果中提取适应度值。
+    """
+    if stat is None:
+        return -10000
+    else:
+        loss_rate = stat.get("loss_rate", 1)
+        monthly_loss_rate = stat.get("monthly_loss_rate", 1)
+        net_profit_rate = stat.get("net_profit_rate", -10000)
+        monthly_net_profit_std = stat.get("monthly_net_profit_std", 10000)
+        fitness = 2 - monthly_net_profit_std / (net_profit_rate) * 22 - loss_rate - monthly_loss_rate
+        return fitness
+
+get_fitness_list = [get_fitness_monthly_net_profit_std, get_fitness_stability_score]
 
 def evaluate_candidate_batch(candidates, fitness_func=get_fitness):
     """
@@ -939,7 +960,7 @@ def evaluate_candidate_batch(candidates, fitness_func=get_fitness):
     for candidate in candidates:
         long_sig, short_sig = candidate
         _, stat = get_detail_backtest_result_op(df, long_sig, short_sig, is_filter=True, is_detail=False,
-                                                  is_reverse=True)
+                                                  is_reverse=False)
         fitness = fitness_func(stat)
         batch_results.append((fitness, candidate, stat))
     return batch_results
@@ -1129,15 +1150,20 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     prev_overall_best = overall_best
     global_no_improve_count = 20
 
+    single_generations_count = int(generations / len(get_fitness_list))
+    fitness_index = 0
+    pre_fitness_index = 0
+    print(f"单次适应函数代数: {single_generations_count} 总共 {len(get_fitness_list)} 个函数 总共代数: {generations}")
+
     # 使用 functools.partial 传入自定义适应度函数 fitness_func
-    partial_eval = partial(evaluate_candidate_batch, fitness_func=fitness_func)
+    partial_eval = partial(evaluate_candidate_batch, fitness_func=get_fitness_list[fitness_index])
 
     with multiprocessing.Pool(processes=pool_processes, initializer=init_worker_ga,
                               initargs=(GLOBAL_SIGNALS, df)) as pool:
         for gen in range(start_gen, generations):
             start_time = time.time()
-            print(f"\n========== 开始第 {gen} 代遗传算法搜索 （岛屿模型） ==========")
             island_stats_list = []
+            print(f"\n========== 开始第 {gen} 代遗传算法搜索 （岛屿模型） ==========使用的适应度函数: {get_fitness_list[fitness_index].__name__}")
 
             # ----------------- 各岛进化操作 -----------------
             for idx, island in enumerate(islands):
@@ -1284,7 +1310,15 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
 
             print(f"第 {gen} 代全局最优个体: {overall_best}，适应度: {overall_best_fitness}，耗时 {elapsed_gen:.2f} 秒。连续 {global_no_improve_count} 代无改进。 当前全局评价组合数: {len(global_generated_individuals)}")
 
-            if global_no_improve_count >= 20:
+            need_restart = False
+            # gen除single_generations_count，向下取整
+            fitness_index = gen // single_generations_count
+            if fitness_index != pre_fitness_index:
+                partial_eval = partial(evaluate_candidate_batch, fitness_func=get_fitness_list[fitness_index])
+                pre_fitness_index = fitness_index
+                need_restart = True
+
+            if global_no_improve_count >= 20 or need_restart:
                 overall_best_fitness = -1e9
                 overall_best = None
                 print(f"连续 {global_no_improve_count} 代全局最优未改进，进行全局重启。")
@@ -1405,7 +1439,7 @@ def ga_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
     # 调用遗传算法搜索最佳信号组合（使用岛屿模型，参数可根据需求调整）
     best_candidate, best_fitness, history = genetic_algorithm_optimization(
         df_local, all_signals, all_signals,
-        population_size=population_size, generations=500,
+        population_size=population_size, generations=600,
         crossover_rate=0.9, mutation_rate=0.2,
         key_name=f'{base_name}_{key_name}',
         islands_count=8, migration_interval=10, migration_rate=0.05
@@ -1420,8 +1454,8 @@ def example():
     """
     start_time = time.time()
     data_path_list = [
-        "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
 

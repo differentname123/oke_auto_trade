@@ -2493,7 +2493,7 @@ def gen_statistic_data(origin_good_df, threshold=99):
     origin_good_df["monthly_net_profit_detail"] = origin_good_df["monthly_net_profit_detail"].apply(safe_parse_dict)
     origin_good_df["monthly_trade_count_detail"] = origin_good_df["monthly_trade_count_detail"].apply(safe_parse_dict)
     print(f'待计算的数据量：{len(origin_good_df)}')
-    origin_good_df = filtering(origin_good_df, 'kai_count', 'net_profit_rate', 99)
+    origin_good_df = filtering(origin_good_df, 'kai_count', 'net_profit_rate', 95)
     print(f'过滤后的数据量：{len(origin_good_df)}')
 
     # 转换为字典列表，保持 DataFrame 内的顺序
@@ -2925,7 +2925,7 @@ def debug():
         # good_df = good_df[(good_df['net_profit_rate'] > 300)]
         result, good_df, df = find_all_valid_groups(good_df, 30)
         good_df.to_csv('temp/final_good.csv', index=False)
-        get_metrics_df(good_df)
+        # get_metrics_df(good_df)
         return
 
 
