@@ -962,7 +962,7 @@ def evaluate_candidate_batch(candidates, fitness_func=get_fitness):
     for candidate in candidates:
         long_sig, short_sig = candidate
         _, stat = get_detail_backtest_result_op(df, long_sig, short_sig, is_filter=True, is_detail=False,
-                                                  is_reverse=False)
+                                                  is_reverse=True)
         fitness = fitness_func(stat)
         batch_results.append((fitness, candidate, stat))
     return batch_results
