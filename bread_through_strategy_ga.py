@@ -413,8 +413,9 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
 
     trade_rate = (100 * trade_count / total_count) if total_count else 0
     hold_time_mean = kai_data_df["hold_time"].mean() if trade_count else 0
+    max_hold_time = kai_data_df["hold_time"].max() if trade_count else 0
 
-    if hold_time_mean > 1000 or true_profit_mean < 10:
+    if hold_time_mean > 2000 or true_profit_mean < 10:
         return None, None
 
     # 计算月度统计指标
@@ -466,6 +467,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         "total_count": total_count,
         "trade_rate": safe_round(trade_rate, 4),
         "hold_time_mean": hold_time_mean,
+        "max_hold_time": max_hold_time,
         "hold_time_std": hold_time_std,
         "loss_rate": loss_rate,
         "loss_time_rate": loss_time_rate,
@@ -932,7 +934,7 @@ def get_fitness_monthly_net_profit_std(stat):
     else:
         net_profit_rate = stat.get("net_profit_rate", -10000)
         monthly_net_profit_std = stat.get("monthly_net_profit_std", 10000)
-        fitness = 1 - monthly_net_profit_std / (net_profit_rate) * 22
+        fitness = 1 - monthly_net_profit_std * monthly_net_profit_std / (net_profit_rate) * 22
         return fitness
 
 def get_fitness_stability_score(stat):
@@ -949,7 +951,7 @@ def get_fitness_stability_score(stat):
         fitness = 2 - monthly_net_profit_std / (net_profit_rate) * 22 - loss_rate - monthly_loss_rate
         return fitness
 
-get_fitness_list = [get_fitness_monthly_net_profit_std, get_fitness_stability_score]
+get_fitness_list = [get_fitness_net, get_fitness_monthly_net_profit_std]
 
 def evaluate_candidate_batch(candidates, fitness_func=get_fitness):
     """
@@ -1439,7 +1441,7 @@ def ga_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
     # 调用遗传算法搜索最佳信号组合（使用岛屿模型，参数可根据需求调整）
     best_candidate, best_fitness, history = genetic_algorithm_optimization(
         df_local, all_signals, all_signals,
-        population_size=population_size, generations=600,
+        population_size=population_size, generations=400,
         crossover_rate=0.9, mutation_rate=0.2,
         key_name=f'{base_name}_{key_name}',
         islands_count=8, migration_interval=10, migration_rate=0.05
@@ -1454,8 +1456,8 @@ def example():
     """
     start_time = time.time()
     data_path_list = [
-        # "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
 

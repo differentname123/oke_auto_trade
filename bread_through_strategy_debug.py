@@ -2493,7 +2493,7 @@ def gen_statistic_data(origin_good_df, threshold=99):
     origin_good_df["monthly_net_profit_detail"] = origin_good_df["monthly_net_profit_detail"].apply(safe_parse_dict)
     origin_good_df["monthly_trade_count_detail"] = origin_good_df["monthly_trade_count_detail"].apply(safe_parse_dict)
     print(f'待计算的数据量：{len(origin_good_df)}')
-    origin_good_df = filtering(origin_good_df, 'kai_count', 'net_profit_rate', 95)
+    origin_good_df = filtering(origin_good_df, 'kai_count', 'net_profit_rate', 90)
     print(f'过滤后的数据量：{len(origin_good_df)}')
 
     # 转换为字典列表，保持 DataFrame 内的顺序
@@ -2921,9 +2921,9 @@ def debug():
         # # good_df = good_df.sort_values(by=sort_key, ascending=True)
         # # good_df = good_df.drop_duplicates(subset=['kai_column', 'kai_side'], keep='first')
         #
-        good_df = pd.read_csv(f'temp/1m_10000000_TON_is_detail_True_is_reverse_False_403_0.csv')
+        good_df = pd.read_csv(f'temp/final_good.csv')
         # good_df = good_df[(good_df['net_profit_rate'] > 300)]
-        result, good_df, df = find_all_valid_groups(good_df, 30)
+        result, good_df, df = find_all_valid_groups(good_df, 10)
         good_df.to_csv('temp/final_good.csv', index=False)
         # get_metrics_df(good_df)
         return
