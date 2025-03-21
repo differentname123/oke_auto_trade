@@ -566,6 +566,7 @@
 2025-03-21:
     已完成:
         1.感觉都是对冲组合的功劳，对冲肯定是能够减小风险的方法，其它的化感觉就在max_consecutive_loss > -10里面最求利润最大化吧。
+        2.感觉所有std尽量小都有助于稳定，比如origin_good_df['net_profit_rate'] * origin_good_df['net_profit_rate'] / origin_good_df['hold_time_std']  和 avg_profit_rate 都是越大越好
     待完成:
         1.尝试对好的参数进行敏感性分析，进一步提高鲁棒性。
         2.尝试运行两个信号组合的结果。
