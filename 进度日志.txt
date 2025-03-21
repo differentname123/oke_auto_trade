@@ -567,6 +567,7 @@
     已完成:
         1.感觉都是对冲组合的功劳，对冲肯定是能够减小风险的方法，其它的化感觉就在max_consecutive_loss > -10里面最求利润最大化吧。
         2.(origin_good_df['avg_profit_rate'] > 100) 并且origin_good_df['net_profit_rate'] * origin_good_df['net_profit_rate'] / origin_good_df['hold_time_std'] 越大越好，这两个组合不错
+        3.默认按照kai_count排序选择的化，可以在评分阶段除以kai_count避免评分高kai_count也大，最后只会选择一个
     待完成:
         1.尝试对好的参数进行敏感性分析，进一步提高鲁棒性。
         2.尝试运行两个信号组合的结果。
