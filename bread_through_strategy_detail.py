@@ -2842,13 +2842,13 @@ def debug():
     sort_key = 'stability_score'
     # sort_key = 'profit_risk_score'
     # sort_key = 'monthly_net_profit_min'
-    sort_key = 'monthly_net_profit_std_score'
+    # sort_key = 'monthly_net_profit_std_score'
     # sort_key = 'profit_risk_score'
     # sort_key = 'profit_risk_score_con'
     range_size = 1
     # sort_key = 'max_consecutive_loss_score'
     # origin_good_df = choose_good_strategy_debug('')
-    inst_id_list = ['ETH', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     for inst_id in inst_id_list:
         # gen_search_param(inst_id)
         # origin_good_df = pd.read_csv(f'temp/{inst_id}_final_good.csv')

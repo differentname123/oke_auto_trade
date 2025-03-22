@@ -2485,15 +2485,18 @@ def gen_statistic_data(origin_good_df, threshold=99):
     """
     start_time = time.time()
 
-    # 重置索引，并保存原始索引到 "index" 列
-    origin_good_df = origin_good_df.reset_index(drop=True)
-    origin_good_df = origin_good_df.reset_index()  # "index" 列保存原始行标
+    try:
+        # 重置索引，并保存原始索引到 "index" 列
+        origin_good_df = origin_good_df.reset_index(drop=True)
+        origin_good_df = origin_good_df.reset_index()  # "index" 列保存原始行标
+    except Exception as e:
+        pass
 
     # 对指定字段进行解析
     origin_good_df["monthly_net_profit_detail"] = origin_good_df["monthly_net_profit_detail"].apply(safe_parse_dict)
     origin_good_df["monthly_trade_count_detail"] = origin_good_df["monthly_trade_count_detail"].apply(safe_parse_dict)
     print(f'待计算的数据量：{len(origin_good_df)}')
-    origin_good_df = filtering(origin_good_df, 'kai_count', 'net_profit_rate', 90)
+    origin_good_df = filtering(origin_good_df, 'kai_count', 'net_profit_rate', 99)
     print(f'过滤后的数据量：{len(origin_good_df)}')
 
     # 转换为字典列表，保持 DataFrame 内的顺序
