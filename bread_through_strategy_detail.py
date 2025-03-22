@@ -2848,7 +2848,7 @@ def debug():
     range_size = 1
     # sort_key = 'max_consecutive_loss_score'
     # origin_good_df = choose_good_strategy_debug('')
-    inst_id_list = ['TON', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = ['ETH', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     for inst_id in inst_id_list:
         # gen_search_param(inst_id)
         # origin_good_df = pd.read_csv(f'temp/{inst_id}_final_good.csv')
@@ -3053,7 +3053,7 @@ def debug():
             # 获取索引为109，876，926的行
             # row_list = [303, 4144, 3949]
             # 找到good_df中score字段值在row_list中的行
-            # good_df[good_df['index'].isin(        [56339, 2645, 45841]     )]
+            # good_df[good_df['index'].isin(        [1423, 1279, 580]    )]
             # good_df_list[0][good_df_list[0]['index'].isin([339, 990])]
             # result = find_all_valid_groups(good_df, 100)
             # good_df.loc[  [1073, 1874]   ]
