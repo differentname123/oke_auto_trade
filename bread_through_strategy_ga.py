@@ -1411,6 +1411,14 @@ def ga_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
     df_local = pd.read_csv(data_path)
     needed_columns = ["timestamp", "high", "low", "close"]
     df_local = df_local[needed_columns]
+    min_price = df_local["low"].min()
+    # 如果min_price在小数点很后面，那需要乘以10，直到大于1
+    while min_price < 1:
+        df_local["high"] *= 10
+        df_local["low"] *= 10
+        df_local["close"] *= 10
+        min_price *= 10
+
     jingdu = "float32"
     df_local["chg"] = (df_local["close"].pct_change() * 100).astype("float16")
     df_local["high"] = df_local["high"].astype(jingdu)
@@ -1466,8 +1474,8 @@ def example():
         # "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_10000000_DOGE-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_10000000_XRP-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_10000000_DOGE-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_10000000_XRP-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_PEPE-USDT-SWAP.csv"
 
         # "kline_data/origin_data_5m_10000000_SOL-USDT-SWAP.csv",

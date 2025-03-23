@@ -2848,7 +2848,7 @@ def debug():
     range_size = 1
     # sort_key = 'max_consecutive_loss_score'
     # origin_good_df = choose_good_strategy_debug('')
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = ['DOGE', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     for inst_id in inst_id_list:
         # gen_search_param(inst_id)
         # origin_good_df = pd.read_csv(f'temp/{inst_id}_final_good.csv')
