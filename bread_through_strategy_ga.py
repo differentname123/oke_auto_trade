@@ -952,7 +952,7 @@ def get_fitness_stability_score(stat):
         fitness = 2 - monthly_net_profit_std / (net_profit_rate) * 22 - loss_rate - monthly_loss_rate
         return fitness
 
-get_fitness_list = [get_fitness_net, get_fitness_monthly_net_profit_std]
+get_fitness_list = [get_fitness_net]
 
 def evaluate_candidate_batch(candidates, fitness_func=get_fitness):
     """
@@ -963,7 +963,7 @@ def evaluate_candidate_batch(candidates, fitness_func=get_fitness):
     for candidate in candidates:
         long_sig, short_sig = candidate
         _, stat = get_detail_backtest_result_op(df, long_sig, short_sig, is_filter=True, is_detail=False,
-                                                  is_reverse=True)
+                                                  is_reverse=False)
         fitness = fitness_func(stat)
         batch_results.append((fitness, candidate, stat))
     return batch_results
@@ -1471,12 +1471,12 @@ def example():
         # "kline_data/origin_data_1m_110000_TON-USDT-SWAP.csv",
 
 
-        # "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_10000000_DOGE-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_10000000_XRP-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_DOGE-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_XRP-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_PEPE-USDT-SWAP.csv"
 
         # "kline_data/origin_data_5m_10000000_SOL-USDT-SWAP.csv",
