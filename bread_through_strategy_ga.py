@@ -457,6 +457,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         top_loss_ratio = (abs(top_loss_sum) / abs(total_loss_sum)) if total_loss_sum != 0 else 0
     else:
         top_loss_ratio = 0
+    same_count_rate = safe_round(100 * len(common_index) / min(len(kai_data_df), len(pin_data_df)) if trade_count else 0, 4)
 
     # 整理统计结果字典
     statistic_dict = {
@@ -494,7 +495,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         "max_profit_start_time": max_profit_start_time,
         "max_profit_end_time": max_profit_end_time,
         "same_count": len(common_index),
-        "same_count_rate": safe_round(100 * len(common_index) / min(len(kai_data_df), len(pin_data_df)), 4),
+        "same_count_rate": same_count_rate,
         "true_same_count_rate": modification_rate,
         "monthly_trade_std": safe_round(monthly_trade_std, 4),
         "active_month_ratio": safe_round(active_month_ratio, 4),
