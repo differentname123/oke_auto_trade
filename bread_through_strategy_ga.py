@@ -890,15 +890,15 @@ def get_fitness_profit_risk_score(stat):
         profit_risk_score = stat.get("profit_risk_score", -10000)
         return profit_risk_score
 
-def get_fitness_profit_risk_score_pure(stat):
+def get_fitness_hold_time_mean(stat):
     """
     从统计结果中提取适应度值。
     """
     if stat is None:
         return -10000
     else:
-        profit_risk_score_pure = stat.get("profit_risk_score_pure", -10000)
-        return profit_risk_score_pure
+        hold_time_mean = stat.get("hold_time_mean", -10000)
+        return hold_time_mean
 
 def get_fitness_avg_profit_rate(stat):
     """
@@ -1043,8 +1043,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                                    population_size=50, generations=20,
                                    crossover_rate=0.8, mutation_rate=0.1, key_name="default",
                                    islands_count=4, migration_interval=10, migration_rate=0.1,
-                                   restart_similarity_threshold=10,
-                                   fitness_func=get_fitness):
+                                   restart_similarity_threshold=10):
     """
     利用遗传算法结合岛屿模型搜索净利率较高的 (长信号, 短信号) 组合。
     全局已评价个体集合 global_generated_individuals 仅在每个岛种群评价后更新，
@@ -1442,7 +1441,7 @@ def ga_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
     # 调用遗传算法搜索最佳信号组合（使用岛屿模型，参数可根据需求调整）
     best_candidate, best_fitness, history = genetic_algorithm_optimization(
         df_local, all_signals, all_signals,
-        population_size=population_size, generations=400,
+        population_size=population_size, generations=600,
         crossover_rate=0.9, mutation_rate=0.2,
         key_name=f'{base_name}_{key_name}',
         islands_count=8, migration_interval=10, migration_rate=0.05
