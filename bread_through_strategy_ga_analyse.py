@@ -23,7 +23,6 @@ import warnings
 import pandas as pd
 
 warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
-import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -57,18 +56,15 @@ def merge_and_compute(df_list, merge_on=["feature", "bin_seq"], metric_cols=None
         return pd.DataFrame()
 
     if metric_cols is None:
-        metric_cols = ['avg_net_profit_rate_new', 'pos_ratio', 'spearman_avg_net_profit_rate', 'spearman_pos_ratio']
+        metric_cols = ['avg_net_profit_rate_new', 'pos_ratio', 'spearman_avg_net_profit_rate', 'spearman_pos_ratio', 'spearman_score']
 
     # 对每个 DataFrame 检查必备的列并重命名指标列
     df_renamed_list = []
     for idx, df in enumerate(df_list):
+
         # 检查必要列是否存在
         required_cols = merge_on + metric_cols
         missing = set(required_cols) - set(df.columns)
-        # # 将metric_cols的值都取绝对值
-        # for col in metric_cols:
-        #     df[col] = df[col].abs()
-
         if missing:
             raise ValueError(f"DataFrame at index {idx} 缺少必要的列: {missing}")
 
@@ -102,7 +98,7 @@ def merge_and_compute(df_list, merge_on=["feature", "bin_seq"], metric_cols=None
     return merged_df[output_cols]
 
 
-def process_single_feature(feature, feat_values, target_values):
+def process_single_feature(feature, feat_values, target_values, n_bins=50):
     """
     处理单个特征的分箱统计，同时计算特征的单调性指标。
     利用分箱序号与该箱内平均净利润率和正向比例之间的 Spearman 相关系数来衡量单调效果。
@@ -111,17 +107,18 @@ def process_single_feature(feature, feat_values, target_values):
       feature      - 特征名称
       feat_values  - 该特征对应的 numpy 数组
       target_values- 目标指标 numpy 数组（net_profit_rate_new）
+      n_bins       - 分箱的个数，默认是50
     返回:
       包含分箱统计结果和单调性指标的 DataFrame，如果特征无法分箱则返回 None
     """
     try:
-        # 如果特征的唯一值数量不足 100，则不做分箱分析
-        if np.unique(feat_values).size < 100:
-            # print(f"【提示】：特征 {feature} 的唯一值不足 100（当前 {np.unique(feat_values).size} 个），跳过。")
+        # 如果特征的唯一值数量不足 n_bins，则不做分箱分析
+        if np.unique(feat_values).size < n_bins:
+            # print(f"【提示】：特征 {feature} 的唯一值不足 {n_bins}（当前 {np.unique(feat_values).size} 个），跳过。")
             return None
 
-        # 利用 np.percentile 快速计算分位数（分为 101 个点，即 100 箱）
-        quantiles = np.percentile(feat_values, np.linspace(0, 100, 101))
+        # 利用 np.percentile 快速计算分位数（分为 n_bins 个箱，即需要 n_bins+1 个分位点）
+        quantiles = np.percentile(feat_values, np.linspace(0, 100, n_bins + 1))
         # 去重后可能导致箱的数量减少
         bins = np.unique(quantiles)
         if len(bins) - 1 < 1:
@@ -173,19 +170,20 @@ def process_single_feature(feature, feat_values, target_values):
         return None
 
 
-def process_feature_batch(batch_features, batch_feature_data, target_values):
+def process_feature_batch(batch_features, batch_feature_data, target_values, n_bins=50):
     """
     处理一批特征，每批包含 10 个特征。
     参数:
       batch_features      - 批次中特征名称的列表
       batch_feature_data  - 该批次中每个特征对应的 numpy 数组字典
       target_values       - 目标指标数组
+      n_bins              - 分箱的个数，默认是50
     返回:
       当前批次所有成功分箱后的 DataFrame列表
     """
     batch_results = []
     for feature in batch_features:
-        result = process_single_feature(feature, batch_feature_data[feature], target_values)
+        result = process_single_feature(feature, batch_feature_data[feature], target_values, n_bins)
         if result is not None:
             batch_results.append(result)
     return batch_results
@@ -284,10 +282,13 @@ def process_data_flat(data_df, target_column_list):
 def debug():
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     df_list = []
+    # df_list.append(pd.read_csv(f'images/combined_bin_analysis_SOL_false.csv').drop_duplicates(subset=["feature"]))
     for inst_id in inst_id_list:
         file_path = f'images/combined_bin_analysis_{inst_id}.csv'
         temp_df = pd.read_csv(file_path)
         temp_df = temp_df.drop_duplicates(subset=["feature"])
+        temp_df['spearman_score'] = temp_df['spearman_avg_net_profit_rate'] * temp_df['spearman_pos_ratio']
+
         df_list.append(temp_df)
     result_df = merge_and_compute(df_list)
     result_df1 = process_data_flat(result_df, ['avg_net_profit_rate_new_max', 'avg_net_profit_rate_new_min',
@@ -297,8 +298,8 @@ def debug():
     print(result_df)
 
 
-def main():
-    # debug()
+def main(n_bins=50):
+    debug()
     # ===== 数据加载与预处理 =====
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     images_dir = "images"
@@ -337,20 +338,26 @@ def main():
                 data_df[col_name] = a + b
                 derived_feature_names.append(col_name)
 
-                # 交叉特征2：乘积
-                col_name = f'{col1}-{col2}-prod'
-                data_df[col_name] = a * b
-                derived_feature_names.append(col_name)
-
                 # 交叉特征3：差值
                 col_name = f'{col1}-{col2}-diff'
                 data_df[col_name] = a - b
                 derived_feature_names.append(col_name)
 
-                # 交叉特征4：比值（使用 np.errstate 屏蔽除 0 警告）
+                # 交叉特征2：乘积（考虑负数情况）
+                col_name = f'{col1}-{col2}-prod'
+                data_df[col_name] = np.where(
+                    (a < 0) & (b < 0),  # 如果两者均为负，
+                    - (np.abs(a) * np.abs(b)),  # 则取负乘积（保持“差”的含义）
+                    a * b  # 否则直接相乘
+                )
+                derived_feature_names.append(col_name)
+
+                # 交叉特征4：比值（考虑负数情况）
                 col_name = f'{col1}-{col2}-ratio'
                 with np.errstate(divide='ignore', invalid='ignore'):
                     ratio = np.where(b == 0, np.nan, a / b)
+                    # 如果两者均为负，则结果也手动调整为负（就算数学上负除负为正）
+                    ratio = np.where((a < 0) & (b < 0), -np.abs(ratio), ratio)
                 data_df[col_name] = ratio
                 derived_feature_names.append(col_name)
 
@@ -373,10 +380,10 @@ def main():
             batches.append((batch_features, batch_feature_data))
 
         all_bin_analyses = []
-        # 多进程并发（最多20个进程）
-        with concurrent.futures.ProcessPoolExecutor(max_workers=20) as executor:
+        # 多进程并发（最多25个进程）
+        with concurrent.futures.ProcessPoolExecutor(max_workers=25) as executor:
             futures = [
-                executor.submit(process_feature_batch, batch_features, batch_feature_data, target_values)
+                executor.submit(process_feature_batch, batch_features, batch_feature_data, target_values, n_bins)
                 for (batch_features, batch_feature_data) in batches
             ]
             for future in concurrent.futures.as_completed(futures):
@@ -393,4 +400,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    main(n_bins=50)
