@@ -2366,6 +2366,125 @@ def process_pair(pair):
     return None
 
 
+def process_group_filter_reverse(args):
+    """
+    处理一个目标分组（反向过滤）：
+      - 根据 group_keys 筛选原始数据；
+      - 根据 sort_key 降序排序；
+      - 遍历排序后的记录，比较每行与已保留记录的相关性；
+      - 仅当该记录与所有已保留记录的相关性均大于 threshold 时，才保留该行。
+
+    参数:
+      args: 包含 (group_keys, origin_good_df, target_column, sort_key, threshold)
+    返回:
+      保留记录组成的 DataFrame
+    """
+    group_keys, origin_good_df, target_column, sort_key, threshold = args
+    group_df = origin_good_df[origin_good_df[target_column].isin(group_keys)]
+    start_time = time.time()
+    group_sorted = group_df.sort_values(by=sort_key, ascending=False)
+    keep_rows = []
+
+    for _, row in group_sorted.iterrows():
+        # 对当前记录：只有当与所有已保留记录的相关性均大于 threshold 时才保留
+        keep_flag = True
+        for kept_row in keep_rows:
+            corr = calculate_row_correlation(row, kept_row)
+            if corr <= threshold:
+                keep_flag = False
+                break
+        if keep_flag:
+            keep_rows.append(row)
+
+    print(f"分组 {group_keys} (反向过滤) 处理耗时: {time.time() - start_time:.2f} 秒, "
+          f"原始长度: {len(group_df)}, 保留长度: {len(keep_rows)}")
+
+    if keep_rows:
+        return pd.DataFrame(keep_rows)
+    else:
+        # 返回空 DataFrame，列名与原始 DataFrame 保持一致
+        return pd.DataFrame(columns=origin_good_df.columns)
+
+
+def filtering_reverse(origin_good_df, target_column, sort_key, threshold):
+    """
+    对 DataFrame 进行预过滤（反向过滤），并使用多进程处理每个分组。处理逻辑如下：
+
+      1. 按 target_column 升序排序后，依据以下规则对唯一值进行分组：
+         - 相邻 target_column 值与当前组首个值的差值 <= 20；
+         - 累计行数不超过 1000 行（累计行数根据各唯一值在原始数据中的出现次数计算）。
+         例如：若唯一值为 [55, 56, 57, 58, ...]，且 55 对应 400 行、56 对应 350 行、
+         57 对应 300 行，则 [55, 56] 累计为 750 行，加入 57 后累计达到 1050 行，超过限制，
+         故 57 单独起一个新组，即使 57-55 <= 20。
+
+      2. 对每个分组内部先根据 sort_key 降序排序，
+         然后依次比较各记录与已保留记录的相关性，仅当相关性均大于 threshold 时才保留该记录。
+
+      3. 使用多进程（本示例设置进程数为 20）同时处理各分组，提高过滤效率。
+
+    参数:
+      origin_good_df: pandas.DataFrame，原始数据
+      target_column: str，用于分组的列名（要求数据为数值类型）
+      sort_key: str，用于比较优先级的列名，值较大者优先处理
+      threshold: float，相关性阈值；若两行的相关性小于等于该值，则认为两行不够相似
+
+    返回:
+      filtered_df: pandas.DataFrame，反向过滤后保留的记录
+    """
+    # 先按照 target_column 升序排序
+    origin_good_df = origin_good_df.sort_values(by=target_column, ascending=True)
+
+    # 获取 target_column 的所有唯一值，保证升序
+    unique_keys = sorted(origin_good_df[target_column].unique())
+    # 计算每个唯一值对应的行数
+    counts = origin_good_df[target_column].value_counts().to_dict()
+
+    # 根据「差值 <= 20」以及累计行数不超过 1000 行的规则进行分组
+    grouped_keys = []  # 每个分组为一列表，包含若干 target_column 值
+    current_group = []
+    current_group_count = 0
+
+    for key in unique_keys:
+        if not current_group:
+            current_group = [key]
+            current_group_count = counts.get(key, 0)
+        else:
+            # 如果当前 key 与组首的差值不超过 20 且累计行数加上当前 key 的行数不超过 1000，则放入同一组
+            if (key - current_group[0] <= 20) and (current_group_count + counts.get(key, 0) <= 1000):
+                current_group.append(key)
+                current_group_count += counts.get(key, 0)
+            else:
+                grouped_keys.append(current_group)
+                current_group = [key]
+                current_group_count = counts.get(key, 0)
+
+    if current_group:
+        grouped_keys.append(current_group)
+
+    # 为每个分组准备处理时的参数列表
+    pool_input_args = [
+        (group_keys, origin_good_df, target_column, sort_key, threshold)
+        for group_keys in grouped_keys
+    ]
+
+    print(f"分组数量：{len(pool_input_args)}")
+
+    # 使用进程池进行多进程处理（这里设置进程数为 20，可根据实际情况调整）
+    with Pool(processes=20) as pool:
+        results = pool.map(process_group_filter_reverse, pool_input_args)
+
+    # 合并所有分组的反向过滤结果
+    filtered_groups = [df for df in results if not df.empty]
+    if filtered_groups:
+        filtered_df = pd.concat(filtered_groups, ignore_index=True)
+    else:
+        filtered_df = pd.DataFrame(columns=origin_good_df.columns)
+
+    # 保存结果（保存文件名可根据需要调整）
+    filtered_df.to_csv('temp/origin_good.csv', index=False)
+
+    return filtered_df
+
 def process_group(args):
     """
     处理一个目标分组：
@@ -2497,7 +2616,7 @@ def gen_statistic_data(origin_good_df, threshold=99):
     origin_good_df["monthly_net_profit_detail"] = origin_good_df["monthly_net_profit_detail"].apply(safe_parse_dict)
     origin_good_df["monthly_trade_count_detail"] = origin_good_df["monthly_trade_count_detail"].apply(safe_parse_dict)
     print(f'待计算的数据量：{len(origin_good_df)}')
-    origin_good_df = filtering(origin_good_df, 'kai_count', 'net_profit_rate', 70)
+    origin_good_df = filtering_reverse(origin_good_df, 'kai_count', 'net_profit_rate', 90)
     print(f'过滤后的数据量：{len(origin_good_df)}')
 
     # 转换为字典列表，保持 DataFrame 内的顺序

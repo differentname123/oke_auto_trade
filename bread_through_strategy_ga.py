@@ -880,81 +880,73 @@ def init_worker_ga(signals, dataframe):
     df = dataframe
 
 
-
-def get_fitness(stat):
+def get_fitness_profit_risk_score(stat):
     """
     从统计结果中提取适应度值。
     """
     if stat is None:
         return -10000
     else:
-        net_profit_rate = stat.get("net_profit_rate", -10000)
-        max_consecutive_loss = stat.get("max_consecutive_loss", -100000)
-        fitness = -net_profit_rate * net_profit_rate / max_consecutive_loss
-        return fitness
+        profit_risk_score = stat.get("profit_risk_score", -10000)
+        return profit_risk_score
 
-def get_fitness_fu_profit_sum(stat):
+def get_fitness_profit_risk_score_pure(stat):
     """
     从统计结果中提取适应度值。
     """
     if stat is None:
         return -10000
     else:
-        net_profit_rate = stat.get("net_profit_rate", -10000)
-        fu_profit_sum = stat.get("fu_profit_sum", -100000)
-        fitness = -net_profit_rate * net_profit_rate / fu_profit_sum
-        return fitness
+        profit_risk_score_pure = stat.get("profit_risk_score_pure", -10000)
+        return profit_risk_score_pure
 
-def get_fitness_monthly_net_profit_min(stat):
+def get_fitness_avg_profit_rate(stat):
     """
     从统计结果中提取适应度值。
     """
     if stat is None:
         return -10000
     else:
-        monthly_net_profit_min = stat.get("monthly_net_profit_min", -10000)
-        fitness = monthly_net_profit_min
-        return fitness
-def get_fitness_net(stat):
+        avg_profit_rate = stat.get("avg_profit_rate", -10000)
+        return avg_profit_rate
+
+
+def get_fitness_fu_profit_mean(stat):
     """
     从统计结果中提取适应度值。
     """
     if stat is None:
         return -10000
     else:
-        net_profit_rate = stat.get("net_profit_rate", -10000)
-        return net_profit_rate
+        fu_profit_mean = stat.get("fu_profit_mean", 10000)
+        return -fu_profit_mean
 
 
-def get_fitness_monthly_net_profit_std(stat):
+def get_fitness_hold_time_std(stat):
     """
     从统计结果中提取适应度值。
     """
     if stat is None:
         return -10000
     else:
-        net_profit_rate = stat.get("net_profit_rate", -10000)
-        monthly_net_profit_std = stat.get("monthly_net_profit_std", 10000)
-        fitness = 1 - monthly_net_profit_std * monthly_net_profit_std / (net_profit_rate) * 22
-        return fitness
+        hold_time_std = stat.get("hold_time_std", 10000)
+        return -hold_time_std
 
-def get_fitness_stability_score(stat):
+
+def get_fitness_max_profit_trade_count(stat):
     """
     从统计结果中提取适应度值。
     """
     if stat is None:
         return -10000
     else:
-        loss_rate = stat.get("loss_rate", 1)
-        monthly_loss_rate = stat.get("monthly_loss_rate", 1)
-        net_profit_rate = stat.get("net_profit_rate", -10000)
-        monthly_net_profit_std = stat.get("monthly_net_profit_std", 10000)
-        fitness = 2 - monthly_net_profit_std / (net_profit_rate) * 22 - loss_rate - monthly_loss_rate
-        return fitness
+        max_profit_trade_count = stat.get("max_profit_trade_count", 10000)
+        return -max_profit_trade_count
 
-get_fitness_list = [get_fitness_net]
+get_fitness_list = [get_fitness_profit_risk_score, get_fitness_profit_risk_score_pure, get_fitness_avg_profit_rate,
+                    get_fitness_fu_profit_mean, get_fitness_hold_time_std, get_fitness_max_profit_trade_count]
 
-def evaluate_candidate_batch(candidates, fitness_func=get_fitness):
+def evaluate_candidate_batch(candidates, fitness_func=get_fitness_fu_profit_mean):
     """
     对一批候选个体进行评价，返回列表 [(fitness, candidate, stat), ...]。
     现在适应度计算函数由 fitness_func 参数传入，而不是固定调用 get_fitness。
