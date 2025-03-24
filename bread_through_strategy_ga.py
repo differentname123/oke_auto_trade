@@ -887,7 +887,10 @@ def get_fitness_profit_risk_score(stat):
     if stat is None:
         return -10000
     else:
-        profit_risk_score = stat.get("profit_risk_score", -10000)
+        net_profit_rate = stat.get("net_profit_rate", -10000)
+        fu_profit_sum = stat.get("fu_profit_sum", -10000)
+
+        profit_risk_score = -net_profit_rate * net_profit_rate / fu_profit_sum if fu_profit_sum != 0 else -10000
         return profit_risk_score
 
 def get_fitness_hold_time_mean(stat):

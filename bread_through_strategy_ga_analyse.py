@@ -37,73 +37,82 @@ from sklearn.linear_model import LinearRegression
 from sklearn.tree import DecisionTreeRegressor, export_text
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
+from scipy.stats import spearmanr
 
 
-def merge_and_compute(df_list):
+def merge_and_compute(df_list, merge_on=["feature", "bin_seq"], metric_cols=None):
     """
-    合并一个 DataFrame 列表，并按 feature 和 bin_seq 计算
-    avg_net_profit_rate_new 与 pos_ratio 的最大值与最小值。
+    合并一个 DataFrame 列表，并按 merge_on 键计算多个指标列的最大值、最小值和平均值。
 
     参数:
-        df_list (list of pd.DataFrame): 每个 DataFrame 必须包含以下列：
-            "feature", "bin_seq", "avg_net_profit_rate_new", "pos_ratio"
+        df_list (list of pd.DataFrame): 每个 DataFrame 必须包含 merge_on 中指定的列和指标列。
+        merge_on (list): 指定用于合并的键（默认: ["feature", "bin_seq"]）。
+        metric_cols (list): 指定需要计算统计值的指标列（默认: ['avg_net_profit_rate_new', 'pos_ratio']）。
 
     返回:
-        pd.DataFrame: 合并后的 DataFrame，包含 "feature", "bin_seq",
-                      "avg_net_profit_rate_new_max", "avg_net_profit_rate_new_min",
-                      "pos_ratio_max", "pos_ratio_min" 四个统计列。
+        pd.DataFrame: 合并后的 DataFrame，包含 merge_on 列及各指标的统计列。
+                      同时计算了两个打分指标: 一种使用指标最小值的乘积（score），一种使用指标均值的乘积（score1）。
     """
     if not df_list:
         return pd.DataFrame()
 
-    # 对每个 DataFrame 提取需要的列，并重命名统计列，方便后续合并时区分
-    dfs_renamed = []
+    if metric_cols is None:
+        metric_cols = ['avg_net_profit_rate_new', 'pos_ratio', 'spearman_avg_net_profit_rate', 'spearman_pos_ratio']
+
+    # 对每个 DataFrame 检查必备的列并重命名指标列
+    df_renamed_list = []
     for idx, df in enumerate(df_list):
-        # 拷贝并只保留需要列
-        df_temp = df.copy()[['feature', 'bin_seq', 'avg_net_profit_rate_new', 'pos_ratio']]
-        df_temp = df_temp.rename(columns={
-            'avg_net_profit_rate_new': f'avg_net_profit_rate_new_{idx}',
-            'pos_ratio': f'pos_ratio_{idx}'
-        })
-        dfs_renamed.append(df_temp)
+        # 检查必要列是否存在
+        required_cols = merge_on + metric_cols
+        missing = set(required_cols) - set(df.columns)
+        # # 将metric_cols的值都取绝对值
+        # for col in metric_cols:
+        #     df[col] = df[col].abs()
 
-    # 依次按照 feature 和 bin_seq 内连接合并所有 DataFrame
-    merged_df = reduce(lambda left, right: pd.merge(left, right, on=['feature', 'bin_seq'], how='inner'), dfs_renamed)
+        if missing:
+            raise ValueError(f"DataFrame at index {idx} 缺少必要的列: {missing}")
 
-    # 收集所有重命名后的列名
-    avg_cols = [f'avg_net_profit_rate_new_{i}' for i in range(len(dfs_renamed))]
-    pos_cols = [f'pos_ratio_{i}' for i in range(len(dfs_renamed))]
+        # 只保留必要列，复制一份数据
+        sub_df = df[required_cols].copy()
+        # 按指标列重命名，添加后缀 idx
+        rename_dict = {col: f"{col}_{idx}" for col in metric_cols}
+        sub_df.rename(columns=rename_dict, inplace=True)
+        df_renamed_list.append(sub_df)
 
-    # 计算 "avg_net_profit_rate_new" 的最大值与最小值
-    merged_df['avg_net_profit_rate_new_max'] = merged_df[avg_cols].max(axis=1)
-    merged_df['avg_net_profit_rate_new_min'] = merged_df[avg_cols].min(axis=1)
-    merged_df['avg_net_profit_rate_new_mean'] = merged_df[avg_cols].mean(axis=1)
-    # 计算 "pos_ratio" 的最大值与最小值
-    merged_df['pos_ratio_max'] = merged_df[pos_cols].max(axis=1)
-    merged_df['pos_ratio_min'] = merged_df[pos_cols].min(axis=1)
-    merged_df['pos_ratio_mean'] = merged_df[pos_cols].mean(axis=1)
+    # 使用内连接依次合并多个 DataFrame，确保只有共同的 merge_on 组合会保留
+    merged_df = reduce(lambda left, right: pd.merge(left, right, on=merge_on, how='inner'), df_renamed_list)
 
-    # 整理输出的列
-    result_columns = ['feature', 'bin_seq',
-                      'avg_net_profit_rate_new_max', 'avg_net_profit_rate_new_min','avg_net_profit_rate_new_mean',
-                      'pos_ratio_max', 'pos_ratio_min', 'pos_ratio_mean']
-    result_df = merged_df[result_columns]
-    result_df['score'] = result_df['avg_net_profit_rate_new_min'] * result_df['pos_ratio_min']
-    result_df['score1'] = result_df['avg_net_profit_rate_new_mean'] * result_df['pos_ratio_mean']
+    # 对每个指标列分别计算最大值、最小值与均值
+    for col in metric_cols:
+        col_names = [f"{col}_{i}" for i in range(len(df_renamed_list))]
+        merged_df[f"{col}_max"] = merged_df[col_names].max(axis=1)
+        merged_df[f"{col}_min"] = merged_df[col_names].min(axis=1)
+        merged_df[f"{col}_mean"] = merged_df[col_names].mean(axis=1)
 
-    return result_df
+    # 根据需求，可以调整或者加入额外的打分逻辑
+    merged_df['score'] = merged_df['avg_net_profit_rate_new_min'] * merged_df['pos_ratio_min']
+    merged_df['score1'] = merged_df['avg_net_profit_rate_new_mean'] * merged_df['pos_ratio_mean']
 
+    # 统一整理输出列：merge_on 列 + 所有指标的统计列 + 打分列
+    output_cols = merge_on.copy()
+    for col in metric_cols:
+        output_cols.extend([f"{col}_max", f"{col}_min", f"{col}_mean"])
+    output_cols.extend(['score', 'score1'])
+
+    return merged_df[output_cols]
 
 
 def process_single_feature(feature, feat_values, target_values):
     """
-    处理单个特征的分箱统计。
+    处理单个特征的分箱统计，同时计算特征的单调性指标。
+    利用分箱序号与该箱内平均净利润率和正向比例之间的 Spearman 相关系数来衡量单调效果。
+
     参数:
       feature      - 特征名称
       feat_values  - 该特征对应的 numpy 数组
       target_values- 目标指标 numpy 数组（net_profit_rate_new）
     返回:
-      包含分箱统计结果的 DataFrame，如果特征无法分箱则返回 None
+      包含分箱统计结果和单调性指标的 DataFrame，如果特征无法分箱则返回 None
     """
     try:
         # 如果特征的唯一值数量不足 100，则不做分箱分析
@@ -119,7 +128,7 @@ def process_single_feature(feature, feat_values, target_values):
             # print(f"【提示】：特征 {feature} 分箱数量不够，跳过。")
             return None
 
-        # 利用np.searchsorted为每个值分箱
+        # 利用 np.searchsorted 为每个值分箱
         bin_indices = np.searchsorted(bins, feat_values, side='right') - 1
         bin_indices = np.clip(bin_indices, 0, len(bins) - 2)
         total_count = len(feat_values)
@@ -146,6 +155,18 @@ def process_single_feature(feature, feat_values, target_values):
                 "bin_ratio": bin_ratio
             })
         result_df = pd.DataFrame(bins_info).sort_values(by="bin_seq")
+
+        # 计算分箱序号与各指标间的 Spearman 相关系数作为单调性指标
+        if result_df.shape[0] > 1:
+            spearman_avg, _ = spearmanr(result_df["bin_seq"], result_df["avg_net_profit_rate_new"])
+            spearman_pos, _ = spearmanr(result_df["bin_seq"], result_df["pos_ratio"])
+        else:
+            spearman_avg = np.nan
+            spearman_pos = np.nan
+
+        result_df["spearman_avg_net_profit_rate"] = spearman_avg
+        result_df["spearman_pos_ratio"] = spearman_pos
+
         return result_df
     except Exception as e:
         # print(f"【提示】：特征 {feature} 分箱处理出错，错误信息：{e}")
@@ -194,7 +215,7 @@ def process_data_flat(data_df, target_column_list):
     data_df = data_df[(data_df['bin_seq'] > 90) | (data_df['bin_seq'] < 10)]
 
     output_rows = []
-    percentage_list = [x / 100 for x in range(1,11)]
+    percentage_list = [x / 100 for x in range(1, 11)]
 
     for target in target_column_list:
         # 如果目标列不存在，则跳过
@@ -259,15 +280,19 @@ def process_data_flat(data_df, target_column_list):
 
         return result_df
 
+
 def debug():
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     df_list = []
     for inst_id in inst_id_list:
         file_path = f'images/combined_bin_analysis_{inst_id}.csv'
         temp_df = pd.read_csv(file_path)
+        temp_df = temp_df.drop_duplicates(subset=["feature"])
         df_list.append(temp_df)
     result_df = merge_and_compute(df_list)
-    result_df1 = process_data_flat(result_df, ['avg_net_profit_rate_new_max', 'avg_net_profit_rate_new_min','avg_net_profit_rate_new_mean','pos_ratio_max', 'pos_ratio_min', 'pos_ratio_mean', 'score', 'score1'])
+    result_df1 = process_data_flat(result_df, ['avg_net_profit_rate_new_max', 'avg_net_profit_rate_new_min',
+                                               'avg_net_profit_rate_new_mean', 'pos_ratio_max', 'pos_ratio_min',
+                                               'pos_ratio_mean', 'score', 'score1'])
     data_df = result_df[(result_df['bin_seq'] > 90) | (result_df['bin_seq'] < 10)]
     print(result_df)
 
