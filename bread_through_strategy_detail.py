@@ -2954,6 +2954,10 @@ def debug():
         # return
 
         good_df = pd.read_csv('temp/final_good.csv')
+        df = pd.read_csv(f'temp/df.csv')
+        result = pd.read_csv(f'temp/result.csv')
+        # good_df[good_df['index'].isin(          [1368, 1574]                       )]
+
         # good_df = origin_good_df
         good_df = good_df.sort_values(sort_key, ascending=False)
         # 重置good_df的索引

@@ -61,6 +61,7 @@ def merge_and_compute(df_list, merge_on=["feature", "bin_seq"], metric_cols=None
     # 对每个 DataFrame 检查必备的列并重命名指标列
     df_renamed_list = []
     for idx, df in enumerate(df_list):
+        df['spearman_score'] = df['spearman_avg_net_profit_rate'] * df['spearman_pos_ratio']
 
         # 检查必要列是否存在
         required_cols = merge_on + metric_cols
@@ -282,15 +283,18 @@ def process_data_flat(data_df, target_column_list):
 def debug():
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     df_list = []
-    # df_list.append(pd.read_csv(f'images/combined_bin_analysis_SOL_false.csv').drop_duplicates(subset=["feature"]))
+    df_list.append(pd.read_csv(f'images/combined_bin_analysis_SOL_false.csv').drop_duplicates(subset=["feature"]))
     for inst_id in inst_id_list:
+
         file_path = f'images/combined_bin_analysis_{inst_id}.csv'
         temp_df = pd.read_csv(file_path)
+        temp_df['file'] = inst_id
         temp_df = temp_df.drop_duplicates(subset=["feature"])
         temp_df['spearman_score'] = temp_df['spearman_avg_net_profit_rate'] * temp_df['spearman_pos_ratio']
 
         df_list.append(temp_df)
     result_df = merge_and_compute(df_list)
+    all_result_df = pd.concat(df_list, ignore_index=True)
     result_df1 = process_data_flat(result_df, ['avg_net_profit_rate_new_max', 'avg_net_profit_rate_new_min',
                                                'avg_net_profit_rate_new_mean', 'pos_ratio_max', 'pos_ratio_min',
                                                'pos_ratio_mean', 'score', 'score1'])
@@ -299,7 +303,7 @@ def debug():
 
 
 def main(n_bins=50):
-    debug()
+    # debug()
     # ===== 数据加载与预处理 =====
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     images_dir = "images"

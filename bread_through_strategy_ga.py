@@ -946,8 +946,17 @@ def get_fitness_max_profit_trade_count(stat):
         max_profit_trade_count = stat.get("max_profit_trade_count", 10000)
         return -max_profit_trade_count
 
-get_fitness_list = [get_fitness_profit_risk_score, get_fitness_hold_time_mean, get_fitness_avg_profit_rate,
-                    get_fitness_fu_profit_mean, get_fitness_hold_time_std, get_fitness_max_profit_trade_count]
+def get_fitness_net(stat):
+    """
+    从统计结果中提取适应度值。
+    """
+    if stat is None:
+        return -10000
+    else:
+        net_profit_rate = stat.get("net_profit_rate", 10000)
+        return net_profit_rate
+
+get_fitness_list = [get_fitness_net]
 
 def evaluate_candidate_batch(candidates, fitness_func=get_fitness_fu_profit_mean):
     """
