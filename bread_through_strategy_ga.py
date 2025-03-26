@@ -329,7 +329,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
 
     profits_arr = kai_data_df["true_profit"].values
     max_loss, max_loss_start_idx, max_loss_end_idx, loss_trade_count = calculate_max_sequence_numba(profits_arr)
-    if max_loss < -10 or net_profit_rate < 50:
+    if max_loss < -20 or net_profit_rate < 50 or trade_count < 100:
         return None, None
 
     if max_loss_start_idx < len(kai_data_df) and max_loss_end_idx < len(kai_data_df):
@@ -1011,7 +1011,9 @@ def example():
     """
     start_time = time.time()
     data_path_list = [
-        # "kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_DOGE-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_XRP-USDT-SWAP.csv",
