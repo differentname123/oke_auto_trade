@@ -13,7 +13,8 @@
 使用方法：
   python script.py <stat_df_file.csv> <market_data_file.csv>
 """
-
+import itertools
+import math
 import os
 import sys
 import time
@@ -693,18 +694,262 @@ def validation(market_data_file):
             print(f"处理 {stat_df_file} 时出错：{e}")
 
 
+def generate_numbers(start, end, number, even=True):
+    """
+    生成区间内均匀或非均匀分布的一组整数。
+    """
+    if start > end or number <= 0 or number == 1:
+        return []
+    if even:
+        step = (end - start) / (number - 1)
+        result = [int(round(start + i * step)) for i in range(number)]
+    else:
+        result = [int(round(start + (end - start) * ((i/(number-1))**2))) for i in range(number)]
+    final_result = []
+    last_val = None
+    for val in result:
+        if start <= val <= end and val != last_val:
+            final_result.append(val)
+            last_val = val
+    return final_result[:number]
+
+def gen_abs_signal_name(start_period, end_period, step, start_period1, end_period1, step1):
+    period_list = generate_numbers(start_period, end_period, step, even=False)
+    period_list1 = [x/20 for x in range(start_period1, end_period1, step1)]
+    long_columns = [f"abs_{p}_{p1}_long" for p in period_list for p1 in period_list1 if p >= p1]
+    short_columns = [f"abs_{p}_{p1}_short" for p in period_list for p1 in period_list1 if p >= p1]
+    key_name = f"abs_{start_period}_{end_period}_{step}_{start_period1}_{end_period1}_{step1}"
+    print(f"abs 生成 {len(long_columns)} 长信号和 {len(short_columns)} 短信号。")
+    return long_columns, short_columns, key_name
+
+def gen_macd_signal_name(start_period, end_period, step):
+    period_list = generate_numbers(start_period, end_period, step, even=False)
+    signal_list = [9, 12, 15, 40]
+    long_columns = [f"macd_{fast}_{slow}_{signal}_long" for fast in period_list for slow in period_list if slow > fast for signal in signal_list]
+    short_columns = [f"macd_{fast}_{slow}_{signal}_short" for fast in period_list for slow in period_list if slow > fast for signal in signal_list]
+    key_name = f"macd_{start_period}_{end_period}_{step}"
+    print(f"MACD 生成 {len(long_columns)} 信号。")
+    return long_columns, short_columns, key_name
+
+def gen_cci_signal_name(start_period, end_period, step, start_period1, end_period1, step1):
+    period_list = generate_numbers(start_period, end_period, step, even=False)
+    period_list1 = [x/10 for x in range(start_period1, end_period1, step1)]
+    long_columns = [f"cci_{p}_{p1}_long" for p in period_list for p1 in period_list1 if p >= p1]
+    short_columns = [f"cci_{p}_{p1}_short" for p in period_list for p1 in period_list1 if p >= p1]
+    key_name = f"cci_{start_period}_{end_period}_{step}_{start_period1}_{end_period1}_{step1}"
+    print(f"cci 生成 {len(long_columns)} 信号。")
+    return long_columns, short_columns, key_name
+
+def gen_relate_signal_name(start_period, end_period, step, start_period1, end_period1, step1):
+    period_list = generate_numbers(start_period, end_period, step, even=False)
+    period_list1 = list(range(start_period1, end_period1, step1))
+    long_columns = [f"relate_{p}_{p1}_long" for p in period_list for p1 in period_list1 if p >= p1]
+    short_columns = [f"relate_{p}_{p1}_short" for p in period_list for p1 in period_list1 if p >= p1]
+    key_name = f"relate_{start_period}_{end_period}_{step}_{start_period1}_{end_period1}_{step1}"
+    print(f"relate 生成 {len(long_columns)} 信号。")
+    return long_columns, short_columns, key_name
+
+def gen_rsi_signal_name(start_period, end_period, step):
+    period_list = generate_numbers(start_period, end_period, step, even=False)
+    temp_list = [10, 20, 30, 40, 50, 60, 70, 80, 90]
+    long_columns = [f"rsi_{p}_{ob}_{100-ob}_long" for p in period_list for ob in temp_list]
+    short_columns = [f"rsi_{p}_{ob}_{100-ob}_short" for p in period_list for ob in temp_list]
+    key_name = f"rsi_{start_period}_{end_period}_{step}"
+    print(f"rsi 生成 {len(long_columns)} 信号。")
+    return long_columns, short_columns, key_name
+
+def gen_atr_signal_name(start_period, end_period, step):
+    period_list = generate_numbers(start_period, end_period, step, even=False)
+    long_columns = [f"atr_{p}_long" for p in period_list]
+    short_columns = [f"atr_{p}_short" for p in period_list]
+    key_name = f"atr_{start_period}_{end_period}_{step}"
+    print(f"atr 生成 {len(long_columns)} 信号。")
+    return long_columns, short_columns, key_name
+
+def gen_donchian_signal_name(start_period, end_period, step):
+    period_list = list(range(start_period, end_period, step))
+    long_columns = [f"donchian_{p}_long" for p in period_list]
+    short_columns = [f"donchian_{p}_short" for p in period_list]
+    key_name = f"donchian_{start_period}_{end_period}_{step}"
+    print(f"donchian 生成 {len(long_columns)} 信号。")
+    return long_columns, short_columns, key_name
+
+def gen_boll_signal_name(start_period, end_period, step, start_period1, end_period1, step1):
+    period_list = generate_numbers(start_period, end_period, step, even=False)
+    period_list1 = [x/10 for x in range(start_period1, end_period1, step1)]
+    long_columns = [f"boll_{p}_{p1}_long" for p in period_list for p1 in period_list1 if p >= p1]
+    short_columns = [f"boll_{p}_{p1}_short" for p in period_list for p1 in period_list1 if p >= p1]
+    key_name = f"boll_{start_period}_{end_period}_{step}_{start_period1}_{end_period1}_{step1}"
+    print(f"boll 生成 {len(long_columns)} 信号。")
+    return long_columns, short_columns, key_name
+
+def gen_macross_signal_name(start_period, end_period, step, start_period1, end_period1, step1):
+    period_list = generate_numbers(start_period, end_period, step, even=False)
+    period_list1 = generate_numbers(start_period1, end_period1, step1, even=False)
+    long_columns = [f"macross_{p}_{p1}_long" for p in period_list for p1 in period_list1]
+    short_columns = [f"macross_{p}_{p1}_short" for p in period_list for p1 in period_list1]
+    key_name = f"macross_{start_period}_{end_period}_{step}_{start_period1}_{end_period1}_{step1}"
+    print(f"macross 生成 {len(long_columns)} 信号。")
+    return long_columns, short_columns, key_name
+
+def generate_all_signals():
+    """
+    生成所有候选信号，目前基于 abs、relate、donchian、boll、macross、rsi、macd、cci、atr。
+    """
+    column_list = []
+    abs_long, abs_short, abs_key = gen_abs_signal_name(1, 100, 100, 40, 100, 1)
+    column_list.append((abs_long, abs_short, abs_key))
+
+    # 如有需要，可启用其他类型信号（目前部分信号生成被注释）
+    # relate_long, relate_short, relate_key = gen_relate_signal_name(400, 1000, 100, 1, 40, 6)
+    # column_list.append((relate_long, relate_short, relate_key))
+    #
+    # donchian_long, donchian_short, donchian_key = gen_donchian_signal_name(1, 20, 1)
+    # column_list.append((donchian_long, donchian_short, donchian_key))
+
+    # boll_long, boll_short, boll_key = gen_boll_signal_name(1, 3000, 100, 1, 50, 2)
+    # column_list.append((boll_long, boll_short, boll_key))
+
+    macross_long, macross_short, macross_key = gen_macross_signal_name(1, 3000, 100, 1, 3000, 100)
+    column_list.append((macross_long, macross_short, macross_key))
+
+    # rsi_long, rsi_short, rsi_key = gen_rsi_signal_name(1, 1000, 500)
+    # column_list.append((rsi_long, rsi_short, rsi_key))
+
+    # macd_long, macd_short, macd_key = gen_macd_signal_name(300, 1000, 50)
+    # column_list.append((macd_long, macd_short, macd_key))
+
+    # cci_long, cci_short, cci_key = gen_cci_signal_name(1, 2000, 1000, 1, 2, 1)
+    # column_list.append((cci_long, cci_short, cci_key))
+
+    # atr_long, atr_short, atr_key = gen_atr_signal_name(1, 3000, 3000)
+    # column_list.append((atr_long, atr_short, atr_key))
+
+    column_list = sorted(column_list, key=lambda x: len(x[0]))
+    all_signals = []
+    key_name = ""
+    for long_cols, short_cols, temp_key in column_list:
+        temp = long_cols + short_cols
+        key_name += temp_key + "_"
+        all_signals.extend(temp)
+    return all_signals, key_name
+
+
+def target_all(market_data_file):
+    base_name = os.path.basename(market_data_file)
+    base_name = base_name.replace("-USDT-SWAP.csv", "").replace("origin_data_", "")
+    inst_id = base_name.split("_")[-1]
+
+    # 1. 加载行情数据，确保必要字段存在，并转换 timestamp 字段
+    df_local = pd.read_csv(market_data_file)
+    needed_columns = ["timestamp", "high", "low", "close"]
+    for col in needed_columns:
+        if col not in df_local.columns:
+            print(f"行情数据缺少必要字段：{col}")
+            sys.exit(1)
+    df_local = df_local[needed_columns]
+    min_price = df_local["low"].min()
+    # 如果 min_price 在小数点后面较多，则乘以 10，直到大于 1
+    while min_price < 1:
+        df_local["high"] *= 10
+        df_local["low"] *= 10
+        df_local["close"] *= 10
+        min_price *= 10
+
+    jingdu = "float32"
+    df_local["chg"] = (df_local["close"].pct_change() * 100).astype("float16")
+    df_local["high"] = df_local["high"].astype(jingdu)
+    df_local["low"] = df_local["low"].astype(jingdu)
+    df_local["close"] = df_local["close"].astype(jingdu)
+    df_local["timestamp"] = pd.to_datetime(df_local["timestamp"])
+
+    print(f"Loaded market data: 共 {df_local.shape[0]} 行")
+
+    # 2. 将行情数据赋值给全局变量（用于后面传递给多进程进程）
+    global df
+    df = df_local
+
+    # 3. 生成所有信号及候选信号对
+    all_signals, key_name = generate_all_signals()
+    stat_df_base_name = f'{base_name}_{key_name}'
+
+    candidate_long_signals = [sig for sig in all_signals if "abs" in sig]
+    candidate_short_signals = [sig for sig in all_signals if "macross" in sig]
+    all_precompute_signals = list(set(candidate_long_signals + candidate_short_signals))
+
+
+    # 4. 加载或者计算预计算信号（并更新全局预计算变量）
+    precomputed = load_or_compute_precomputed_signals(df, all_precompute_signals, key_name)
+
+    candidate_long_signals = [sig for sig in all_signals if "abs" in sig and 'long' in sig]
+
+
+    total_combinations = len(candidate_long_signals) * len(candidate_short_signals)
+
+    print(f"总共需要回测的组合数量: {total_combinations}")
+    pairs = list(itertools.product(candidate_long_signals, candidate_short_signals))
+    print(f"Total candidate signal pairs: {len(pairs)}")
+
+    global GLOBAL_SIGNALS
+    GLOBAL_SIGNALS = precomputed
+    total_size = sys.getsizeof(precomputed)
+    for sig, (s_np, p_np) in precomputed.items():
+        total_size += sys.getsizeof(sig) + s_np.nbytes + p_np.nbytes
+    print(f"precomputed_signals 占用内存总大小: {total_size / (1024 * 1024):.2f} MB")
+
+    # 5. 根据内存限制确定多进程进程数
+    max_memory = 45  # 单位：GB
+    pool_processes = min(32, int(max_memory * 1024 * 1024 * 1024 / total_size) if total_size > 0 else 1)
+    print(f"进程数限制为 {pool_processes}，根据内存限制调整。")
+
+    # 6. 以 10_000_000 个组合为一组进行计算
+    chunk_size = 10_000_00
+    total_pairs = len(pairs)
+    num_parts = math.ceil(total_pairs / chunk_size)
+    print(f"将分 {num_parts} 个部分进行计算，每部分大小为 {chunk_size} 个组合")
+
+    # 确保结果输出文件夹存在
+    output_folder = "temp"
+    os.makedirs(output_folder, exist_ok=True)
+
+    for part in range(num_parts):
+        part_start = part * chunk_size
+        part_end = min(total_pairs, part_start + chunk_size)
+        part_file = os.path.join(output_folder, f"{stat_df_base_name}_part{part}_statistic_results.csv")
+        if os.path.exists(part_file):
+            print(f"文件 {part_file} 已存在，跳过此部分。")
+            continue
+
+        current_pairs = pairs[part_start:part_end]
+        print(f"Processing part {part}: 处理组合索引 {part_start} ~ {part_end}")
+
+        with multiprocessing.Pool(processes=pool_processes, initializer=init_worker_with_signals,
+                                  initargs=(GLOBAL_SIGNALS, df)) as pool:
+            results = pool.map(process_signal_pair, current_pairs, chunksize=1000)
+
+        # 过滤掉返回 None 的结果（假设 process_signal_pair 返回的结果结构为 (sig1, sig2, stat_dict)）
+        results_filtered = [r for r in results if r and r[2] is not None]
+        print(f"Part {part}: 成功处理 {len(results_filtered)} 个信号对。")
+        stats_list = [r[2] for r in results_filtered]
+        stats_df = pd.DataFrame(stats_list)
+        stats_df.to_csv(part_file, index=False)
+        print(f"部分统计结果已保存到 {part_file}")
+
+    print("所有部分处理完成。")
+
+
 if __name__ == "__main__":
     start_time = time.time()
     data_path_list = [
-        "kline_data/origin_data_1m_110000_SOL-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_110000_BTC-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_110000_SOL-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_110000_BTC-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_110000_ETH-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_110000_TON-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_110000_DOGE-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_110000_XRP-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_110000_PEPE-USDT-SWAP.csv",
 
-        # "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
@@ -719,7 +964,7 @@ if __name__ == "__main__":
     ]
     for data_path in data_path_list:
         try:
-            validation(data_path)
+            target_all(data_path)
             print(f"{data_path} 总耗时 {time.time() - start_time:.2f} 秒。")
         except Exception as e:
             traceback.print_exc()

@@ -2985,7 +2985,7 @@ def debug():
         # # 取中间 20% 的数据
         # df = df.iloc[start_idx:end_idx]
 
-        df = df.head(int(0.4 * df_len))
+        df = df.head(int(0.3 * df_len))
 
         result_df = compute_avg_correlation(df)
         # 将result_df的row重命名为index
@@ -3004,8 +3004,8 @@ def debug():
 
         good_df = good_df.merge(index_df, on='index', how='left')
         # 获取good_dfcount0.5分位的值
-        count_50 = good_df['count'].quantile(0.6)
-        AvgCorrelation_50 = good_df['AvgCorrelation'].quantile(0.6)
+        count_50 = good_df['count'].quantile(0.8)
+        AvgCorrelation_50 = good_df['AvgCorrelation'].quantile(0.8)
 
         filter_good_df = good_df[(good_df['count'] > count_50) & (good_df['AvgCorrelation'] > AvgCorrelation_50)]
 
