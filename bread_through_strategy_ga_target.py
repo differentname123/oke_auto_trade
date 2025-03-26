@@ -946,19 +946,19 @@ if __name__ == "__main__":
     data_path_list = [
         # "kline_data/origin_data_1m_110000_SOL-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_110000_BTC-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_110000_ETH-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_110000_ETH-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_110000_TON-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_110000_DOGE-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_110000_XRP-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_110000_PEPE-USDT-SWAP.csv",
 
-        "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_10000000_DOGE-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_10000000_XRP-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_10000000_PEPE-USDT-SWAP.csv"
+        # "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_10000000_DOGE-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_10000000_XRP-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_10000000_PEPE-USDT-SWAP.csv"
 
         # "kline_data/origin_data_5m_10000000_SOL-USDT-SWAP.csv",
         # "kline_data/origin_data_5m_10000000_BTC-USDT-SWAP.csv",
@@ -967,7 +967,7 @@ if __name__ == "__main__":
     ]
     for data_path in data_path_list:
         try:
-            target_all(data_path)
+            validation(data_path)
             print(f"{data_path} 总耗时 {time.time() - start_time:.2f} 秒。")
         except Exception as e:
             traceback.print_exc()

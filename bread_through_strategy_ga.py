@@ -1011,7 +1011,7 @@ def example():
     """
     start_time = time.time()
     data_path_list = [
-        "kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_DOGE-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_XRP-USDT-SWAP.csv",
