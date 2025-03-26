@@ -4,6 +4,7 @@
 import itertools
 import json
 import math
+from collections import Counter
 from multiprocessing import Pool
 import multiprocessing as mp
 
@@ -2816,6 +2817,24 @@ def get_metrics_df(df):
     metrics_df.to_csv("temp/metrics_df.csv", index=False)
     print(f'行组合数量: {metrics_df.shape[0]} 完成, 总耗时 {time.time() - start_time:.2f} 秒.')
 
+
+def compute_avg_correlation(df):
+    # 将 Row1 对应的相关性构建为一个 DataFrame
+    df1 = df[['Row1', 'Correlation']].rename(columns={'Row1': 'row'})
+    # 将 Row2 对应的相关性构建为一个 DataFrame
+    df2 = df[['Row2', 'Correlation']].rename(columns={'Row2': 'row'})
+
+    # 将两个 DataFrame 按行合并，这样每个样本的相关性都会包含进来
+    df_long = pd.concat([df1, df2], ignore_index=True)
+
+    # 按 row 分组计算相关性的平均值
+    result_df = (df_long
+                 .groupby('row', as_index=False)['Correlation']
+                 .mean()
+                 .rename(columns={'Correlation': 'AvgCorrelation'}))
+
+    return result_df
+
 def debug():
     # good_df = pd.read_csv('temp/final_good.csv')
 
@@ -2955,8 +2974,45 @@ def debug():
 
         good_df = pd.read_csv('temp/final_good.csv')
         df = pd.read_csv(f'temp/df.csv')
+        # 将Correlation从小到大排序
+        df = df.sort_values('Correlation', ascending=True)
+        df_len = df.shape[0]
+
+        # diff = 0.05
+        # start_idx = int((0.5 - diff) * df_len)
+        # end_idx = int((0.5 + diff) * df_len)
+        #
+        # # 取中间 20% 的数据
+        # df = df.iloc[start_idx:end_idx]
+
+        df = df.head(int(0.5 * df_len))
+
+        result_df = compute_avg_correlation(df)
+        # 将result_df的row重命名为index
+        result_df = result_df.rename(columns={'row': 'index'})
+
+
+        index_list = df['Row1'].tolist()
+        index_list.extend(df['Row2'].tolist())
+        # 统计index出现的次数
+        index_dict = Counter(index_list)
+        # 将index_dict转换为DataFrame
+        index_df = pd.DataFrame(index_dict.items(), columns=['index', 'count'])
+
+        # 将result_df与good_df合并，以good_df为基准
+        good_df = good_df.merge(result_df, on='index', how='left')
+
+        good_df = good_df.merge(index_df, on='index', how='left')
+        # 获取good_dfcount0.5分位的值
+        count_50 = good_df['count'].quantile(0.9)
+        AvgCorrelation_50 = good_df['AvgCorrelation'].quantile(0.9)
+
+        filter_good_df = good_df[(good_df['count'] > count_50) & (good_df['AvgCorrelation'] > AvgCorrelation_50)]
+
         result = pd.read_csv(f'temp/result.csv')
-        # good_df[good_df['index'].isin(          [1368, 1574]                       )]
+        # good_df[good_df['index'].isin(          [8, 13, 26, 1]                      )]
+        # good_df[good_df['index'].isin(          index_list                      )]
+
 
         # good_df = origin_good_df
         good_df = good_df.sort_values(sort_key, ascending=False)
