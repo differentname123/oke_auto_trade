@@ -549,7 +549,7 @@ def process_signal_pair(pair):
     kai_column, pin_column = pair
     try:
         _, stat = get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is_detail=False,
-                                                is_reverse=True)
+                                                is_reverse=False)
     except Exception as e:
         print(f"Error processing pair ({kai_column}, {pin_column}): {e}")
         stat = None
@@ -637,7 +637,7 @@ def validation(market_data_file):
     global df
     df = df_local
 
-    stat_df_file_list = [f'temp_back/{inst_id}_origin_good_op_all_true.csv']
+    stat_df_file_list = [f'temp_back/{inst_id}_origin_good_op_all_false_temp.csv']
     for stat_df_file in stat_df_file_list:
         try:
             # 1. 加载 stat_df 文件
@@ -696,13 +696,13 @@ def validation(market_data_file):
 if __name__ == "__main__":
     start_time = time.time()
     data_path_list = [
-        # "kline_data/origin_data_1m_110000_SOL-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_110000_SOL-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_110000_BTC-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_110000_ETH-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_110000_TON-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_110000_DOGE-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_110000_XRP-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_110000_PEPE-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_110000_PEPE-USDT-SWAP.csv",
 
         # "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",

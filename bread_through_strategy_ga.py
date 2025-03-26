@@ -1146,7 +1146,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     elite_fraction = 0.05  # 保留前 5%
     no_improvement_threshold = 3  # 连续 3 代无改进则提升变异率
     restart_threshold = 5  # 连续 5 代无改进则进行局部重启
-    max_memory = 45
+    max_memory = 40
     pool_processes = min(32, int(max_memory * 1024 * 1024 * 1024 / total_size) if total_size > 0 else 1)
     print(f"进程数限制为 {pool_processes}，根据内存限制调整。")
 
@@ -1474,7 +1474,7 @@ def example():
         # "kline_data/origin_data_1m_110000_TON-USDT-SWAP.csv",
 
 
-        "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
