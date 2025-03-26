@@ -21,6 +21,7 @@ import time
 import pickle
 import multiprocessing
 import traceback
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -913,6 +914,8 @@ def target_all(market_data_file):
     os.makedirs(output_folder, exist_ok=True)
 
     for part in range(num_parts):
+        # 获取当前时间，以可读性高的格式
+        start_time = time.time()
         part_start = part * chunk_size
         part_end = min(total_pairs, part_start + chunk_size)
         part_file = os.path.join(output_folder, f"{stat_df_base_name}_part{part}_statistic_results.csv")
@@ -921,7 +924,7 @@ def target_all(market_data_file):
             continue
 
         current_pairs = pairs[part_start:part_end]
-        print(f"Processing part {part}: 处理组合索引 {part_start} ~ {part_end}")
+        print(f"Processing part {part}: 处理组合索引 {part_start} ~ {part_end}  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
         with multiprocessing.Pool(processes=pool_processes, initializer=init_worker_with_signals,
                                   initargs=(GLOBAL_SIGNALS, df)) as pool:
@@ -933,7 +936,7 @@ def target_all(market_data_file):
         stats_list = [r[2] for r in results_filtered]
         stats_df = pd.DataFrame(stats_list)
         stats_df.to_csv(part_file, index=False)
-        print(f"部分统计结果已保存到 {part_file}")
+        print(f"部分统计结果已保存到 {part_file} (耗时 {time.time() - start_time:.2f} 秒) 当前时间 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     print("所有部分处理完成。")
 
@@ -950,12 +953,12 @@ if __name__ == "__main__":
         # "kline_data/origin_data_1m_110000_PEPE-USDT-SWAP.csv",
 
         "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_10000000_DOGE-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_10000000_XRP-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_10000000_PEPE-USDT-SWAP.csv"
+        "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_DOGE-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_XRP-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_PEPE-USDT-SWAP.csv"
 
         # "kline_data/origin_data_5m_10000000_SOL-USDT-SWAP.csv",
         # "kline_data/origin_data_5m_10000000_BTC-USDT-SWAP.csv",
