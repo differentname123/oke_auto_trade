@@ -26,6 +26,9 @@ import ast
 
 from tqdm import tqdm
 
+from sklearn.cluster import AgglomerativeClustering
+
+
 def custom_merge_intervals(intervals):
     """
     归并区间 (忽略 revenue 信息，只处理 [start, end])，
@@ -2835,298 +2838,173 @@ def compute_avg_correlation(df):
 
     return result_df
 
+
+def cluster_correlations(df, correlation_threshold=50):
+    """
+    使用层次聚类方法对相关性数据进行分类，并在节点的 DataFrame 中增加聚类类别统计信息。
+
+    参数:
+      df: 包含 'Row1', 'Row2', 'Correlation' 三列的 pandas DataFrame，
+          每一行表示两个节点之间的相关性，相关性范围为 -100 到 100。
+      correlation_threshold: 聚类时的相关性阈值（默认 50），
+                             当节点之间的相关性 >= threshold（转换到归一化尺度后）时，
+                             认为它们足够相似，进而有可能归为一类。
+
+    返回:
+      一个 pandas DataFrame，其中每一行代表一个节点，包含以下列：
+          - 'Node': 节点名称
+          - 'Cluster': 节点所属的聚类标签
+          - 'Size': 对应类别中包含的节点数
+          - 'AverageCorrelation': 对应类别内部（两两节点之间）的平均相关性（归一化还原为 -100 到 100 范围）
+                                 当类别中只有一个节点时，该值为 NaN
+    """
+    # 1. 提取所有独立节点（两个节点的并集）
+    nodes = sorted(set(df['Row1']).union(set(df['Row2'])))
+    n_nodes = len(nodes)
+
+    # 2. 建立节点到索引的映射
+    node_index = {node: i for i, node in enumerate(nodes)}
+
+    # 3. 构造归一化后的相关性矩阵
+    #    初始填充值为 0 表示无相关数据时相关性为 0
+    corr_matrix = np.zeros((n_nodes, n_nodes))
+    for _, row in df.iterrows():
+        i = node_index[row['Row1']]
+        j = node_index[row['Row2']]
+        normalized_corr = row['Correlation'] / 100.0  # 归一化到 [-1, 1]
+        corr_matrix[i, j] = normalized_corr
+        corr_matrix[j, i] = normalized_corr  # 保证矩阵对称
+
+    # 4. 对角线置为 1（自己与自己的相关性为 1）
+    np.fill_diagonal(corr_matrix, 1.0)
+
+    # 5. 将归一化的相关性转换为距离
+    #    公式：distance = 1 - normalized_correlation
+    distance_matrix = 1 - corr_matrix
+
+    # 6. 计算距离阈值：原始相关性阈值归一化后为 correlation_threshold/100，
+    #    则对应距离阈值为：1 - (correlation_threshold/100)
+    distance_threshold = 1 - (correlation_threshold / 100.0)
+
+    # 7. 使用层次聚类方法
+    clustering = AgglomerativeClustering(
+        n_clusters=None,
+        metric='precomputed',
+        linkage='complete',
+        distance_threshold=distance_threshold
+    )
+    clustering.fit(distance_matrix)
+    labels = clustering.labels_
+
+    # 8. 构造每个节点对应的 DataFrame
+    node_clusters_df = pd.DataFrame({'Node': nodes, 'Cluster': labels})
+
+    # 9. 计算每个类别的统计信息：类别中节点个数和内部的平均相关性（转换回 -100 到 100）
+    cluster_stats = {}
+    unique_clusters = np.unique(labels)
+    for c in unique_clusters:
+        # 获取所属该类别的所有节点
+        cluster_nodes = node_clusters_df[node_clusters_df['Cluster'] == c]['Node'].tolist()
+        size = len(cluster_nodes)
+        member_indices = [node_index[node] for node in cluster_nodes]
+
+        if size > 1:
+            # 提取该类别内的相关性子矩阵（归一化后的值）
+            sub_corr = corr_matrix[np.ix_(member_indices, member_indices)]
+            # 计算上三角区域（不含对角线）节点对的平均值
+            triu_indices = np.triu_indices(size, k=1)
+            avg_corr_normalized = sub_corr[triu_indices].mean()
+            # 转换回原始的相关性尺度
+            avg_corr = avg_corr_normalized * 100
+        else:
+            avg_corr = np.nan  # 单个节点类别无法计算节点间相关性
+
+        cluster_stats[c] = {'Size': size, 'AverageCorrelation': avg_corr}
+
+    # 10. 将类别统计信息直接添加到节点 DataFrame 的新列中
+    node_clusters_df['Size'] = node_clusters_df['Cluster'].map(lambda c: cluster_stats[c]['Size'])
+    node_clusters_df['AverageCorrelation'] = node_clusters_df['Cluster'].map(lambda c: cluster_stats[c]['AverageCorrelation'])
+    # 将node改名为index
+    node_clusters_df = node_clusters_df.rename(columns={'Node': 'index'})
+
+    return node_clusters_df
+
+def get_statistic(df, target_column):
+    """
+    计算目标列的统计信息，包括：
+    - 平均值
+    - 总行数
+    - 目标列为正数的比例
+
+    :param df: pandas DataFrame
+    :param target_column: 需要统计的目标列名
+    :return: 统计信息的字典
+    """
+    if target_column not in df.columns:
+        raise ValueError(f"列 '{target_column}' 不存在于 DataFrame 中")
+
+    total_rows = len(df)
+    mean_value = df[target_column].mean()
+    positive_ratio = (df[target_column] > 0).mean()  # 计算为正数的比例
+
+    return {
+        "mean": mean_value,
+        "total_rows": total_rows,
+        "positive_ratio": positive_ratio
+    }
+
 def debug():
-    # good_df = pd.read_csv('temp/final_good.csv')
 
-    # origin_good_df_list = []
-    # inst_id_list = ['BTC', 'SOL']
-    # for inst_id in inst_id_list:
-    #     origin_good_df = pd.read_csv(f'temp_back/{inst_id}_origin_good_op_all_false.csv')
-    #     # origin_good_df = choose_good_strategy_debug(inst_id)
-    #     # origin_good_df.to_csv(f'temp/{inst_id}_df.csv', index=False)
-    #     origin_good_df_list.append(origin_good_df)
-    # # all_df = pd.concat(origin_good_df_list)
-    # # all_df = pd.read_csv('temp/all.csv')
-    # merged_df, temp_df = merge_dataframes(origin_good_df_list)
-    # merged_df.to_csv('temp/merged_df.csv', index=False)
-    # temp_df.to_csv('temp/temp_df.csv', index=False)
-    # origin_good_df = pd.read_csv('temp/temp.csv')
-    # sort_key = gen_score(origin_good_df, 'kai_count')
+    good_df = pd.read_csv('temp/final_good.csv')
+    df = pd.read_csv(f'temp/df.csv')
+    # 将Correlation从小到大排序
+    df = df.sort_values('Correlation', ascending=True)
+    df_len = df.shape[0]
 
-    # debug
-    statistic_df_list = []
-    range_key = 'kai_count'
-    sort_key = 'net_profit_rate'
-    # sort_key = 'fu_profit_mean'
-    sort_key = 'stability_score'
-    # sort_key = 'profit_risk_score'
-    # sort_key = 'monthly_net_profit_min'
-    # sort_key = 'monthly_net_profit_std_score'
-    # sort_key = 'profit_risk_score'
-    # sort_key = 'profit_risk_score_con'
-    range_size = 1
-    # sort_key = 'max_consecutive_loss_score'
-    # origin_good_df = choose_good_strategy_debug('')
-    inst_id_list = ['DOGE', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
-    for inst_id in inst_id_list:
-        # gen_search_param(inst_id)
-        # origin_good_df = pd.read_csv(f'temp/{inst_id}_final_good.csv')
-        # origin_good_df = pd.read_csv(f'temp/{inst_id}_df.csv')
-        # origin_good_df = origin_good_df[(origin_good_df['hold_time_mean'] < 10000)]
-        # origin_good_df['hold_time_score'] = origin_good_df['hold_time_std'] / origin_good_df['hold_time_mean']
-        # origin_good_df['loss_score'] = 1 - origin_good_df['loss_rate'] - origin_good_df['loss_time_rate']
-        # origin_good_df = origin_good_df[(origin_good_df['loss_score'] > 0)]
-        # # good_df = pd.read_csv('temp/final_good.csv')
+    # diff = 0.05
+    # start_idx = int((0.5 - diff) * df_len)
+    # end_idx = int((0.5 + diff) * df_len)
+    #
+    # # 取中间 20% 的数据
+    # df = df.iloc[start_idx:end_idx]
+
+    df = df.head(int(1.1 * df_len))
+    clusters_df = cluster_correlations(df, correlation_threshold=50)
+    # 将result_df与good_df合并，以good_df为基准
+    good_df = good_df.merge(clusters_df, on='index', how='left')
+    # 将good_df按照Cluster分组，计算每个Cluster的统计信息
+    cluster_statistic = good_df.groupby('Cluster').apply(get_statistic, target_column='net_profit_rate_new')
+    cluster_statistic_df = pd.DataFrame(cluster_statistic.tolist(), index=cluster_statistic.index)
+    # cluster_statistic_df增加一列index
+    cluster_statistic_df['Cluster'] = cluster_statistic_df.index
+    cluster_statistic_df = cluster_statistic_df.reset_index(drop=True)  # 避免索引变成新的一列
+    good_df = good_df.merge(cluster_statistic_df, on='Cluster', how='left')
+
+    result_df = compute_avg_correlation(df)
+    # 将result_df的row重命名为index
+    result_df = result_df.rename(columns={'row': 'index'})
 
 
+    index_list = df['Row1'].tolist()
+    index_list.extend(df['Row2'].tolist())
+    # 统计index出现的次数
+    index_dict = Counter(index_list)
+    # 将index_dict转换为DataFrame
+    index_df = pd.DataFrame(index_dict.items(), columns=['index', 'count'])
 
+    # 将result_df与good_df合并，以good_df为基准
+    good_df = good_df.merge(result_df, on='index', how='left')
 
-        # # origin_good_df = choose_good_strategy_debug(inst_id)
-        # # origin_good_df = origin_good_df.drop_duplicates(subset=["kai_column", "pin_column"])
-        # # origin_good_df = calculate_final_score(origin_good_df)
-        # # origin_good_df.to_csv(f'temp_back/{inst_id}_origin_good_op_all_false.csv', index=False)
-        # origin_good_df = pd.read_csv(f'temp_back/{inst_id}_origin_good_op_all_false.csv')
-        #
-        #
-        # # temp_df = pd.read_csv('temp/temp_df.csv')
-        # # # 只保留 origin_good_df 中那些 (kai_column, pin_column) 组合在 temp_df 中存在的行
-        # # origin_good_df = origin_good_df.merge(temp_df[['kai_column', 'pin_column']], on=['kai_column', 'pin_column'],how='inner')
-        #
-        #
-        #
-        # origin_good_df = origin_good_df[(origin_good_df['net_profit_rate'] > 10)]
-        # origin_good_df['hold_time_score'] = 1 - origin_good_df['hold_time_std'] / origin_good_df['hold_time_mean']
-        # origin_good_df['max_consecutive_loss_score'] = origin_good_df['max_consecutive_loss'] / origin_good_df['max_loss_trade_count']
-        # origin_good_df['max_profit_score'] = -origin_good_df['max_profit'] / origin_good_df['net_profit_rate']
-        # origin_good_df['monthly_trade_std_score'] = -origin_good_df['monthly_trade_std'] / origin_good_df['kai_count']
-        # origin_good_df['monthly_net_profit_std_score'] = -origin_good_df['monthly_net_profit_std'] * origin_good_df['monthly_net_profit_std'] / origin_good_df['net_profit_rate'] * 22
-        # origin_good_df['monthly_avg_profit_std_score'] = -origin_good_df['monthly_avg_profit_std'] * origin_good_df['monthly_avg_profit_std'] / origin_good_df['avg_profit_rate'] * 100 * 100
-        #
-        # # origin_good_df = origin_good_df[(origin_good_df['monthly_net_profit_std_score'] > -3)]
-        # # origin_good_df = origin_good_df[(origin_good_df['max_consecutive_loss_score'] > -1)]
-        # # origin_good_df = origin_good_df[(origin_good_df['monthly_avg_profit_std_score'] > -100)]
-        # origin_good_df = origin_good_df[(origin_good_df['net_profit_rate'] > 200)]
-        #
-        # origin_good_df.to_csv(f'temp/final_good.csv', index=False)
-        #
-        #
-        #
-        #
-        # # origin_good_df = origin_good_df[(origin_good_df['avg_profit_rate'] > 20)]
-        # # origin_good_df = origin_good_df[(origin_good_df['monthly_net_profit_std_score'] > 0)]
-        #
-        # # origin_good_df['net_profit_rate'] = origin_good_df['net_profit_rate'] - origin_good_df['fix_profit']
-        # #
-        # # origin_good_df['profit_risk_score_con'] = -origin_good_df['net_profit_rate'] / origin_good_df['max_consecutive_loss'] * origin_good_df['net_profit_rate']
-        # # origin_good_df['profit_risk_score'] = -origin_good_df['net_profit_rate'] / origin_good_df['fu_profit_sum'] * origin_good_df['net_profit_rate']
-        # # origin_good_df['profit_risk_score_pure'] = -origin_good_df['net_profit_rate'] / origin_good_df['fu_profit_sum']
-        # #
-        # # origin_good_df = origin_good_df[(origin_good_df['profit_risk_score_pure'] > 0.5)]
-        # #
-        # # origin_good_df = origin_good_df[(origin_good_df['net_profit_rate'] > 50)]
-        # # origin_good_df = origin_good_df[(origin_good_df['max_consecutive_loss'] > -50)]
-        # # origin_good_df.to_csv(f'temp/{inst_id}_origin_good_op_all_filter.csv', index=False)
-        #
-        # # origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_true_close.csv')
-        # # # origin_good_df = pd.read_csv(f'temp/{inst_id}_origin_good_op_false.csv')
-        # # # origin_good_df = pd.concat([origin_good_df, origin_good_df1])
-        # # # origin_good_df[sort_key] = -origin_good_df[sort_key]
-        # # # 删除kai_column和pin_column中包含 macross的行
-        # # # origin_good_df = origin_good_df[~origin_good_df['kai_column'].str.contains('abs') & ~origin_good_df['pin_column'].str.contains('macross')]
-        # # # origin_good_df['zhen_fu_mean_score'] = -origin_good_df['zhen_profit_mean'] / origin_good_df['fu_profit_mean']
-        # # origin_good_df['monthly_trade_std_score'] = origin_good_df['monthly_trade_std'] / origin_good_df['kai_count'] * 22 * origin_good_df['active_month_ratio']
-        # # # origin_good_df = origin_good_df[(origin_good_df['monthly_trade_std_score'] < 0.3)]
-        # # # origin_good_df = origin_good_df[(origin_good_df['profit_risk_score'] > 700)]
-        # # origin_good_df = origin_good_df[(origin_good_df['hold_time_mean'] < 3000)]
-        # # # origin_good_df = origin_good_df[(origin_good_df['hold_time_std'] < origin_good_df['hold_time_mean'])]
-        # # # origin_good_df = origin_good_df[(origin_good_df['max_consecutive_loss'] > -10)]
-        # # # origin_good_df = origin_good_df[(origin_good_df['stability_score'] > 0)]
-        # # # origin_good_df = origin_good_df[(origin_good_df['avg_profit_rate'] > 100)]
-        # # origin_good_df = origin_good_df[(origin_good_df['net_profit_rate'] > 200)]
-        # # # good_df = pd.read_csv('temp/final_good.csv')
-        # #
-        # #
-        # # kai_column和pin_column相同的时候取第一行
-        # origin_good_df = origin_good_df.drop_duplicates(subset=['kai_column', 'pin_column'], keep='first')
-        # good_df = origin_good_df.sort_values(sort_key, ascending=False)
-        # long_good_strategy_df = good_df[good_df['kai_side'] == 'long']
-        # short_good_strategy_df = good_df[good_df['kai_side'] == 'short']
-        #
-        # # 将long_good_strategy_df按照net_profit_rate_mult降序排列
-        # long_good_select_df = select_best_rows_in_ranges(long_good_strategy_df, range_size=range_size,
-        #                                                  sort_key=sort_key, range_key=range_key)
-        # short_good_select_df = select_best_rows_in_ranges(short_good_strategy_df, range_size=range_size,
-        #                                                   sort_key=sort_key, range_key=range_key)
-        # good_df = pd.concat([long_good_select_df, short_good_select_df])
-        #
-        #
-        # good_df = origin_good_df.sort_values(sort_key, ascending=False)
-        # # 重置good_df的索引
-        # good_df = good_df.reset_index(drop=True)
-        # # good_df = good_df.sort_values(by=sort_key, ascending=True)
-        # # good_df = good_df.drop_duplicates(subset=['kai_column', 'kai_side'], keep='first')
-        #
-        # good_df = pd.read_csv(f'temp/1m_10000000_SOL_is_detail_True_is_reverse_False_3126_0.csv')
-        # result, good_df, df = find_all_valid_groups(good_df, 30)
-        # good_df.to_csv('temp/final_good.csv', index=False)
-        # get_metrics_df(good_df)
-        # return
+    good_df = good_df.merge(index_df, on='index', how='left')
 
-        good_df = pd.read_csv('temp/final_good.csv')
-        df = pd.read_csv(f'temp/df.csv')
-        # 将Correlation从小到大排序
-        df = df.sort_values('Correlation', ascending=True)
-        df_len = df.shape[0]
+    count_50 = good_df['count'].quantile(0.8)
+    AvgCorrelation_50 = good_df['AvgCorrelation'].quantile(0.8)
 
-        # diff = 0.05
-        # start_idx = int((0.5 - diff) * df_len)
-        # end_idx = int((0.5 + diff) * df_len)
-        #
-        # # 取中间 20% 的数据
-        # df = df.iloc[start_idx:end_idx]
+    filter_good_df = good_df[(good_df['count'] > count_50) & (good_df['AvgCorrelation'] > AvgCorrelation_50)]
 
-        df = df.head(int(0.3 * df_len))
-
-        result_df = compute_avg_correlation(df)
-        # 将result_df的row重命名为index
-        result_df = result_df.rename(columns={'row': 'index'})
-
-
-        index_list = df['Row1'].tolist()
-        index_list.extend(df['Row2'].tolist())
-        # 统计index出现的次数
-        index_dict = Counter(index_list)
-        # 将index_dict转换为DataFrame
-        index_df = pd.DataFrame(index_dict.items(), columns=['index', 'count'])
-
-        # 将result_df与good_df合并，以good_df为基准
-        good_df = good_df.merge(result_df, on='index', how='left')
-
-        good_df = good_df.merge(index_df, on='index', how='left')
-        # 获取good_dfcount0.5分位的值
-        count_50 = good_df['count'].quantile(0.8)
-        AvgCorrelation_50 = good_df['AvgCorrelation'].quantile(0.8)
-
-        filter_good_df = good_df[(good_df['count'] > count_50) & (good_df['AvgCorrelation'] > AvgCorrelation_50)]
-
-        result = pd.read_csv(f'temp/result.csv')
-        # good_df[good_df['index'].isin(          [8, 13, 26, 1]                      )]
-        # good_df[good_df['index'].isin(          index_list                      )]
-
-
-        # good_df = origin_good_df
-        good_df = good_df.sort_values(sort_key, ascending=False)
-        # 重置good_df的索引
-        # good_df = good_df.reset_index(drop=True)
-        # good_df['index'] = good_df.index
-        good_index_lists = [
-            [0,1,2,3]
-
-        ]
-
-        good_index_list = []
-        # for good_index in good_index_lists:
-        #     good_index_list.extend(good_index)
-        # for i in range(300000):
-        #     good_index_list.append(i)
-        # good_df = good_df[good_df['index'].isin( good_index_list  )]
-
-        is_filter = True
-        is_detail = False
-        file_list = []
-        file_list.append(f'kline_data/origin_data_1m_110000_{inst_id}-USDT-SWAP.csv')
-        file_list.append(f'kline_data/origin_data_1m_40000_{inst_id}-USDT-SWAP.csv')
-        file_list.append(f'kline_data/origin_data_1m_30000_{inst_id}-USDT-SWAP.csv')
-        # # file_list.append(f'kline_data/origin_data_1m_20000_{inst_id}-USDT-SWAP.csv')
-        file_list.append(f'kline_data/origin_data_1m_4000_{inst_id}-USDT-SWAP.csv')
-        file_list.append(f'kline_data/origin_data_1m_3000_{inst_id}-USDT-SWAP.csv')
-        # file_list.append(f'kline_data/origin_data_1m_2000_{inst_id}-USDT-SWAP.csv')
-        file_list.append(f'kline_data/origin_data_1m_1000_{inst_id}-USDT-SWAP.csv')
-        good_df_list = []
-
-        for file in file_list:
-            df = pd.read_csv(file)
-            # 获取第一行和最后一行的close，计算涨跌幅
-            start_close = df.iloc[0]['close']
-            end_close = df.iloc[-1]['close']
-            total_chg = (end_close - start_close) / start_close * 100
-
-            # 计算每一行的涨跌幅
-            df['chg'] = df['close'].pct_change() * 100
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
-            signal_cache = {}
-            statistic_dict_list = []
-            # good_df = good_df.reset_index(drop=True)
-            start_time = time.time()
-            for index, row in good_df.iterrows():
-                long_column = row['kai_column']
-                short_column = row['pin_column']
-                if 'is_reverse' not in row:
-                    is_reverse = False
-                else:
-                    is_reverse = row['is_reverse']
-                # long_column = 'ma_1_low_short'
-                # short_column = 'abs_1920_0.5_low_short'
-                kai_data_df, statistic_dict = get_detail_backtest_result_op(signal_cache, df, long_column, short_column,
-                                                                            is_filter, is_detail, is_reverse)
-                if statistic_dict is None:
-                    continue
-                # 为每一行添加统计数据，需要修改到原始数据中
-                # 直接修改 `good_df` 中的相应列
-                good_df.at[index, 'kai_count_new'] = statistic_dict['kai_count']
-                good_df.at[index, 'trade_rate_new'] = statistic_dict['trade_rate']
-                good_df.at[index, 'hold_time_mean_new'] = statistic_dict['hold_time_mean']
-                good_df.at[index, 'net_profit_rate_new'] = statistic_dict['net_profit_rate'] - statistic_dict['fix_profit']
-                good_df.at[index, 'fix_profit_new'] = statistic_dict['fix_profit']
-                good_df.at[index, 'avg_profit_rate_new'] = statistic_dict['avg_profit_rate']
-                good_df.at[index, 'same_count_new'] = statistic_dict['same_count']
-                # good_df.at[index, 'max_profit_new'] = statistic_dict['max_profit']
-                # good_df.at[index, 'min_profit_new'] = statistic_dict['min_profit']
-                if is_detail:
-                    good_df.at[index, 'max_optimal_value'] = statistic_dict['max_optimal_value']
-                    good_df.at[index, 'max_optimal_profit'] = statistic_dict['max_optimal_profit']
-                    good_df.at[index, 'max_optimal_loss_rate'] = statistic_dict['max_optimal_loss_rate']
-                    good_df.at[index, 'min_optimal_value'] = statistic_dict['min_optimal_value']
-                    good_df.at[index, 'min_optimal_profit'] = statistic_dict['min_optimal_profit']
-                    good_df.at[index, 'min_optimal_loss_rate'] = statistic_dict['min_optimal_loss_rate']
-
-                statistic_dict_list.append(statistic_dict)
-            if is_detail:
-                good_df['max_optimal_profit_cha'] = good_df['max_optimal_profit'] - good_df['net_profit_rate_new']
-                good_df['max_optimal_profit_rate'] = good_df['max_optimal_profit_cha'] / good_df['net_profit_rate_new']
-                good_df['min_optimal_profit_cha'] = good_df['min_optimal_profit'] - good_df['net_profit_rate_new']
-                good_df['min_optimal_profit_rate'] = good_df['min_optimal_profit_cha'] / good_df['net_profit_rate_new']
-            statistic_df = pd.DataFrame(statistic_dict_list)
-            statistic_df_list.append(statistic_df)
-            statistic_df.to_csv('temp/all_statistic_df.csv', index=False)
-            print(f'耗时 {time.time() - start_time:.2f} 秒。')
-            # 获取good_df的kai_column的分布情况
-            kai_value = good_df['kai_column'].value_counts()
-            pin_value = good_df['pin_column'].value_counts()
-            # 为good_df新增两列，分别为kai_column的分布情况和pin_column的分布情况
-            good_df['kai_value'] = good_df['kai_column'].apply(lambda x: kai_value[x])
-            good_df['pin_value'] = good_df['pin_column'].apply(lambda x: pin_value[x])
-            good_df['value_score'] = good_df['kai_value'] + good_df['pin_value']
-            good_df['value_score1'] = good_df['kai_value'] * good_df['pin_value']
-            good_df['total_chg'] = total_chg
-            good_df_list.append(good_df.copy())
-            # 获取索引为109，876，926的行
-            # row_list = [303, 4144, 3949]
-            # 找到good_df中score字段值在row_list中的行
-            # good_df[good_df['index'].isin(        [1423, 1279, 580]    )]
-            # good_df_list[0][good_df_list[0]['index'].isin([339, 990])]
-            # result = find_all_valid_groups(good_df, 100)
-            # good_df.loc[  [1073, 1874]   ]
-            good_temp_df_list = []
-            for good_index in good_index_lists:
-                good_temp_df_list.append(good_df[good_df['index'].isin(  good_index  )])
-
-
-
-            print(inst_id)
-    merged_df, temp_df = merge_dataframes(statistic_df_list)
-    print()
-
+    result = pd.read_csv(f'temp/result.csv')
+    # good_df[good_df['index'].isin(          [15720, 20300]                      )]
+    # good_df[good_df['index'].isin(          index_list                      )]
 
 def example():
     debug()

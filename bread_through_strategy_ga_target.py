@@ -688,7 +688,7 @@ def validation(market_data_file):
             # 合并所有统计字典为 DataFrame 并保存到文件
             stats_list = [r[2] for r in results_filtered]
             stats_df = pd.DataFrame(stats_list)
-            output_file = os.path.join("temp_back", f"{stat_df_base_name}_statistic_results.csv")
+            output_file = os.path.join("temp_back", f"{stat_df_base_name}_{base_name}statistic_results.csv")
             stats_df.to_csv(output_file, index=False)
             print(f"所有统计结果已保存到 {output_file}")
         except Exception as e:
@@ -946,8 +946,9 @@ if __name__ == "__main__":
     data_path_list = [
         # "kline_data/origin_data_1m_110000_SOL-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_110000_BTC-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_110000_ETH-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_110000_TON-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_110000_ETH-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_110000_TON-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000_TON-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_110000_DOGE-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_110000_XRP-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_110000_PEPE-USDT-SWAP.csv",

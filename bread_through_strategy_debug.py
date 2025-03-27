@@ -2594,7 +2594,7 @@ def filtering(origin_good_df, target_column, sort_key, threshold):
     filtered_df.to_csv('temp/origin_good.csv', index=False)
     return filtered_df
 
-def gen_statistic_data(origin_good_df, threshold=100):
+def gen_statistic_data(origin_good_df, threshold=99):
     """
     对原始 DataFrame 进行预处理：
       1. 重置索引并将原始索引保存到一列中；
@@ -2621,7 +2621,7 @@ def gen_statistic_data(origin_good_df, threshold=100):
     origin_good_df["monthly_net_profit_detail"] = origin_good_df["monthly_net_profit_detail"].apply(safe_parse_dict)
     origin_good_df["monthly_trade_count_detail"] = origin_good_df["monthly_trade_count_detail"].apply(safe_parse_dict)
     print(f'待计算的数据量：{len(origin_good_df)}')
-    origin_good_df = filtering(origin_good_df, 'kai_count', 'net_profit_rate', 100)
+    origin_good_df = filtering(origin_good_df, 'kai_count', 'net_profit_rate', 90)
     print(f'过滤后的数据量：{len(origin_good_df)}')
 
     # 转换为字典列表，保持 DataFrame 内的顺序
