@@ -329,7 +329,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
 
     profits_arr = kai_data_df["true_profit"].values
     max_loss, max_loss_start_idx, max_loss_end_idx, loss_trade_count = calculate_max_sequence_numba(profits_arr)
-    if max_loss < -10 or net_profit_rate < 50 or trade_count < 100:
+    if max_loss < -10 or net_profit_rate < 100 or trade_count < 100:
         return None, None
 
     if max_loss_start_idx < len(kai_data_df) and max_loss_end_idx < len(kai_data_df):
@@ -365,6 +365,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     if hold_time_mean > 2000 or true_profit_mean < 10:
         return None, None
 
+    # Monthly statistics
     monthly_groups = kai_data_df["timestamp"].dt.to_period("M")
     monthly_agg = kai_data_df.groupby(monthly_groups)["true_profit"].agg(["sum", "mean", "count"])
     monthly_trade_std = monthly_agg["count"].std() if "count" in monthly_agg else 0
@@ -379,6 +380,21 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
 
     monthly_net_profit_detail = {str(month): round(val, 4) for month, val in monthly_agg["sum"].to_dict().items()}
     monthly_trade_count_detail = {str(month): int(val) for month, val in monthly_agg["count"].to_dict().items()}
+
+    # Weekly statistics
+    weekly_groups = kai_data_df["timestamp"].dt.to_period("W")
+    weekly_agg = kai_data_df.groupby(weekly_groups)["true_profit"].agg(["sum", "mean", "count"])
+    weekly_trade_std = weekly_agg["count"].std() if "count" in weekly_agg else 0
+    active_weeks = weekly_agg.shape[0]
+    total_weeks = len(pd.period_range(start=kai_data_df["timestamp"].min(), end=kai_data_df["timestamp"].max(), freq='W'))
+    active_week_ratio = active_weeks / total_weeks if total_weeks else 0
+    weekly_net_profit_std = weekly_agg["sum"].std() if "sum" in weekly_agg else 0
+    weekly_avg_profit_std = weekly_agg["mean"].std() if "mean" in weekly_agg else 0
+    weekly_net_profit_min = weekly_agg["sum"].min() if "sum" in weekly_agg else 0
+    weekly_net_profit_max = weekly_agg["sum"].max() if "sum" in weekly_agg else 0
+    weekly_loss_rate = ((weekly_agg["sum"] < 0).sum() / active_weeks) if active_weeks else 0
+    weekly_net_profit_detail = {str(week): round(val, 4) for week, val in weekly_agg["sum"].to_dict().items()}
+    weekly_trade_count_detail = {str(week): int(val) for week, val in weekly_agg["count"].to_dict().items()}
 
     hold_time_std = kai_data_df["hold_time"].std()
 
@@ -451,14 +467,21 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         "top_loss_ratio": safe_round(top_loss_ratio, 4),
         "is_reverse": is_reverse,
         "monthly_net_profit_detail": monthly_net_profit_detail,
-        "monthly_trade_count_detail": monthly_trade_count_detail
+        "monthly_trade_count_detail": monthly_trade_count_detail,
+        "weekly_trade_std": safe_round(weekly_trade_std, 4),
+        "active_week_ratio": safe_round(active_week_ratio, 4),
+        "weekly_loss_rate": safe_round(weekly_loss_rate, 4),
+        "weekly_net_profit_min": safe_round(weekly_net_profit_min, 4),
+        "weekly_net_profit_max": safe_round(weekly_net_profit_max, 4),
+        "weekly_net_profit_std": safe_round(weekly_net_profit_std, 4),
+        "weekly_avg_profit_std": safe_round(weekly_avg_profit_std, 4),
+        "weekly_net_profit_detail": weekly_net_profit_detail,
+        "weekly_trade_count_detail": weekly_trade_count_detail
     }
     kai_data_df = kai_data_df[["hold_time", "true_profit"]]
     return kai_data_df, statistic_dict
 
-##############################################
-# 信号名称生成相关函数
-##############################################
+
 
 def generate_numbers(start, end, number, even=True):
     """
@@ -1014,7 +1037,7 @@ def example():
         # "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_DOGE-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_XRP-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_PEPE-USDT-SWAP.csv"

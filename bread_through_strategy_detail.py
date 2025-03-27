@@ -2946,11 +2946,13 @@ def get_statistic(df, target_column):
     total_rows = len(df)
     mean_value = df[target_column].mean()
     positive_ratio = (df[target_column] > 0).mean()  # 计算为正数的比例
+    value_std = df[target_column].std()
 
     return {
         "mean": mean_value,
         "total_rows": total_rows,
-        "positive_ratio": positive_ratio
+        "positive_ratio": positive_ratio,
+        "value_std":value_std
     }
 
 def debug():
@@ -2969,7 +2971,7 @@ def debug():
     # df = df.iloc[start_idx:end_idx]
 
     df = df.head(int(1.1 * df_len))
-    clusters_df = cluster_correlations(df, correlation_threshold=50)
+    clusters_df = cluster_correlations(df, correlation_threshold=90)
     # 将result_df与good_df合并，以good_df为基准
     good_df = good_df.merge(clusters_df, on='index', how='left')
     # 将good_df按照Cluster分组，计算每个Cluster的统计信息
