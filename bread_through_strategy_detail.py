@@ -3005,7 +3005,7 @@ def debug():
     filter_good_df = good_df[(good_df['count'] > count_50) & (good_df['AvgCorrelation'] > AvgCorrelation_50)]
 
     result = pd.read_csv(f'temp/result.csv')
-    # good_df[good_df['index'].isin(          [15720, 20300]                      )]
+    # good_df[good_df['index'].isin(          [910, 1020,1243]                      )]
     # good_df[good_df['index'].isin(          index_list                      )]
 
 def example():

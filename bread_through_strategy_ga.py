@@ -691,9 +691,34 @@ def get_fitness_net(stat):
     """从统计结果中提取适应度值（净利率），若失败则返回 -10000。"""
     if stat is None:
         return -10000
-    return stat.get("net_profit_rate", 10000)
+    return stat.get("net_profit_rate", -10000)
 
-get_fitness_list = [get_fitness_net]
+def get_fitness(stat, key, invert=False):
+    """
+    从统计结果 stat 中提取适应度值。如果 stat 为 None 或者 key 不存在，则返回 -10000，
+    否则返回 stat 对应 key 的值。若 invert 为 True，则返回该值的相反数。
+    """
+    if stat is None:
+        return -10000
+    value = stat.get(key, -10000)
+    return -value if invert else value
+
+# 声明两组 key:
+normal_keys = ["net_profit_rate", "kai_count",'min_profit','avg_profit_rate', 'monthly_net_profit_min','weekly_net_profit_min']
+inverted_keys = ["hold_time_mean", "hold_time_std", "loss_rate", "loss_time_rate",'fu_profit_mean', 'fu_profit_sum','max_profit', 'true_profit_std', 'monthly_trade_std', 'monthly_net_profit_std', 'monthly_avg_profit_std',
+                 'top_loss_ratio', 'top_profit_ratio','weekly_trade_std', 'weekly_net_profit_std', 'weekly_avg_profit_std', 'weekly_loss_rate', 'weekly_net_profit_max']
+
+# 利用 functools.partial 生成各个适应度提取函数，并存储在字典中
+fitness_getters = {}
+
+for key in normal_keys:
+    fitness_getters[key] = partial(get_fitness, key=key, invert=False)
+
+for key in inverted_keys:
+    fitness_getters[key] = partial(get_fitness, key=key, invert=True)
+
+# 如果需要以特定顺序生成一个列表，包含所有适应度提取函数
+get_fitness_list = [fitness_getters[key] for key in normal_keys + inverted_keys]
 
 def evaluate_candidate_batch(candidates, fitness_func=get_fitness_net):
     """
@@ -831,12 +856,13 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     fitness_index = 0
     pre_fitness_index = 0
     partial_eval = partial(evaluate_candidate_batch, fitness_func=get_fitness_list[fitness_index])
+    print(f"开始搜索，总代数: {generations}，每代种群大小: {population_size}，岛屿数量: {islands_count}，适应度函数个数: {len(get_fitness_list)} single_generations_count: {single_generations_count}")
 
     with multiprocessing.Pool(processes=pool_processes, initializer=init_worker_ga, initargs=(GLOBAL_SIGNALS, df)) as pool:
         for gen in range(start_gen, generations):
             start_time = time.time()
             island_stats_list = []
-            print(f"\n========== 第 {gen} 代搜索，适应度函数: {get_fitness_list[fitness_index].__name__} ==========")
+            print(f"\n========== 第 {gen} 代搜索，适应度函数: {get_fitness_list[fitness_index].func.__name__} ==========")
             for idx, island in enumerate(islands):
                 pop = island["population"]
                 print(f"岛 {idx} 进化开始，overall_best 在种群中: {overall_best in pop}，种群大小: {len(pop)}")
@@ -930,7 +956,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                 partial_eval = partial(evaluate_candidate_batch, fitness_func=get_fitness_list[fitness_index])
                 pre_fitness_index = fitness_index
                 need_restart = True
-            if global_no_improve_count >= 20 or need_restart:
+            if global_no_improve_count >= 10 or need_restart:
                 overall_best_fitness = -1e9
                 overall_best = None
                 print(f"连续 {global_no_improve_count} 代无改进，进行全局重启。")
@@ -1034,10 +1060,10 @@ def example():
     """
     start_time = time.time()
     data_path_list = [
-        # "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_DOGE-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_XRP-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_PEPE-USDT-SWAP.csv"

@@ -283,10 +283,10 @@ def process_data_flat(data_df, target_column_list):
 def debug():
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     df_list = []
-    df_list.append(pd.read_csv(f'images/combined_bin_analysis_SOL_false.csv').drop_duplicates(subset=["feature"]))
+    # df_list.append(pd.read_csv(f'images/combined_bin_analysis_SOL_false.csv').drop_duplicates(subset=["feature"]))
     for inst_id in inst_id_list:
 
-        file_path = f'images/combined_bin_analysis_{inst_id}.csv'
+        file_path = f'images/combined_bin_analysis_{inst_id}_false.csv'
         temp_df = pd.read_csv(file_path)
         temp_df['file'] = inst_id
         temp_df = temp_df.drop_duplicates(subset=["feature"])
@@ -305,14 +305,14 @@ def debug():
 def main(n_bins=50):
     # debug()
     # ===== 数据加载与预处理 =====
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON']
     images_dir = "images"
     if not os.path.exists(images_dir):
         os.makedirs(images_dir)
 
     for inst_id in inst_id_list:
         print(f"\n【处理数据】：{inst_id}")
-        data_file = f'temp/final_good_{inst_id}.csv'
+        data_file = f'temp/final_good_{inst_id}_false.csv'
         data_df = pd.read_csv(data_file)
         # data_df = data_df[(data_df['net_profit_rate'] > 100)]
 
@@ -330,40 +330,40 @@ def main(n_bins=50):
         # 记录所有新加入的特征名称，便于后续使用
         derived_feature_names = []
 
-        for i in range(num_features):
-            a = orig_values[:, i]
-            col1 = orig_feature_cols[i]
-            for j in range(i + 1, num_features):
-                b = orig_values[:, j]
-                col2 = orig_feature_cols[j]
-
-                # 交叉特征1：和
-                col_name = f'{col1}-{col2}-sum'
-                data_df[col_name] = a + b
-                derived_feature_names.append(col_name)
-
-                # 交叉特征3：差值
-                col_name = f'{col1}-{col2}-diff'
-                data_df[col_name] = a - b
-                derived_feature_names.append(col_name)
-
-                # 交叉特征2：乘积（考虑负数情况）
-                col_name = f'{col1}-{col2}-prod'
-                data_df[col_name] = np.where(
-                    (a < 0) & (b < 0),  # 如果两者均为负，
-                    - (np.abs(a) * np.abs(b)),  # 则取负乘积（保持“差”的含义）
-                    a * b  # 否则直接相乘
-                )
-                derived_feature_names.append(col_name)
-
-                # 交叉特征4：比值（考虑负数情况）
-                col_name = f'{col1}-{col2}-ratio'
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    ratio = np.where(b == 0, np.nan, a / b)
-                    # 如果两者均为负，则结果也手动调整为负（就算数学上负除负为正）
-                    ratio = np.where((a < 0) & (b < 0), -np.abs(ratio), ratio)
-                data_df[col_name] = ratio
-                derived_feature_names.append(col_name)
+        # for i in range(num_features):
+        #     a = orig_values[:, i]
+        #     col1 = orig_feature_cols[i]
+        #     for j in range(i + 1, num_features):
+        #         b = orig_values[:, j]
+        #         col2 = orig_feature_cols[j]
+        #
+        #         # 交叉特征1：和
+        #         col_name = f'{col1}-{col2}-sum'
+        #         data_df[col_name] = a + b
+        #         derived_feature_names.append(col_name)
+        #
+        #         # 交叉特征3：差值
+        #         col_name = f'{col1}-{col2}-diff'
+        #         data_df[col_name] = a - b
+        #         derived_feature_names.append(col_name)
+        #
+        #         # 交叉特征2：乘积（考虑负数情况）
+        #         col_name = f'{col1}-{col2}-prod'
+        #         data_df[col_name] = np.where(
+        #             (a < 0) & (b < 0),  # 如果两者均为负，
+        #             - (np.abs(a) * np.abs(b)),  # 则取负乘积（保持“差”的含义）
+        #             a * b  # 否则直接相乘
+        #         )
+        #         derived_feature_names.append(col_name)
+        #
+        #         # 交叉特征4：比值（考虑负数情况）
+        #         col_name = f'{col1}-{col2}-ratio'
+        #         with np.errstate(divide='ignore', invalid='ignore'):
+        #             ratio = np.where(b == 0, np.nan, a / b)
+        #             # 如果两者均为负，则结果也手动调整为负（就算数学上负除负为正）
+        #             ratio = np.where((a < 0) & (b < 0), -np.abs(ratio), ratio)
+        #         data_df[col_name] = ratio
+        #         derived_feature_names.append(col_name)
 
         # 更新完整的特征列表：原始特征 + 派生特征
         all_feature_cols = orig_feature_cols + derived_feature_names
@@ -398,7 +398,7 @@ def main(n_bins=50):
         # ===== 合并结果并保存 =====
         if all_bin_analyses:
             combined_bin_analysis_df = pd.concat(all_bin_analyses, ignore_index=True)
-            combined_csv_file = os.path.join(images_dir, f"combined_bin_analysis_{inst_id}.csv")
+            combined_csv_file = os.path.join(images_dir, f"combined_bin_analysis_{inst_id}_false.csv")
             combined_bin_analysis_df.to_csv(combined_csv_file, index=False)
             print(f"【提示】：合并后的 bin_analysis 已保存为 CSV 文件：{combined_csv_file}")
 
