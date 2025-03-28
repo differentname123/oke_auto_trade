@@ -13,6 +13,7 @@
 注：如果你已有 data_df 数据集和 feature_column_list 列表，
     请注释掉示例数据生成部分，采用你自己的数据。
 """
+
 import math
 import os
 from collections import Counter
@@ -56,7 +57,8 @@ def merge_and_compute(df_list, merge_on=["feature", "bin_seq"], metric_cols=None
         return pd.DataFrame()
 
     if metric_cols is None:
-        metric_cols = ['avg_net_profit_rate_new', 'pos_ratio', 'spearman_avg_net_profit_rate', 'spearman_pos_ratio', 'spearman_score']
+        metric_cols = ['avg_net_profit_rate_new', 'pos_ratio', 'spearman_avg_net_profit_rate',
+                       'spearman_pos_ratio', 'spearman_score']
 
     # 对每个 DataFrame 检查必备的列并重命名指标列
     df_renamed_list = []
@@ -115,15 +117,12 @@ def process_single_feature(feature, feat_values, target_values, n_bins=50):
     try:
         # 如果特征的唯一值数量不足 n_bins，则不做分箱分析
         if np.unique(feat_values).size < n_bins:
-            # print(f"【提示】：特征 {feature} 的唯一值不足 {n_bins}（当前 {np.unique(feat_values).size} 个），跳过。")
             return None
 
-        # 利用 np.percentile 快速计算分位数（分为 n_bins 个箱，即需要 n_bins+1 个分位点）
+        # 利用 np.percentile 快速计算分位数
         quantiles = np.percentile(feat_values, np.linspace(0, 100, n_bins + 1))
-        # 去重后可能导致箱的数量减少
         bins = np.unique(quantiles)
         if len(bins) - 1 < 1:
-            # print(f"【提示】：特征 {feature} 分箱数量不够，跳过。")
             return None
 
         # 利用 np.searchsorted 为每个值分箱
@@ -149,8 +148,8 @@ def process_single_feature(feature, feat_values, target_values, n_bins=50):
                 "feature": feature,
                 "bin_seq": bin_seq,
                 "bin_interval": interval_str,
-                'min_net_profit':min_net_profit,
-                'max_net_profit':max_net_profit,
+                'min_net_profit': min_net_profit,
+                'max_net_profit': max_net_profit,
                 "avg_net_profit_rate_new": avg_net_profit,
                 "pos_ratio": pos_ratio,
                 "count": count,
@@ -158,7 +157,6 @@ def process_single_feature(feature, feat_values, target_values, n_bins=50):
             })
         result_df = pd.DataFrame(bins_info).sort_values(by="bin_seq")
 
-        # 计算分箱序号与各指标间的 Spearman 相关系数作为单调性指标
         if result_df.shape[0] > 1:
             spearman_avg, _ = spearmanr(result_df["bin_seq"], result_df["avg_net_profit_rate_new"])
             spearman_pos, _ = spearmanr(result_df["bin_seq"], result_df["pos_ratio"])
@@ -171,13 +169,15 @@ def process_single_feature(feature, feat_values, target_values, n_bins=50):
 
         return result_df
     except Exception as e:
-        # print(f"【提示】：特征 {feature} 分箱处理出错，错误信息：{e}")
+        print(f"处理特征 {feature} 时遇到异常: {e}")
         return None
 
 
 def process_feature_batch(batch_features, batch_feature_data, target_values, n_bins=50):
     """
-    处理一批特征，每批包含 10 个特征。
+    处理一批特征，每批包含一定数量的特征。
+    使用多进程（20进程）并行计算每个特征的分箱统计。
+
     参数:
       batch_features      - 批次中特征名称的列表
       batch_feature_data  - 该批次中每个特征对应的 numpy 数组字典
@@ -187,10 +187,23 @@ def process_feature_batch(batch_features, batch_feature_data, target_values, n_b
       当前批次所有成功分箱后的 DataFrame列表
     """
     batch_results = []
-    for feature in batch_features:
-        result = process_single_feature(feature, batch_feature_data[feature], target_values, n_bins)
-        if result is not None:
-            batch_results.append(result)
+    print(f"【process_feature_batch】：开始处理批次，共计 {len(batch_features)} 个特征")
+    with concurrent.futures.ProcessPoolExecutor(max_workers=20) as executor:
+        futures = {
+            executor.submit(process_single_feature, feature, batch_feature_data[feature], target_values,
+                            n_bins): feature
+            for feature in batch_features
+        }
+        for future in concurrent.futures.as_completed(futures):
+            feat = futures[future]
+            try:
+                result = future.result()
+                if result is not None:
+                    batch_results.append(result)
+                print(f"【process_feature_batch】：完成 {feat} 分箱处理")
+            except Exception as e:
+                print(f"【process_feature_batch】：特征 {feat} 处理出错: {e}")
+    print("【process_feature_batch】：批次处理完成")
     return batch_results
 
 
@@ -214,43 +227,29 @@ def process_data_flat(data_df, target_column_list):
          - feature：特征名称
          - count：对应特征在该子集中的出现次数
     """
-    # 只保留data_df中bin_seq大于90或者小于10的数据
     data_df = data_df[(data_df['bin_seq'] > 90) | (data_df['bin_seq'] < 10)]
-
     output_rows = []
     percentage_list = [x / 100 for x in range(1, 11)]
 
     for target in target_column_list:
-        # 如果目标列不存在，则跳过
         if target not in data_df.columns:
             print(f"列 {target} 不存在于 DataFrame 中，跳过。")
             continue
-
-        # 按目标列倒序排序
         sorted_df = data_df.sort_values(by=target, ascending=False).reset_index(drop=True)
         total_rows = sorted_df.shape[0]
 
         for target in target_column_list:
-            # 如果目标列不存在，则跳过
             if target not in data_df.columns:
                 print(f"列 {target} 不存在于 DataFrame 中，跳过。")
                 continue
-
-            # 按目标列倒序排序
             sorted_df = data_df.sort_values(by=target, ascending=False).reset_index(drop=True)
             total_rows = sorted_df.shape[0]
 
-            # 分别处理前1%、2%、3%
             for perc in percentage_list:
-                # 计算行数，至少取一行
                 n = max(1, int(math.ceil(total_rows * perc)))
                 subset_df = sorted_df.head(n)
-
-                # 记录截止值，即该子集 target 列的最后一行值
                 threshold_value = sorted_df[target].iloc[n - 1]
-
                 feature_list = []
-                # 遍历子集中的每个 'feature' 值处理特征
                 for feat in subset_df['feature']:
                     if '-' in feat:
                         parts = feat.split('-')
@@ -261,10 +260,7 @@ def process_data_flat(data_df, target_column_list):
                             feature_list.append(feat)
                     else:
                         feature_list.append(feat)
-
-                # 统计出现次数
                 counter = Counter(feature_list)
-                # 将计数结果存入列表，每个元素一行记录
                 for feature, count in counter.items():
                     output_rows.append({
                         'target_column': target,
@@ -273,14 +269,11 @@ def process_data_flat(data_df, target_column_list):
                         'feature': feature,
                         'count': count
                     })
-
-        # 转换为 DataFrame，并按 target_column, percentage 和 count 降序排列（方便分析）
         result_df = pd.DataFrame(output_rows)
         result_df = result_df.sort_values(
             by=['target_column', 'percentage', 'count'],
             ascending=[True, True, False]
         ).reset_index(drop=True)
-
         return result_df
 
 
@@ -302,13 +295,10 @@ def auto_reduce_precision(df, verbose=True):
 
     for col in df_new.columns:
         col_dtype = df_new[col].dtype
-
-        # 只检查数值型数据
         if pd.api.types.is_numeric_dtype(col_dtype):
             if pd.api.types.is_float_dtype(col_dtype):
                 col_min = df_new[col].min()
                 col_max = df_new[col].max()
-                # 判断是否可以用 float16 表示，float16的表示范围大约 [-65504, 65504]
                 if col_min > np.finfo(np.float16).min and col_max < np.finfo(np.float16).max:
                     df_new[col] = df_new[col].astype(np.float16)
                 else:
@@ -322,18 +312,17 @@ def auto_reduce_precision(df, verbose=True):
         print(f"内存占用从 {start_mem:.2f} MB 降低到 {end_mem:.2f} MB，减少 {reduction:.1f}%")
     return df_new
 
+
 def debug():
     inst_id_list = ['SOL']
     df_list = []
     df_list.append(pd.read_csv(f'images/combined_bin_analysis_SOL_false_short.csv').drop_duplicates(subset=["feature"]))
     for inst_id in inst_id_list:
-
         file_path = f'images/combined_bin_analysis_{inst_id}_false.csv'
         temp_df = pd.read_csv(file_path)
         temp_df['file'] = inst_id
         temp_df = temp_df.drop_duplicates(subset=["feature"])
         temp_df['spearman_score'] = temp_df['spearman_avg_net_profit_rate'] * temp_df['spearman_pos_ratio']
-
         df_list.append(temp_df)
     result_df = merge_and_compute(df_list)
     all_result_df = pd.concat(df_list, ignore_index=True)
@@ -344,106 +333,136 @@ def debug():
     print(result_df)
 
 
-def main(n_bins=50):
-    debug()
-    # ===== 数据加载与预处理 =====
+def main(n_bins=50, batch_size=10):
+    """
+    主流程：加载数据 -> 处理原始特征分箱 -> 计算派生特征分箱（分批计算以降低内存占用）-> 合并结果保存
+    参数:
+        n_bins: 分箱个数
+        batch_size: 每一批次的特征数量（原始或者派生特征均适用）
+    """
+    print("【主流程】：开始处理数据")
     inst_id_list = ['SOL']
     images_dir = "images"
     if not os.path.exists(images_dir):
         os.makedirs(images_dir)
 
     for inst_id in inst_id_list:
-        print(f"\n【处理数据】：{inst_id}")
-        data_file = f'temp/final_good_{inst_id}_false_short.csv'
+        print(f"\n【处理数据】：开始处理 {inst_id}")
+        data_file = f'temp/final_good_{inst_id}_false.csv'
         data_df = pd.read_csv(data_file)
         data_df = auto_reduce_precision(data_df)
-        # data_df = data_df[(data_df['net_profit_rate'] > 100)]
 
-        # 获取所有数值型特征，排除 'timestamp'、'net_profit_rate_new' 和包含 'new' 的特征
+        # 获取所有数值型特征，排除 'timestamp', 'net_profit_rate_new' 以及包含 'new' 的特征
         all_numeric_columns = data_df.select_dtypes(include=np.number).columns.tolist()
         orig_feature_cols = [col for col in all_numeric_columns
                              if col not in ['timestamp', 'net_profit_rate_new'] and 'new' not in col]
 
-        # -------------------------------
-        # Step 2：边计算边分批合并派生特征（交叉特征）
-        # 将原始特征数据转换为 numpy 数组，确保为 float32
+        # 将原始特征转换为 numpy 数组（float32）
         orig_values = data_df[orig_feature_cols].to_numpy(dtype=np.float32)
+        target_values = data_df['net_profit_rate_new'].values
         num_features = orig_values.shape[1]
 
-        # 记录所有新加入的特征名称，便于后续使用
-        derived_feature_names = []
-
-        # for i in range(num_features):
-        #     a = orig_values[:, i]
-        #     col1 = orig_feature_cols[i]
-        #     for j in range(i + 1, num_features):
-        #         b = orig_values[:, j]
-        #         col2 = orig_feature_cols[j]
-        #
-        #         # 交叉特征1：和
-        #         col_name = f'{col1}-{col2}-sum'
-        #         data_df[col_name] = a + b
-        #         derived_feature_names.append(col_name)
-        #
-        #         # 交叉特征3：差值
-        #         col_name = f'{col1}-{col2}-diff'
-        #         data_df[col_name] = a - b
-        #         derived_feature_names.append(col_name)
-        #
-        #         # 交叉特征2：乘积（考虑负数情况）
-        #         col_name = f'{col1}-{col2}-prod'
-        #         data_df[col_name] = np.where(
-        #             (a < 0) & (b < 0),  # 如果两者均为负，
-        #             - (np.abs(a) * np.abs(b)),  # 则取负乘积（保持“差”的含义）
-        #             a * b  # 否则直接相乘
-        #         )
-        #         derived_feature_names.append(col_name)
-        #
-        #         # 交叉特征4：比值（考虑负数情况）
-        #         col_name = f'{col1}-{col2}-ratio'
-        #         with np.errstate(divide='ignore', invalid='ignore'):
-        #             ratio = np.where(b == 0, np.nan, a / b)
-        #             # 如果两者均为负，则结果也手动调整为负（就算数学上负除负为正）
-        #             ratio = np.where((a < 0) & (b < 0), -np.abs(ratio), ratio)
-        #         data_df[col_name] = ratio
-        #         derived_feature_names.append(col_name)
-
-        all_feature_cols = orig_feature_cols + derived_feature_names
-        print(f"{inst_id}【提示】：已添加派生特征，总特征数为 {len(all_feature_cols)}")
-
-        # ===== 准备多进程处理的数据 =====
-        # 提取目标数组（net_profit_rate_new）
-        target_values = data_df['net_profit_rate_new'].values
-
-        # 预先提取所有特征的 numpy 数组，形成字典，避免每个子进程传送整个 DataFrame
-        feature_data = {feature: data_df[feature].values for feature in all_feature_cols}
-
-        # 将所有特征按每 10 个特征分为一批
-        batches = []
-        for i in range(0, len(all_feature_cols), 10):
-            batch_features = all_feature_cols[i:i + 10]
-            batch_feature_data = {feature: feature_data[feature] for feature in batch_features}
-            batches.append((batch_features, batch_feature_data))
-
         all_bin_analyses = []
-        # 多进程并发（最多25个进程）
+
+        # --- 原始特征逐批处理 ---
+        print("【提示】：开始处理原始特征批次...")
+        orig_feature_data = {feature: data_df[feature].values for feature in orig_feature_cols}
+        # 利用多进程（批次数量通常较少，可以并行加速）
         with concurrent.futures.ProcessPoolExecutor(max_workers=10) as executor:
-            futures = [
-                executor.submit(process_feature_batch, batch_features, batch_feature_data, target_values, n_bins)
-                for (batch_features, batch_feature_data) in batches
-            ]
-            for future in concurrent.futures.as_completed(futures):
+            orig_futures = []
+            orig_batch_ids = []
+            for i in range(0, len(orig_feature_cols), batch_size):
+                batch_features = orig_feature_cols[i:i + batch_size]
+                batch_feature_data = {feature: orig_feature_data[feature] for feature in batch_features}
+                batch_id = i // batch_size + 1
+                print(f"【原始批次】：提交批次 {batch_id}，处理特征数：{len(batch_features)}")
+                orig_futures.append(
+                    executor.submit(process_feature_batch, batch_features, batch_feature_data, target_values, n_bins))
+                orig_batch_ids.append(batch_id)
+            batch_no = 0
+            for future in concurrent.futures.as_completed(orig_futures):
+                batch_no += 1
                 batch_results = future.result()
                 if batch_results:
                     all_bin_analyses.extend(batch_results)
+                print(f"【原始批次】：已完成 {batch_no} / {len(orig_futures)} 批次")
+        print("【原始批次】：所有原始特征批次完成")
 
-        # ===== 合并结果并保存 =====
+        # --- 派生（交叉）特征逐批处理 ---
+        print("【提示】：开始处理派生特征批次...")
+        derived_batch_features = []
+        derived_batch_data = {}
+        derived_total_count = 0  # 记录累计的派生特征数
+        derived_batch_count = 0  # 记录已提交的派生批次数
+        for i in range(num_features):
+            a = orig_values[:, i]
+            col1 = orig_feature_cols[i]
+            for j in range(i + 1, num_features):
+                b = orig_values[:, j]
+                col2 = orig_feature_cols[j]
+
+                # 交叉特征1：和
+                feature_name = f'{col1}-{col2}-sum'
+                derived_batch_features.append(feature_name)
+                derived_batch_data[feature_name] = (a + b).astype(np.float32)
+
+                # 交叉特征2：差值
+                feature_name = f'{col1}-{col2}-diff'
+                derived_batch_features.append(feature_name)
+                derived_batch_data[feature_name] = (a - b).astype(np.float32)
+
+                # 交叉特征3：乘积（考虑负数情况）
+                feature_name = f'{col1}-{col2}-prod'
+                prod_val = np.where((a < 0) & (b < 0), - (np.abs(a) * np.abs(b)), a * b)
+                derived_batch_features.append(feature_name)
+                derived_batch_data[feature_name] = prod_val.astype(np.float32)
+
+                # 交叉特征4：比值（考虑负数情况）
+                feature_name = f'{col1}-{col2}-ratio'
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    ratio = np.where(b == 0, np.nan, a / b)
+                    ratio = np.where((a < 0) & (b < 0), -np.abs(ratio), ratio)
+                derived_batch_features.append(feature_name)
+                derived_batch_data[feature_name] = ratio.astype(np.float32)
+
+                derived_total_count += 4
+
+                # 当当前批次派生特征数达到或超过 batch_size 时，立即处理当前批次
+                if len(derived_batch_features) >= batch_size:
+                    derived_batch_count += 1
+                    print(f"【派生批次】：提交批次 {derived_batch_count}，当前派生特征数：{len(derived_batch_features)}")
+                    batch_result = process_feature_batch(derived_batch_features, derived_batch_data, target_values,
+                                                         n_bins)
+                    if batch_result:
+                        all_bin_analyses.extend(batch_result)
+                    print(f"【派生批次】：完成批次 {derived_batch_count}")
+                    # 清空当前批次数据
+                    derived_batch_features = []
+                    derived_batch_data = {}
+
+        # 处理剩余未满一批的派生特征
+        if derived_batch_features:
+            derived_batch_count += 1
+            print(f"【派生批次】：提交剩余批次 {derived_batch_count}，当前派生特征数：{len(derived_batch_features)}")
+            batch_result = process_feature_batch(derived_batch_features, derived_batch_data, target_values, n_bins)
+            if batch_result:
+                all_bin_analyses.extend(batch_result)
+            print(f"【派生批次】：完成剩余批次 {derived_batch_count}")
+            derived_batch_features = []
+            derived_batch_data = {}
+
+        print(f"{inst_id}【提示】：原始批次与派生批次全部处理完成，共计派生特征数: {derived_total_count}")
+
+        # 合并所有结果并保存
         if all_bin_analyses:
             combined_bin_analysis_df = pd.concat(all_bin_analyses, ignore_index=True)
-            combined_csv_file = os.path.join(images_dir, f"combined_bin_analysis_{inst_id}_false_short.csv")
+            combined_csv_file = os.path.join(images_dir, f"combined_bin_analysis_{inst_id}_false.csv")
             combined_bin_analysis_df.to_csv(combined_csv_file, index=False)
             print(f"【提示】：合并后的 bin_analysis 已保存为 CSV 文件：{combined_csv_file}")
+        else:
+            print("【提示】：未生成任何 bin_analysis 结果。")
+    print("【主流程】：所有数据处理完成")
 
 
 if __name__ == '__main__':
-    main(n_bins=100)
+    main(n_bins=100, batch_size=100)
