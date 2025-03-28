@@ -136,6 +136,8 @@ def process_single_feature(feature, feat_values, target_values, n_bins=50):
             mask = (bin_indices == bin_idx)
             count = int(np.sum(mask))
             avg_net_profit = np.mean(target_values[mask])
+            min_net_profit = np.min(target_values[mask])
+            max_net_profit = np.max(target_values[mask])
             pos_ratio = np.mean(target_values[mask] > 0)
             bin_seq = int(bin_idx) + 1
             bin_ratio = count / total_count
@@ -147,6 +149,8 @@ def process_single_feature(feature, feat_values, target_values, n_bins=50):
                 "feature": feature,
                 "bin_seq": bin_seq,
                 "bin_interval": interval_str,
+                'min_net_profit':min_net_profit,
+                'max_net_profit':max_net_profit,
                 "avg_net_profit_rate_new": avg_net_profit,
                 "pos_ratio": pos_ratio,
                 "count": count,
@@ -280,10 +284,48 @@ def process_data_flat(data_df, target_column_list):
         return result_df
 
 
+def auto_reduce_precision(df, verbose=True):
+    """
+    自动降低DataFrame中数值列的精度：
+      - 对于浮点列，若数据范围在float16可表示范围内，则转换为float16，否则转换为float32。
+      - 对于整数列，尝试使用downcast降低其位宽。
+
+    参数:
+      df: 需要降低精度的DataFrame
+      verbose: 是否打印内存占用变化信息，默认为True
+
+    返回:
+      转换精度后的DataFrame副本
+    """
+    df_new = df.copy()
+    start_mem = df_new.memory_usage(deep=True).sum() / 1024 ** 2
+
+    for col in df_new.columns:
+        col_dtype = df_new[col].dtype
+
+        # 只检查数值型数据
+        if pd.api.types.is_numeric_dtype(col_dtype):
+            if pd.api.types.is_float_dtype(col_dtype):
+                col_min = df_new[col].min()
+                col_max = df_new[col].max()
+                # 判断是否可以用 float16 表示，float16的表示范围大约 [-65504, 65504]
+                if col_min > np.finfo(np.float16).min and col_max < np.finfo(np.float16).max:
+                    df_new[col] = df_new[col].astype(np.float16)
+                else:
+                    df_new[col] = df_new[col].astype(np.float32)
+            elif pd.api.types.is_integer_dtype(col_dtype):
+                df_new[col] = pd.to_numeric(df_new[col], downcast='integer')
+
+    end_mem = df_new.memory_usage(deep=True).sum() / 1024 ** 2
+    if verbose:
+        reduction = 100 * (start_mem - end_mem) / start_mem
+        print(f"内存占用从 {start_mem:.2f} MB 降低到 {end_mem:.2f} MB，减少 {reduction:.1f}%")
+    return df_new
+
 def debug():
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = ['SOL']
     df_list = []
-    # df_list.append(pd.read_csv(f'images/combined_bin_analysis_SOL_false.csv').drop_duplicates(subset=["feature"]))
+    df_list.append(pd.read_csv(f'images/combined_bin_analysis_SOL_false_short.csv').drop_duplicates(subset=["feature"]))
     for inst_id in inst_id_list:
 
         file_path = f'images/combined_bin_analysis_{inst_id}_false.csv'
@@ -303,17 +345,18 @@ def debug():
 
 
 def main(n_bins=50):
-    # debug()
+    debug()
     # ===== 数据加载与预处理 =====
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON']
+    inst_id_list = ['SOL']
     images_dir = "images"
     if not os.path.exists(images_dir):
         os.makedirs(images_dir)
 
     for inst_id in inst_id_list:
         print(f"\n【处理数据】：{inst_id}")
-        data_file = f'temp/final_good_{inst_id}_false.csv'
+        data_file = f'temp/final_good_{inst_id}_false_short.csv'
         data_df = pd.read_csv(data_file)
+        data_df = auto_reduce_precision(data_df)
         # data_df = data_df[(data_df['net_profit_rate'] > 100)]
 
         # 获取所有数值型特征，排除 'timestamp'、'net_profit_rate_new' 和包含 'new' 的特征
@@ -365,7 +408,6 @@ def main(n_bins=50):
         #         data_df[col_name] = ratio
         #         derived_feature_names.append(col_name)
 
-        # 更新完整的特征列表：原始特征 + 派生特征
         all_feature_cols = orig_feature_cols + derived_feature_names
         print(f"{inst_id}【提示】：已添加派生特征，总特征数为 {len(all_feature_cols)}")
 
@@ -385,7 +427,7 @@ def main(n_bins=50):
 
         all_bin_analyses = []
         # 多进程并发（最多25个进程）
-        with concurrent.futures.ProcessPoolExecutor(max_workers=25) as executor:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=10) as executor:
             futures = [
                 executor.submit(process_feature_batch, batch_features, batch_feature_data, target_values, n_bins)
                 for (batch_features, batch_feature_data) in batches
@@ -398,10 +440,10 @@ def main(n_bins=50):
         # ===== 合并结果并保存 =====
         if all_bin_analyses:
             combined_bin_analysis_df = pd.concat(all_bin_analyses, ignore_index=True)
-            combined_csv_file = os.path.join(images_dir, f"combined_bin_analysis_{inst_id}_false.csv")
+            combined_csv_file = os.path.join(images_dir, f"combined_bin_analysis_{inst_id}_false_short.csv")
             combined_bin_analysis_df.to_csv(combined_csv_file, index=False)
             print(f"【提示】：合并后的 bin_analysis 已保存为 CSV 文件：{combined_csv_file}")
 
 
 if __name__ == '__main__':
-    main(n_bins=50)
+    main(n_bins=100)

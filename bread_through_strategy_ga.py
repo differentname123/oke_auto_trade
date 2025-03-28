@@ -329,7 +329,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
 
     profits_arr = kai_data_df["true_profit"].values
     max_loss, max_loss_start_idx, max_loss_end_idx, loss_trade_count = calculate_max_sequence_numba(profits_arr)
-    if max_loss < -10 or net_profit_rate < 100 or trade_count < 100:
+    if net_profit_rate < 25:
         return None, None
 
     if max_loss_start_idx < len(kai_data_df) and max_loss_end_idx < len(kai_data_df):
@@ -362,8 +362,8 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     hold_time_mean = kai_data_df["hold_time"].mean() if trade_count else 0
     max_hold_time = kai_data_df["hold_time"].max() if trade_count else 0
 
-    if hold_time_mean > 2000 or true_profit_mean < 10:
-        return None, None
+    # if hold_time_mean > 2000 or true_profit_mean < 10:
+    #     return None, None
 
     # Monthly statistics
     monthly_groups = kai_data_df["timestamp"].dt.to_period("M")
@@ -420,7 +420,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     same_count_rate = safe_round(100 * len(common_index) / min(len(kai_data_df), len(pin_data_df)) if trade_count else 0, 4)
 
     statistic_dict = {
-        "kai_side": "long" if is_long else "short",
+        # "kai_side": "long" if is_long else "short",
         "kai_column": kai_column,
         "pin_column": pin_column,
         "kai_count": trade_count,
@@ -446,13 +446,13 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         "max_consecutive_loss": safe_round(max_loss, 4),
         "max_loss_trade_count": loss_trade_count,
         "max_loss_hold_time": max_loss_hold_time,
-        "max_loss_start_time": max_loss_start_time,
-        "max_loss_end_time": max_loss_end_time,
+        # "max_loss_start_time": max_loss_start_time,
+        # "max_loss_end_time": max_loss_end_time,
         "max_consecutive_profit": safe_round(max_profit, 4) if max_profit is not None else None,
         "max_profit_trade_count": profit_trade_count if max_profit is not None else None,
         "max_profit_hold_time": max_profit_hold_time,
-        "max_profit_start_time": max_profit_start_time,
-        "max_profit_end_time": max_profit_end_time,
+        # "max_profit_start_time": max_profit_start_time,
+        # "max_profit_end_time": max_profit_end_time,
         "same_count": len(common_index),
         "same_count_rate": same_count_rate,
         "true_same_count_rate": modification_rate,
@@ -700,12 +700,22 @@ def get_fitness(stat, key, invert=False):
     """
     if stat is None:
         return -10000
+    max_loss = stat.get("max_consecutive_loss", -10000)
+    net_profit_rate = stat.get("net_profit_rate", -10000)
+    trade_count = stat.get("kai_count", 0)
+    if max_loss < -10 or net_profit_rate < 100 or trade_count < 10:
+        return -10000
+    hold_time_mean = stat.get("hold_time_mean", 0)
+    true_profit_mean = stat.get("avg_profit_rate", 0)
+    if hold_time_mean > 2000 or true_profit_mean < 10:
+        return -10000
+
     value = stat.get(key, -10000)
     return -value if invert else value
 
 # 声明两组 key:
-normal_keys = ["net_profit_rate", "kai_count",'min_profit','avg_profit_rate', 'monthly_net_profit_min','weekly_net_profit_min']
-inverted_keys = ["hold_time_mean", "hold_time_std", "loss_rate", "loss_time_rate",'fu_profit_mean', 'fu_profit_sum','max_profit', 'true_profit_std', 'monthly_trade_std', 'monthly_net_profit_std', 'monthly_avg_profit_std',
+normal_keys = ["net_profit_rate", "kai_count",'min_profit','avg_profit_rate','fu_profit_mean', 'fu_profit_sum','monthly_net_profit_min','weekly_net_profit_min']
+inverted_keys = ["hold_time_mean", "hold_time_std", "loss_rate", "loss_time_rate",'max_profit', 'true_profit_std', 'monthly_trade_std', 'monthly_net_profit_std', 'monthly_avg_profit_std',
                  'top_loss_ratio', 'top_profit_ratio','weekly_trade_std', 'weekly_net_profit_std', 'weekly_avg_profit_std', 'weekly_loss_rate', 'weekly_net_profit_max']
 
 # 利用 functools.partial 生成各个适应度提取函数，并存储在字典中
@@ -716,7 +726,7 @@ for key in normal_keys:
 
 for key in inverted_keys:
     fitness_getters[key] = partial(get_fitness, key=key, invert=True)
-
+order_key = []
 # 如果需要以特定顺序生成一个列表，包含所有适应度提取函数
 get_fitness_list = [fitness_getters[key] for key in normal_keys + inverted_keys]
 
@@ -1003,7 +1013,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                 "overall_best_candidate": overall_best,
                 "overall_best_fitness": overall_best_fitness,
             })
-            if (gen+1) % 50 == 0:
+            if (gen+1) % 100 == 0:
                 try:
                     with open(checkpoint_file, "wb") as f:
                         pickle.dump((gen+1, islands, overall_best, overall_best_fitness, all_history, global_generated_individuals), f)
@@ -1047,10 +1057,10 @@ def ga_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
     print(f"种群规模: {population_size}，信号总数: {len(all_signals)}")
     best_candidate, best_fitness, history = genetic_algorithm_optimization(
         df_local, all_signals, all_signals,
-        population_size=population_size, generations=600,
+        population_size=population_size, generations=2400,
         crossover_rate=0.9, mutation_rate=0.2,
         key_name=f'{base_name}_{key_name}',
-        islands_count=8, migration_interval=10, migration_rate=0.05
+        islands_count=4, migration_interval=10, migration_rate=0.05
     )
     print(f"数据 {base_name} 最优信号组合: {best_candidate}，净利率: {best_fitness}")
 

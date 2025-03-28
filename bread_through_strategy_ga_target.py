@@ -667,19 +667,15 @@ def validation(market_data_file):
             for sig, (s_np, p_np) in precomputed.items():
                 total_size += sys.getsizeof(sig) + s_np.nbytes + p_np.nbytes
             print(f"precomputed_signals 占用内存总大小: {total_size / (1024 * 1024):.2f} MB")
-
-            # 6. 构造 candidate 列表，每个 candidate 为：(行号, kai_column, pin_column)
-            candidates = []
-            for idx, row in stat_df.iterrows():
-                candidates.append((idx, row["kai_column"], row["pin_column"]))
-            print(f"Total candidate signal pairs: {len(candidates)}")
-
+            print(f"Total candidate signal pairs: {len(pairs)}")
+            # 删除 stat_df，释放内存
+            del stat_df
             max_memory = 45
-            pool_processes = min(32, int(max_memory * 1024 * 1024 * 1024 / total_size) if total_size > 0 else 1)
+            pool_processes = min(30, int(max_memory * 1024 * 1024 * 1024 / total_size) if total_size > 0 else 1)
             print(f"进程数限制为 {pool_processes}，根据内存限制调整。")
             with multiprocessing.Pool(processes=pool_processes, initializer=init_worker_with_signals,
                                       initargs=(GLOBAL_SIGNALS, df)) as pool:
-                results = pool.map(process_signal_pair, pairs, chunksize=100)
+                results = pool.map(process_signal_pair, pairs, chunksize=1000)
 
             # 过滤掉返回 None 的结果
             results_filtered = [r for r in results if r[2] is not None]
@@ -944,12 +940,12 @@ def target_all(market_data_file):
 if __name__ == "__main__":
     start_time = time.time()
     data_path_list = [
-        "kline_data/origin_data_1m_110000_SOL-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_110000_BTC-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_110000_ETH-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_110000_SOL-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_110000_BTC-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_110000_ETH-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000_SOL-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_10000_BTC-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_10000_ETH-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_10000_BTC-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_10000_ETH-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_110000_TON-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_10000_TON-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_110000_DOGE-USDT-SWAP.csv",
