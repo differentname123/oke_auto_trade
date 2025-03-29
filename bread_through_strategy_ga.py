@@ -1151,8 +1151,8 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                     print(f"岛 {i} 向岛 {target_idx} 迁移 {migration_num} 个个体。")
             if island_stats_list:
                 df_stats = pd.DataFrame(island_stats_list).drop_duplicates(subset=["kai_column", "pin_column"])
-                file_name = os.path.join(checkpoint_dir, f"{key_name}_{gen}_stats.csv")
-                df_stats.to_csv(file_name, index=False)
+                file_name = os.path.join(checkpoint_dir, f"{key_name}_{gen}_stats.parquet")
+                df_stats.to_parquet(file_name, index=False, compression='snappy')
                 print(f"保存第 {gen} 代统计信息，去重后长度 {df_stats.shape[0]}")
             all_history.append({
                 "generation": gen,

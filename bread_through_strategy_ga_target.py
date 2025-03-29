@@ -680,7 +680,7 @@ def validation(market_data_file):
             print(f"进程数限制为 {pool_processes}，根据内存限制调整。")
 
             # 定义每个批次处理的 pair 数量
-            BATCH_SIZE = 10000000
+            BATCH_SIZE = 5000000
             total_pairs = len(pairs)
             total_batches = (total_pairs - 1) // BATCH_SIZE + 1
 
