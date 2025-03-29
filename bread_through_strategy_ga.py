@@ -14,6 +14,9 @@
 说明：
   1. 预计算所有候选信号（GLOBAL_SIGNALS）以提高后续回测速度，并保存至 temp 目录，方便下次加载。
   2. 记录遗传算法历史统计（stats），即使后续步骤只关注最优组合，此处信息能用于进一步分析。
+
+  7. 优化 global_generated_individuals，使用 Bloom Filter（布隆过滤器），预估最大独立个体数量为 2400 * 100000，
+     可接受的错误率为 0.01，相关的 get_unique_candidate 等函数做了相应适配。
 """
 
 import os
@@ -22,6 +25,8 @@ import time
 import pickle
 import random
 import traceback
+import math
+import hashlib
 from functools import partial
 
 import numpy as np
@@ -29,7 +34,56 @@ import pandas as pd
 from numba import njit
 import multiprocessing
 
+##############################################
+# 布隆过滤器实现，用于替代保存全局已生成个体的 set
+##############################################
+class BloomFilter:
+    def __init__(self, capacity, error_rate):
+        """
+        capacity: 预估最大元素个数
+        error_rate: 可接受的误报率
+        """
+        self.capacity = capacity
+        self.error_rate = error_rate
+        # m = - (n * ln(p)) / (ln2^2)
+        self.size = math.ceil(-capacity * math.log(error_rate) / (math.log(2)**2))
+        # k = (m/n) * ln2
+        self.hash_count = math.ceil((self.size / capacity) * math.log(2))
+        self.bit_array = bytearray((self.size + 7) // 8)
+        self.count = 0  # 用于记录实际添加元素个数
+
+    def _hashes(self, item):
+        """采用双哈希得到 k 个哈希值"""
+        item_bytes = str(item).encode("utf-8")
+        hash1 = int(hashlib.md5(item_bytes).hexdigest(), 16)
+        hash2 = int(hashlib.sha256(item_bytes).hexdigest(), 16)
+        for i in range(self.hash_count):
+            yield (hash1 + i * hash2) % self.size
+
+    def add(self, item):
+        if item in self:
+            return
+        self.count += 1
+        for pos in self._hashes(item):
+            byte_index = pos // 8
+            bit_index = pos % 8
+            self.bit_array[byte_index] |= (1 << bit_index)
+
+    def __contains__(self, item):
+        for pos in self._hashes(item):
+            byte_index = pos // 8
+            bit_index = pos % 8
+            if not (self.bit_array[byte_index] & (1 << bit_index)):
+                return False
+        return True
+
+    def __len__(self):
+        return self.count
+
+##############################################
 # 全局变量，用于存储预计算信号数据和行情数据
+##############################################
+
 GLOBAL_SIGNALS = {}
 df = None  # 回测数据，在子进程中通过初始化传入
 
@@ -481,8 +535,6 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     kai_data_df = kai_data_df[["hold_time", "true_profit"]]
     return kai_data_df, statistic_dict
 
-
-
 def generate_numbers(start, end, number, even=True):
     """
     生成区间内均匀或非均匀分布的一组整数。
@@ -807,7 +859,7 @@ def filter_existing_individuals(candidate_list, global_generated_individuals):
 
 def get_unique_candidate(candidate_long_signals, candidate_short_signals, global_generated_individuals, candidate_list, target_size):
     """
-    补充 candidate_list 至 target_size，生成的新候选个体不能重复。
+    补充 candidate_list 至 target_size，生成的新候选个体不能重复（全局已出现或当前列表内）。
     """
     while len(candidate_list) < target_size:
         candidate = (random.choice(candidate_long_signals), random.choice(candidate_short_signals))
@@ -840,7 +892,8 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     # 重置候选信号为预计算结果的 key
     candidate_long_signals = list(GLOBAL_SIGNALS.keys())
     candidate_short_signals = list(GLOBAL_SIGNALS.keys())
-    global_generated_individuals = set()
+    # 使用布隆过滤器记录已生成的个体，预估最大数为 2400 * 100000，错误率 0.01
+    global_generated_individuals = None
 
     checkpoint_file = os.path.join(checkpoint_dir, f"{key_name}_ga_checkpoint.pkl")
     if os.path.exists(checkpoint_file):
@@ -848,10 +901,17 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
             with open(checkpoint_file, "rb") as f:
                 checkpoint_data = pickle.load(f)
                 if len(checkpoint_data) == 6:
-                    start_gen, islands, overall_best, overall_best_fitness, all_history, global_generated_individuals = checkpoint_data
+                    start_gen, islands, overall_best, overall_best_fitness, all_history, loaded_gi = checkpoint_data
+                    # 如果之前保存的是 set，则转换成 BloomFilter
+                    if isinstance(loaded_gi, set):
+                        global_generated_individuals = BloomFilter(2400 * 100000, 0.01)
+                        for cand in loaded_gi:
+                            global_generated_individuals.add(cand)
+                    else:
+                        global_generated_individuals = loaded_gi
                 else:
                     start_gen, islands, overall_best, overall_best_fitness, all_history = checkpoint_data
-                    global_generated_individuals = set()
+                    global_generated_individuals = BloomFilter(2400 * 100000, 0.01)
             print(f"加载断点，恢复至第 {start_gen} 代。全局最优: {overall_best}，净利率: {overall_best_fitness}")
         except Exception as e:
             print(f"加载断点失败：{e}，从头开始。")
@@ -860,13 +920,14 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
             overall_best = None
             overall_best_fitness = -1e9
             all_history = []
-            global_generated_individuals = set()
+            global_generated_individuals = BloomFilter(2400 * 100000, 0.01)
     else:
         start_gen = 0
         islands = []
         overall_best = None
         overall_best_fitness = -1e9
         all_history = []
+        global_generated_individuals = BloomFilter(2400 * 100000, 0.01)
 
     island_pop_size = population_size // islands_count
     if not islands:
@@ -906,7 +967,9 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                 print(f"岛 {idx} 进化开始，overall_best 在种群中: {overall_best in pop}，种群大小: {len(pop)}")
                 pop_batches = [pop[i:i+batch_size] for i in range(0, len(pop), batch_size)]
                 results_batches = pool.map(partial_eval, pop_batches)
-                global_generated_individuals.update(pop)
+                # 用布隆过滤器逐个添加
+                for candidate in pop:
+                    global_generated_individuals.add(candidate)
                 fitness_results = [item for batch in results_batches for item in batch]
                 if not fitness_results:
                     continue
@@ -959,10 +1022,8 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                     unique_population = unique_population[:island_pop_size]
                 island["population"] = unique_population
                 print(f"岛 {idx} 第 {gen} 代最优: {island['best_candidate']}，适应度: {island['best_fitness']}")
-            # 获取sorted_fitness的均值
-            avg_sorted_fitness = np.mean([np.mean(island["sorted_fitness"]) for island in islands if "sorted_fitness" in island])
-            restart_similarity_threshold = min(10, avg_sorted_fitness * 0.1)
-            print(f"平均适应度排序均值: {avg_sorted_fitness:.2f}，重启相似度阈值: {restart_similarity_threshold:.2f}")
+            restart_similarity_threshold = max(5, abs(overall_best_fitness * 0.1))
+            print(f"重启相似度阈值: {restart_similarity_threshold:.2f}")
             for i in range(len(islands)):
                 for j in range(i+1, len(islands)):
                     if "sorted_fitness" in islands[i] and "sorted_fitness" in islands[j]:
