@@ -340,6 +340,8 @@ def main(n_bins=50, batch_size=10):
         n_bins: 分箱个数
         batch_size: 每一批次的特征数量（原始或者派生特征均适用）
     """
+    debug()
+
     print("【主流程】：开始处理数据")
     inst_id_list = ['SOL']
     images_dir = "images"
@@ -350,6 +352,7 @@ def main(n_bins=50, batch_size=10):
         print(f"\n【处理数据】：开始处理 {inst_id}")
         data_file = f'temp/final_good_{inst_id}_false.csv'
         data_df = pd.read_csv(data_file)
+        data_df = data_df[(data_df['kai_count_new'] > 0)]
         data_df = auto_reduce_precision(data_df)
 
         # 获取所有数值型特征，排除 'timestamp', 'net_profit_rate_new' 以及包含 'new' 的特征
@@ -368,7 +371,7 @@ def main(n_bins=50, batch_size=10):
         print("【提示】：开始处理原始特征批次...")
         orig_feature_data = {feature: data_df[feature].values for feature in orig_feature_cols}
         # 利用多进程（批次数量通常较少，可以并行加速）
-        with concurrent.futures.ProcessPoolExecutor(max_workers=10) as executor:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
             orig_futures = []
             orig_batch_ids = []
             for i in range(0, len(orig_feature_cols), batch_size):
@@ -388,70 +391,70 @@ def main(n_bins=50, batch_size=10):
                 print(f"【原始批次】：已完成 {batch_no} / {len(orig_futures)} 批次")
         print("【原始批次】：所有原始特征批次完成")
 
-        # --- 派生（交叉）特征逐批处理 ---
-        print("【提示】：开始处理派生特征批次...")
-        derived_batch_features = []
-        derived_batch_data = {}
-        derived_total_count = 0  # 记录累计的派生特征数
-        derived_batch_count = 0  # 记录已提交的派生批次数
-        for i in range(num_features):
-            a = orig_values[:, i]
-            col1 = orig_feature_cols[i]
-            for j in range(i + 1, num_features):
-                b = orig_values[:, j]
-                col2 = orig_feature_cols[j]
-
-                # 交叉特征1：和
-                feature_name = f'{col1}-{col2}-sum'
-                derived_batch_features.append(feature_name)
-                derived_batch_data[feature_name] = (a + b).astype(np.float32)
-
-                # 交叉特征2：差值
-                feature_name = f'{col1}-{col2}-diff'
-                derived_batch_features.append(feature_name)
-                derived_batch_data[feature_name] = (a - b).astype(np.float32)
-
-                # 交叉特征3：乘积（考虑负数情况）
-                feature_name = f'{col1}-{col2}-prod'
-                prod_val = np.where((a < 0) & (b < 0), - (np.abs(a) * np.abs(b)), a * b)
-                derived_batch_features.append(feature_name)
-                derived_batch_data[feature_name] = prod_val.astype(np.float32)
-
-                # 交叉特征4：比值（考虑负数情况）
-                feature_name = f'{col1}-{col2}-ratio'
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    ratio = np.where(b == 0, np.nan, a / b)
-                    ratio = np.where((a < 0) & (b < 0), -np.abs(ratio), ratio)
-                derived_batch_features.append(feature_name)
-                derived_batch_data[feature_name] = ratio.astype(np.float32)
-
-                derived_total_count += 4
-
-                # 当当前批次派生特征数达到或超过 batch_size 时，立即处理当前批次
-                if len(derived_batch_features) >= batch_size:
-                    derived_batch_count += 1
-                    print(f"【派生批次】：提交批次 {derived_batch_count}，当前派生特征数：{len(derived_batch_features)}")
-                    batch_result = process_feature_batch(derived_batch_features, derived_batch_data, target_values,
-                                                         n_bins)
-                    if batch_result:
-                        all_bin_analyses.extend(batch_result)
-                    print(f"【派生批次】：完成批次 {derived_batch_count}")
-                    # 清空当前批次数据
-                    derived_batch_features = []
-                    derived_batch_data = {}
-
-        # 处理剩余未满一批的派生特征
-        if derived_batch_features:
-            derived_batch_count += 1
-            print(f"【派生批次】：提交剩余批次 {derived_batch_count}，当前派生特征数：{len(derived_batch_features)}")
-            batch_result = process_feature_batch(derived_batch_features, derived_batch_data, target_values, n_bins)
-            if batch_result:
-                all_bin_analyses.extend(batch_result)
-            print(f"【派生批次】：完成剩余批次 {derived_batch_count}")
-            derived_batch_features = []
-            derived_batch_data = {}
-
-        print(f"{inst_id}【提示】：原始批次与派生批次全部处理完成，共计派生特征数: {derived_total_count}")
+        # # --- 派生（交叉）特征逐批处理 ---
+        # print("【提示】：开始处理派生特征批次...")
+        # derived_batch_features = []
+        # derived_batch_data = {}
+        # derived_total_count = 0  # 记录累计的派生特征数
+        # derived_batch_count = 0  # 记录已提交的派生批次数
+        # for i in range(num_features):
+        #     a = orig_values[:, i]
+        #     col1 = orig_feature_cols[i]
+        #     for j in range(i + 1, num_features):
+        #         b = orig_values[:, j]
+        #         col2 = orig_feature_cols[j]
+        #
+        #         # 交叉特征1：和
+        #         feature_name = f'{col1}-{col2}-sum'
+        #         derived_batch_features.append(feature_name)
+        #         derived_batch_data[feature_name] = (a + b).astype(np.float32)
+        #
+        #         # 交叉特征2：差值
+        #         feature_name = f'{col1}-{col2}-diff'
+        #         derived_batch_features.append(feature_name)
+        #         derived_batch_data[feature_name] = (a - b).astype(np.float32)
+        #
+        #         # 交叉特征3：乘积（考虑负数情况）
+        #         feature_name = f'{col1}-{col2}-prod'
+        #         prod_val = np.where((a < 0) & (b < 0), - (np.abs(a) * np.abs(b)), a * b)
+        #         derived_batch_features.append(feature_name)
+        #         derived_batch_data[feature_name] = prod_val.astype(np.float32)
+        #
+        #         # 交叉特征4：比值（考虑负数情况）
+        #         feature_name = f'{col1}-{col2}-ratio'
+        #         with np.errstate(divide='ignore', invalid='ignore'):
+        #             ratio = np.where(b == 0, np.nan, a / b)
+        #             ratio = np.where((a < 0) & (b < 0), -np.abs(ratio), ratio)
+        #         derived_batch_features.append(feature_name)
+        #         derived_batch_data[feature_name] = ratio.astype(np.float32)
+        #
+        #         derived_total_count += 4
+        #
+        #         # 当当前批次派生特征数达到或超过 batch_size 时，立即处理当前批次
+        #         if len(derived_batch_features) >= batch_size:
+        #             derived_batch_count += 1
+        #             print(f"【派生批次】：提交批次 {derived_batch_count}，当前派生特征数：{len(derived_batch_features)}")
+        #             batch_result = process_feature_batch(derived_batch_features, derived_batch_data, target_values,
+        #                                                  n_bins)
+        #             if batch_result:
+        #                 all_bin_analyses.extend(batch_result)
+        #             print(f"【派生批次】：完成批次 {derived_batch_count}")
+        #             # 清空当前批次数据
+        #             derived_batch_features = []
+        #             derived_batch_data = {}
+        #
+        # # 处理剩余未满一批的派生特征
+        # if derived_batch_features:
+        #     derived_batch_count += 1
+        #     print(f"【派生批次】：提交剩余批次 {derived_batch_count}，当前派生特征数：{len(derived_batch_features)}")
+        #     batch_result = process_feature_batch(derived_batch_features, derived_batch_data, target_values, n_bins)
+        #     if batch_result:
+        #         all_bin_analyses.extend(batch_result)
+        #     print(f"【派生批次】：完成剩余批次 {derived_batch_count}")
+        #     derived_batch_features = []
+        #     derived_batch_data = {}
+        #
+        # print(f"{inst_id}【提示】：原始批次与派生批次全部处理完成，共计派生特征数: {derived_total_count}")
 
         # 合并所有结果并保存
         if all_bin_analyses:
@@ -465,4 +468,4 @@ def main(n_bins=50, batch_size=10):
 
 
 if __name__ == '__main__':
-    main(n_bins=100, batch_size=100)
+    main(n_bins=1000, batch_size=100)

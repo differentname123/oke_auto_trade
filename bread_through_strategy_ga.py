@@ -34,6 +34,7 @@ import pandas as pd
 from numba import njit
 import multiprocessing
 
+
 ##############################################
 # 布隆过滤器实现，用于替代保存全局已生成个体的 set
 ##############################################
@@ -46,7 +47,7 @@ class BloomFilter:
         self.capacity = capacity
         self.error_rate = error_rate
         # m = - (n * ln(p)) / (ln2^2)
-        self.size = math.ceil(-capacity * math.log(error_rate) / (math.log(2)**2))
+        self.size = math.ceil(-capacity * math.log(error_rate) / (math.log(2) ** 2))
         # k = (m/n) * ln2
         self.hash_count = math.ceil((self.size / capacity) * math.log(2))
         self.bit_array = bytearray((self.size + 7) // 8)
@@ -80,12 +81,14 @@ class BloomFilter:
     def __len__(self):
         return self.count
 
+
 ##############################################
 # 全局变量，用于存储预计算信号数据和行情数据
 ##############################################
 
 GLOBAL_SIGNALS = {}
 df = None  # 回测数据，在子进程中通过初始化传入
+
 
 ##############################################
 # 辅助函数
@@ -95,9 +98,11 @@ def series_to_numpy(series):
     """将 Pandas Series 转为 NumPy 数组。"""
     return series.to_numpy(copy=False) if hasattr(series, "to_numpy") else np.asarray(series)
 
+
 def safe_round(value, ndigits=4):
     """对数值执行四舍五入转换。"""
     return round(value, ndigits)
+
 
 ##############################################
 # 信号生成及回测函数
@@ -240,6 +245,7 @@ def compute_signal(df, col_name):
     else:
         raise ValueError(f"未知信号类型: {signal_type}")
 
+
 @njit
 def calculate_max_sequence_numba(series):
     """
@@ -268,6 +274,7 @@ def calculate_max_sequence_numba(series):
             cur_sum = 0
             trade_count = 0
     return min_sum, min_start, min_end, max_trade_count
+
 
 @njit
 def calculate_max_profit_numba(series):
@@ -298,6 +305,7 @@ def calculate_max_profit_numba(series):
             trade_count = 0
     return max_sum, max_start, max_end, max_trade_count
 
+
 def op_signal(df, sig):
     """
     计算单个信号，并筛选出交易次数大于 100 的稀疏信号。
@@ -311,6 +319,7 @@ def op_signal(df, sig):
     if indices.size < 100:
         return None
     return (indices.astype(np.int32), p_np[indices])
+
 
 def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is_reverse=False):
     """
@@ -367,9 +376,11 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     modification_rate = (100 * mapped_prices.notna().sum() / trade_count) if trade_count else 0
 
     if is_long:
-        profit_series = ((kai_data_df["pin_price"] - kai_data_df["kai_price"]) / kai_data_df["kai_price"] * 100).round(4)
+        profit_series = ((kai_data_df["pin_price"] - kai_data_df["kai_price"]) / kai_data_df["kai_price"] * 100).round(
+            4)
     else:
-        profit_series = ((kai_data_df["kai_price"] - kai_data_df["pin_price"]) / kai_data_df["kai_price"] * 100).round(4)
+        profit_series = ((kai_data_df["kai_price"] - kai_data_df["pin_price"]) / kai_data_df["kai_price"] * 100).round(
+            4)
     kai_data_df["profit"] = profit_series
     kai_data_df["true_profit"] = profit_series - 0.07  # 扣除交易成本
     profit_sum = profit_series.sum()
@@ -394,7 +405,8 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         max_loss_start_time = max_loss_end_time = max_loss_hold_time = None
 
     if max_loss_start_idx < len(kai_data_df) and max_loss_end_idx < len(kai_data_df):
-        max_profit, max_profit_start_idx, max_profit_end_idx, profit_trade_count = calculate_max_profit_numba(profits_arr)
+        max_profit, max_profit_start_idx, max_profit_end_idx, profit_trade_count = calculate_max_profit_numba(
+            profits_arr)
         max_profit_start_time = kai_data_df.iloc[max_profit_start_idx]["timestamp"]
         max_profit_end_time = kai_data_df.iloc[max_profit_end_idx]["timestamp"]
         max_profit_hold_time = kai_data_df.index[max_profit_end_idx] - kai_data_df.index[max_profit_start_idx]
@@ -440,7 +452,8 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     weekly_agg = kai_data_df.groupby(weekly_groups)["true_profit"].agg(["sum", "mean", "count"])
     weekly_trade_std = weekly_agg["count"].std() if "count" in weekly_agg else 0
     active_weeks = weekly_agg.shape[0]
-    total_weeks = len(pd.period_range(start=kai_data_df["timestamp"].min(), end=kai_data_df["timestamp"].max(), freq='W'))
+    total_weeks = len(
+        pd.period_range(start=kai_data_df["timestamp"].min(), end=kai_data_df["timestamp"].max(), freq='W'))
     active_week_ratio = active_weeks / total_weeks if total_weeks else 0
     weekly_net_profit_std = weekly_agg["sum"].std() if "sum" in weekly_agg else 0
     weekly_avg_profit_std = weekly_agg["mean"].std() if "mean" in weekly_agg else 0
@@ -471,7 +484,8 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         top_loss_ratio = 0
 
     common_index = kai_data_df.index.intersection(pin_data_df.index)
-    same_count_rate = safe_round(100 * len(common_index) / min(len(kai_data_df), len(pin_data_df)) if trade_count else 0, 4)
+    same_count_rate = safe_round(
+        100 * len(common_index) / min(len(kai_data_df), len(pin_data_df)) if trade_count else 0, 4)
 
     statistic_dict = {
         # "kai_side": "long" if is_long else "short",
@@ -535,6 +549,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     kai_data_df = kai_data_df[["hold_time", "true_profit"]]
     return kai_data_df, statistic_dict
 
+
 def generate_numbers(start, end, number, even=True):
     """
     生成区间内均匀或非均匀分布的一组整数。
@@ -545,7 +560,7 @@ def generate_numbers(start, end, number, even=True):
         step = (end - start) / (number - 1)
         result = [int(round(start + i * step)) for i in range(number)]
     else:
-        result = [int(round(start + (end - start) * ((i/(number-1))**2))) for i in range(number)]
+        result = [int(round(start + (end - start) * ((i / (number - 1)) ** 2))) for i in range(number)]
     final_result = []
     last_val = None
     for val in result:
@@ -554,32 +569,38 @@ def generate_numbers(start, end, number, even=True):
             last_val = val
     return final_result[:number]
 
+
 def gen_abs_signal_name(start_period, end_period, step, start_period1, end_period1, step1):
     period_list = generate_numbers(start_period, end_period, step, even=False)
-    period_list1 = [x/20 for x in range(start_period1, end_period1, step1)]
+    period_list1 = [x / 20 for x in range(start_period1, end_period1, step1)]
     long_columns = [f"abs_{p}_{p1}_long" for p in period_list for p1 in period_list1 if p >= p1]
     short_columns = [f"abs_{p}_{p1}_short" for p in period_list for p1 in period_list1 if p >= p1]
     key_name = f"abs_{start_period}_{end_period}_{step}_{start_period1}_{end_period1}_{step1}"
     print(f"abs 生成 {len(long_columns)} 长信号和 {len(short_columns)} 短信号。")
     return long_columns, short_columns, key_name
 
+
 def gen_macd_signal_name(start_period, end_period, step):
     period_list = generate_numbers(start_period, end_period, step, even=False)
     signal_list = [9, 12, 15, 40]
-    long_columns = [f"macd_{fast}_{slow}_{signal}_long" for fast in period_list for slow in period_list if slow > fast for signal in signal_list]
-    short_columns = [f"macd_{fast}_{slow}_{signal}_short" for fast in period_list for slow in period_list if slow > fast for signal in signal_list]
+    long_columns = [f"macd_{fast}_{slow}_{signal}_long" for fast in period_list for slow in period_list if slow > fast
+                    for signal in signal_list]
+    short_columns = [f"macd_{fast}_{slow}_{signal}_short" for fast in period_list for slow in period_list if slow > fast
+                     for signal in signal_list]
     key_name = f"macd_{start_period}_{end_period}_{step}"
     print(f"MACD 生成 {len(long_columns)} 信号。")
     return long_columns, short_columns, key_name
 
+
 def gen_cci_signal_name(start_period, end_period, step, start_period1, end_period1, step1):
     period_list = generate_numbers(start_period, end_period, step, even=False)
-    period_list1 = [x/10 for x in range(start_period1, end_period1, step1)]
+    period_list1 = [x / 10 for x in range(start_period1, end_period1, step1)]
     long_columns = [f"cci_{p}_{p1}_long" for p in period_list for p1 in period_list1 if p >= p1]
     short_columns = [f"cci_{p}_{p1}_short" for p in period_list for p1 in period_list1 if p >= p1]
     key_name = f"cci_{start_period}_{end_period}_{step}_{start_period1}_{end_period1}_{step1}"
     print(f"cci 生成 {len(long_columns)} 信号。")
     return long_columns, short_columns, key_name
+
 
 def gen_relate_signal_name(start_period, end_period, step, start_period1, end_period1, step1):
     period_list = generate_numbers(start_period, end_period, step, even=False)
@@ -590,14 +611,16 @@ def gen_relate_signal_name(start_period, end_period, step, start_period1, end_pe
     print(f"relate 生成 {len(long_columns)} 信号。")
     return long_columns, short_columns, key_name
 
+
 def gen_rsi_signal_name(start_period, end_period, step):
     period_list = generate_numbers(start_period, end_period, step, even=False)
     temp_list = [10, 20, 30, 40, 50, 60, 70, 80, 90]
-    long_columns = [f"rsi_{p}_{ob}_{100-ob}_long" for p in period_list for ob in temp_list]
-    short_columns = [f"rsi_{p}_{ob}_{100-ob}_short" for p in period_list for ob in temp_list]
+    long_columns = [f"rsi_{p}_{ob}_{100 - ob}_long" for p in period_list for ob in temp_list]
+    short_columns = [f"rsi_{p}_{ob}_{100 - ob}_short" for p in period_list for ob in temp_list]
     key_name = f"rsi_{start_period}_{end_period}_{step}"
     print(f"rsi 生成 {len(long_columns)} 信号。")
     return long_columns, short_columns, key_name
+
 
 def gen_atr_signal_name(start_period, end_period, step):
     period_list = generate_numbers(start_period, end_period, step, even=False)
@@ -607,6 +630,7 @@ def gen_atr_signal_name(start_period, end_period, step):
     print(f"atr 生成 {len(long_columns)} 信号。")
     return long_columns, short_columns, key_name
 
+
 def gen_donchian_signal_name(start_period, end_period, step):
     period_list = list(range(start_period, end_period, step))
     long_columns = [f"donchian_{p}_long" for p in period_list]
@@ -615,14 +639,16 @@ def gen_donchian_signal_name(start_period, end_period, step):
     print(f"donchian 生成 {len(long_columns)} 信号。")
     return long_columns, short_columns, key_name
 
+
 def gen_boll_signal_name(start_period, end_period, step, start_period1, end_period1, step1):
     period_list = generate_numbers(start_period, end_period, step, even=False)
-    period_list1 = [x/10 for x in range(start_period1, end_period1, step1)]
+    period_list1 = [x / 10 for x in range(start_period1, end_period1, step1)]
     long_columns = [f"boll_{p}_{p1}_long" for p in period_list for p1 in period_list1 if p >= p1]
     short_columns = [f"boll_{p}_{p1}_short" for p in period_list for p1 in period_list1 if p >= p1]
     key_name = f"boll_{start_period}_{end_period}_{step}_{start_period1}_{end_period1}_{step1}"
     print(f"boll 生成 {len(long_columns)} 信号。")
     return long_columns, short_columns, key_name
+
 
 def gen_macross_signal_name(start_period, end_period, step, start_period1, end_period1, step1):
     period_list = generate_numbers(start_period, end_period, step, even=False)
@@ -632,6 +658,7 @@ def gen_macross_signal_name(start_period, end_period, step, start_period1, end_p
     key_name = f"macross_{start_period}_{end_period}_{step}_{start_period1}_{end_period1}_{step1}"
     print(f"macross 生成 {len(long_columns)} 信号。")
     return long_columns, short_columns, key_name
+
 
 def generate_all_signals():
     """
@@ -665,6 +692,7 @@ def generate_all_signals():
         all_signals.extend(temp)
     return all_signals, key_name
 
+
 ##############################################
 # 信号预计算及多进程工具函数
 ##############################################
@@ -687,6 +715,7 @@ def process_signal(sig):
         print(f"预计算 {sig} 时出错：{e}")
         return None
 
+
 def precompute_signals(df, signals):
     """
     使用多进程预计算所有候选信号数据，返回 dict 格式：{signal_name: (indices, prices)}。
@@ -700,6 +729,7 @@ def precompute_signals(df, signals):
             sig, data = res
             precomputed[sig] = data
     return precomputed
+
 
 def load_or_compute_precomputed_signals(df, signals, key_name):
     """
@@ -724,10 +754,12 @@ def load_or_compute_precomputed_signals(df, signals, key_name):
         print(f"保存预计算结果时出错：{e}")
     return precomputed
 
+
 def init_worker1(dataframe):
     """子进程初始化函数，将 df 加载到全局变量。"""
     global df
     df = dataframe
+
 
 ##############################################
 # 遗传算法优化相关函数（岛屿模型）
@@ -739,11 +771,13 @@ def init_worker_ga(signals, dataframe):
     GLOBAL_SIGNALS = signals
     df = dataframe
 
+
 def get_fitness_net(stat):
     """从统计结果中提取适应度值（净利率），若失败则返回 -10000。"""
     if stat is None:
         return -10000
     return stat.get("net_profit_rate", -10000)
+
 
 def get_fitness(stat, key, invert=False):
     """
@@ -755,47 +789,38 @@ def get_fitness(stat, key, invert=False):
     max_loss = stat.get("max_consecutive_loss", -10000)
     net_profit_rate = stat.get("net_profit_rate", -10000)
     trade_count = stat.get("kai_count", 0)
-    if max_loss < -10 or net_profit_rate < 100 or trade_count < 10:
+    if max_loss < -20 or net_profit_rate < 50 or trade_count < 50:
         return -10000
     hold_time_mean = stat.get("hold_time_mean", 0)
     true_profit_mean = stat.get("avg_profit_rate", 0)
-    if hold_time_mean > 2000 or true_profit_mean < 10:
+    if hold_time_mean > 3000 or true_profit_mean < 10:
         return -10000
 
     value = stat.get(key, -10000)
     return -value if invert else value
 
+
 # 声明两组 key:
-normal_keys = ["net_profit_rate", "kai_count",'min_profit','avg_profit_rate','fu_profit_mean', 'fu_profit_sum','monthly_net_profit_min','weekly_net_profit_min']
-inverted_keys = ["hold_time_mean", "hold_time_std", "loss_rate", "loss_time_rate",'max_profit', 'true_profit_std', 'monthly_trade_std', 'monthly_net_profit_std', 'monthly_avg_profit_std',
-                 'top_loss_ratio', 'top_profit_ratio','weekly_trade_std', 'weekly_net_profit_std', 'weekly_avg_profit_std', 'weekly_loss_rate', 'weekly_net_profit_max']
+normal_keys = ['monthly_net_profit_min', 'fu_profit_sum', 'max_consecutive_loss', 'weekly_net_profit_min', 'min_profit']
+
+
+inverted_keys = ['hold_time_mean','loss_time_rate', 'zhen_profit_sum', 'weekly_loss_rate', 'top_profit_ratio']
+
+
 
 combined_keys = [
-    "net_profit_rate",  # 累计净收益率：总体收益水平（高收益不一定稳定，但也是评估的重要指标）
-    "kai_count",  # 交易次数：足够的样本数量更具说服力
-    "min_profit",  # 单笔最差收益：反映个别极端亏损
+    "monthly_net_profit_min",  # 累计净收益率：总体收益水平（高收益不一定稳定，但也是评估的重要指标）
+    "hold_time_mean",  # 交易次数：足够的样本数量更具说服力
+    "loss_time_rate",  # 单笔最差收益：反映个别极端亏损
 
-    "true_profit_std",        # 单笔真实收益波动：最直观的波动性指标
-    "monthly_net_profit_std", # 月度净收益波动：反映月内稳定性
-    "weekly_net_profit_std",  # 周度净收益波动：反映短期稳定性
-    "loss_rate",              # 亏损率：亏损交易比例越低，策略越稳健
-    "loss_time_rate",         # 亏损时间占比：亏损时段越短越好
-    "monthly_avg_profit_std", # 月均收益波动：平稳的月均收益说明策略表现较一致
-    "weekly_avg_profit_std",  # 周均收益波动：短期内平均收益波动较低更稳定
-    "monthly_net_profit_min", # 最低月净收益：底部风险的重要参考
-    "weekly_net_profit_min",  # 最低周净收益：短期内的极值风险
-    "top_loss_ratio",         # 亏损集中比例：如果大部分亏损来自于几笔极端亏损，则不利于稳定
-    "top_profit_ratio",       # 盈利集中比例：过分依赖少数几笔大盈利，也容易让整体表现不稳定
-    "avg_profit_rate",        # 平均收益率：交易的整体盈利情况
-    "fu_profit_mean",         # 平均亏损额：亏损的平均幅度
-    "fu_profit_sum",          # 累计亏损额：总体亏损水平
-    "weekly_loss_rate",       # 周亏损率：反映短期亏损情况
-    "hold_time_std",          # 持仓时间波动：持仓时长越稳定越好
-    "hold_time_mean",         # 平均持仓时间：虽然影响不大，但也可辅助判断策略是否按预期执行
-    "monthly_trade_std",      # 月度交易次数波动：交易频率是否稳定
-    "weekly_trade_std",       # 周度交易次数波动：短期内交易次数的一致性
-    "max_profit",             # 单笔最高盈利：高盈利虽然好，但过于依赖极端事件可能代表不够稳定
-    "weekly_net_profit_max"   # 周最高净收益：同上，极端优异表现反映波动性较大
+    "fu_profit_sum",  # 单笔真实收益波动：最直观的波动性指标
+    "max_consecutive_loss",  # 月度净收益波动：反映月内稳定性
+    "weekly_net_profit_min",  # 周度净收益波动：反映短期稳定性
+    "min_profit",  # 亏损率：亏损交易比例越低，策略越稳健
+    "zhen_profit_sum",  # 月度净收益波动：反映月内稳定性
+    "weekly_loss_rate",  # 周度净收益波动：反映短期稳定性
+    "top_profit_ratio",  # 亏损率：亏损交易比例越低，策略越稳健
+
 ]
 
 # 利用 functools.partial 生成各个适应度提取函数，并存储在字典中
@@ -810,6 +835,7 @@ order_key = []
 # 如果需要以特定顺序生成一个列表，包含所有适应度提取函数
 get_fitness_list = [fitness_getters[key] for key in combined_keys]
 
+
 def evaluate_candidate_batch(candidates, fitness_func=get_fitness_net):
     """
     对一批候选个体进行评价，返回列表 [(fitness, candidate, stat), ...]。
@@ -821,6 +847,7 @@ def evaluate_candidate_batch(candidates, fitness_func=get_fitness_net):
         fitness = fitness_func(stat)
         batch_results.append((fitness, candidate, stat))
     return batch_results
+
 
 def tournament_selection(population, fitnesses, tournament_size=3, selection_pressure=0.75):
     """
@@ -835,6 +862,7 @@ def tournament_selection(population, fitnesses, tournament_size=3, selection_pre
         new_population.append(winner[0])
     return new_population
 
+
 def crossover(parent1, parent2, crossover_rate=0.8):
     """对两个父代个体进行交叉操作，若未交叉则返回原个体。"""
     if random.random() < crossover_rate:
@@ -843,6 +871,7 @@ def crossover(parent1, parent2, crossover_rate=0.8):
         else:
             return (parent1[0], parent2[1]), (parent2[0], parent1[1])
     return parent1, parent2
+
 
 def mutate(individual, mutation_rate, candidate_long_signals, candidate_short_signals):
     """以 mutation_rate 概率对个体进行变异，替换长信号或短信号。"""
@@ -853,11 +882,14 @@ def mutate(individual, mutation_rate, candidate_long_signals, candidate_short_si
         short_gene = random.choice(candidate_short_signals)
     return (long_gene, short_gene)
 
+
 def filter_existing_individuals(candidate_list, global_generated_individuals):
     """过滤掉已经评价过的个体。"""
     return [ind for ind in candidate_list if ind not in global_generated_individuals]
 
-def get_unique_candidate(candidate_long_signals, candidate_short_signals, global_generated_individuals, candidate_list, target_size):
+
+def get_unique_candidate(candidate_long_signals, candidate_short_signals, global_generated_individuals, candidate_list,
+                         target_size):
     """
     补充 candidate_list 至 target_size，生成的新候选个体不能重复（全局已出现或当前列表内）。
     """
@@ -867,6 +899,7 @@ def get_unique_candidate(candidate_long_signals, candidate_short_signals, global
             continue
         candidate_list.append(candidate)
     return candidate_list
+
 
 def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_signals,
                                    population_size=50, generations=20,
@@ -882,8 +915,9 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     all_signals = list(set(candidate_long_signals + candidate_short_signals))
     print(f"开始预计算 GLOBAL_SIGNALS ... {key_name}")
     precomputed = load_or_compute_precomputed_signals(df, all_signals, key_name)
-    total_size = sys.getsizeof(precomputed) + sum(sys.getsizeof(sig) + s.nbytes + p.nbytes for sig, (s, p) in precomputed.items())
-    print(f"预计算信号内存大小: {total_size/(1024*1024):.2f} MB")
+    total_size = sys.getsizeof(precomputed) + sum(
+        sys.getsizeof(sig) + s.nbytes + p.nbytes for sig, (s, p) in precomputed.items())
+    print(f"预计算信号内存大小: {total_size / (1024 * 1024):.2f} MB")
 
     global GLOBAL_SIGNALS
     GLOBAL_SIGNALS = precomputed
@@ -932,7 +966,8 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     island_pop_size = population_size // islands_count
     if not islands:
         for _ in range(islands_count):
-            pop = get_unique_candidate(candidate_long_signals, candidate_short_signals, global_generated_individuals, [], island_pop_size)
+            pop = get_unique_candidate(candidate_long_signals, candidate_short_signals, global_generated_individuals,
+                                       [], island_pop_size)
             island_state = {
                 "population": pop,
                 "best_candidate": None,
@@ -955,17 +990,20 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     fitness_index = 0
     pre_fitness_index = 0
     partial_eval = partial(evaluate_candidate_batch, fitness_func=get_fitness_list[fitness_index])
-    print(f"开始搜索，总代数: {generations}，每代种群大小: {population_size}，岛屿数量: {islands_count}，适应度函数个数: {len(get_fitness_list)} single_generations_count: {single_generations_count}")
+    print(
+        f"开始搜索，总代数: {generations}，每代种群大小: {population_size}，岛屿数量: {islands_count}，适应度函数个数: {len(get_fitness_list)} single_generations_count: {single_generations_count}")
 
-    with multiprocessing.Pool(processes=pool_processes, initializer=init_worker_ga, initargs=(GLOBAL_SIGNALS, df)) as pool:
+    with multiprocessing.Pool(processes=pool_processes, initializer=init_worker_ga,
+                              initargs=(GLOBAL_SIGNALS, df)) as pool:
         for gen in range(start_gen, generations):
             start_time = time.time()
             island_stats_list = []
-            print(f"\n========== 第 {gen} 代搜索，适应度函数: {get_fitness_list[fitness_index].func.__name__} ==========")
+            print(
+                f"\n========== 第 {gen} 代搜索，适应度函数: {get_fitness_list[fitness_index].func.__name__} ==========")
             for idx, island in enumerate(islands):
                 pop = island["population"]
                 print(f"岛 {idx} 进化开始，overall_best 在种群中: {overall_best in pop}，种群大小: {len(pop)}")
-                pop_batches = [pop[i:i+batch_size] for i in range(0, len(pop), batch_size)]
+                pop_batches = [pop[i:i + batch_size] for i in range(0, len(pop), batch_size)]
                 results_batches = pool.map(partial_eval, pop_batches)
                 # 用布隆过滤器逐个添加
                 for candidate in pop:
@@ -985,7 +1023,8 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                     island["no_improve_count"] += 1
                 if island["no_improve_count"] >= no_improvement_threshold:
                     island["adaptive_mutation_rate"] = min(1, island["adaptive_mutation_rate"] + 0.05)
-                    print(f"岛 {idx} 连续 {island['no_improve_count']} 代无改进，变异率升至 {island['adaptive_mutation_rate']:.2f}")
+                    print(
+                        f"岛 {idx} 连续 {island['no_improve_count']} 代无改进，变异率升至 {island['adaptive_mutation_rate']:.2f}")
                 else:
                     island["adaptive_mutation_rate"] = max(mutation_rate, island["adaptive_mutation_rate"] - 0.01)
                 elite_count = max(1, int(elite_fraction * island_pop_size))
@@ -994,48 +1033,57 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                 pop_fitness = [fr[0] for fr in fitness_results]
                 selected_population = tournament_selection(pop, pop_fitness, tournament_size=3, selection_pressure=0.75)
                 next_population = []
-                for i in range(0, len(selected_population)-1, 2):
+                for i in range(0, len(selected_population) - 1, 2):
                     parent1 = selected_population[i]
-                    parent2 = selected_population[i+1]
+                    parent2 = selected_population[i + 1]
                     child1, child2 = crossover(parent1, parent2, crossover_rate)
                     next_population.extend([child1, child2])
                 if len(selected_population) % 2 == 1:
                     next_population.append(selected_population[-1])
-                mutated_population = [mutate(ind, island["adaptive_mutation_rate"], candidate_long_signals, candidate_short_signals)
-                                      for ind in next_population]
+                mutated_population = [
+                    mutate(ind, island["adaptive_mutation_rate"], candidate_long_signals, candidate_short_signals)
+                    for ind in next_population]
                 diversity_count = max(1, int((0.1 + 0.05 * island["no_improve_count"]) * island_pop_size))
                 for _ in range(diversity_count):
-                    new_candidate = get_unique_candidate(candidate_long_signals, candidate_short_signals, global_generated_individuals, [], 1)[0]
-                    replace_index = random.randint(0, len(mutated_population)-1)
+                    new_candidate = \
+                    get_unique_candidate(candidate_long_signals, candidate_short_signals, global_generated_individuals,
+                                         [], 1)[0]
+                    replace_index = random.randint(0, len(mutated_population) - 1)
                     mutated_population[replace_index] = new_candidate
                 mutated_population = filter_existing_individuals(mutated_population, global_generated_individuals)
                 unique_population = list({ind: None for ind in elites + mutated_population}.keys())
-                unique_population = get_unique_candidate(candidate_long_signals, candidate_short_signals, global_generated_individuals, unique_population, island_pop_size)
+                unique_population = get_unique_candidate(candidate_long_signals, candidate_short_signals,
+                                                         global_generated_individuals, unique_population,
+                                                         island_pop_size)
                 if island["no_improve_count"] >= restart_threshold:
                     print(f"岛 {idx} 连续 {restart_threshold} 代无改进，执行局部重启。")
                     new_population_count = int(0.5 * island_pop_size)
-                    random_candidates = get_unique_candidate(candidate_long_signals, candidate_short_signals, global_generated_individuals, [], new_population_count)
-                    unique_population = list({ind: None for ind in elites + mutated_population + random_candidates}.keys())[:island_pop_size]
+                    random_candidates = get_unique_candidate(candidate_long_signals, candidate_short_signals,
+                                                             global_generated_individuals, [], new_population_count)
+                    unique_population = list(
+                        {ind: None for ind in elites + mutated_population + random_candidates}.keys())[:island_pop_size]
                     island["no_improve_count"] = 0
                     island["adaptive_mutation_rate"] = mutation_rate
                 else:
                     unique_population = unique_population[:island_pop_size]
                 island["population"] = unique_population
                 print(f"岛 {idx} 第 {gen} 代最优: {island['best_candidate']}，适应度: {island['best_fitness']}")
-            restart_similarity_threshold = max(5, abs(overall_best_fitness * 0.1))
-            print(f"重启相似度阈值: {restart_similarity_threshold:.2f}")
+            # restart_similarity_threshold = max(5, abs(overall_best_fitness * 0.1))
+            # print(f"重启相似度阈值: {restart_similarity_threshold:.2f}")
             for i in range(len(islands)):
-                for j in range(i+1, len(islands)):
+                for j in range(i + 1, len(islands)):
                     if "sorted_fitness" in islands[i] and "sorted_fitness" in islands[j]:
                         sorted_fit1 = islands[i]["sorted_fitness"]
                         sorted_fit2 = islands[j]["sorted_fitness"]
                         n = len(sorted_fit1) // 2
-                        sim = sum(abs(a-b) for a, b in zip(sorted_fit1[:n], sorted_fit2[:n])) / n if n > 0 else float('inf')
+                        sim = sum(abs(a - b) for a, b in zip(sorted_fit1[:n], sorted_fit2[:n])) / n if n > 0 else float(
+                            'inf')
                         print(f"岛 {i} 与岛 {j} 前50%个体相似度: {sim:.4f}")
                         if sim < restart_similarity_threshold:
                             restart_idx = i if islands[i]["best_fitness"] < islands[j]["best_fitness"] else j
                             print(f"岛 {restart_idx} 适应度较低且过于相似，执行重启。")
-                            new_population = get_unique_candidate(candidate_long_signals, candidate_short_signals, global_generated_individuals, [], island_pop_size)
+                            new_population = get_unique_candidate(candidate_long_signals, candidate_short_signals,
+                                                                  global_generated_individuals, [], island_pop_size)
                             islands[restart_idx]["population"] = new_population
                             islands[restart_idx]["best_candidate"] = None
                             islands[restart_idx]["best_fitness"] = -1e9
@@ -1052,7 +1100,8 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
             else:
                 global_no_improve_count = 0
             prev_overall_best = overall_best
-            print(f"第 {gen} 代全局最优: {overall_best}，适应度: {overall_best_fitness}，耗时: {elapsed_gen:.2f} 秒。连续无改进: {global_no_improve_count}，评估组合数: {len(global_generated_individuals)}")
+            print(
+                f"第 {gen} 代全局最优: {overall_best}，适应度: {overall_best_fitness}，耗时: {elapsed_gen:.2f} 秒。连续无改进: {global_no_improve_count}，评估组合数: {len(global_generated_individuals)}")
             need_restart = False
             fitness_index = gen // single_generations_count
             if fitness_index != pre_fitness_index:
@@ -1064,23 +1113,26 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                 overall_best = None
                 print(f"连续 {global_no_improve_count} 代无改进，进行全局重启。")
                 for island in islands:
-                    new_population = get_unique_candidate(candidate_long_signals, candidate_short_signals, global_generated_individuals, [], island_pop_size)
+                    new_population = get_unique_candidate(candidate_long_signals, candidate_short_signals,
+                                                          global_generated_individuals, [], island_pop_size)
                     island["population"] = new_population
                     island["best_candidate"] = None
                     island["best_fitness"] = -1e9
                     island["no_improve_count"] = 0
                     island["adaptive_mutation_rate"] = mutation_rate
                 global_no_improve_count = 0
-            if (gen+1) % migration_interval == 0:
+            if (gen + 1) % migration_interval == 0:
                 print("岛屿间进行迁移...")
                 for i in range(islands_count):
-                    target_idx = (i+1) % islands_count
+                    target_idx = (i + 1) % islands_count
                     source_island = islands[i]
                     target_island = islands[target_idx]
-                    src_batches = [source_island["population"][j:j+batch_size] for j in range(0, len(source_island["population"]), batch_size)]
+                    src_batches = [source_island["population"][j:j + batch_size] for j in
+                                   range(0, len(source_island["population"]), batch_size)]
                     src_results = pool.map(partial_eval, src_batches)
                     src_fitness_results = [item for batch in src_results for item in batch]
-                    tgt_batches = [target_island["population"][j:j+batch_size] for j in range(0, len(target_island["population"]), batch_size)]
+                    tgt_batches = [target_island["population"][j:j + batch_size] for j in
+                                   range(0, len(target_island["population"]), batch_size)]
                     tgt_results = pool.map(partial_eval, tgt_batches)
                     tgt_fitness_results = [item for batch in tgt_results for item in batch]
                     if not src_fitness_results or not tgt_fitness_results:
@@ -1092,7 +1144,9 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                     worst_tgt = {ind for (fit, ind, _) in sorted_tgt[:migration_num]}
                     new_target_population = [ind for ind in target_island["population"] if ind not in worst_tgt]
                     new_target_population.extend(emigrants)
-                    new_target_population = get_unique_candidate(candidate_long_signals, candidate_short_signals, global_generated_individuals, new_target_population, island_pop_size)
+                    new_target_population = get_unique_candidate(candidate_long_signals, candidate_short_signals,
+                                                                 global_generated_individuals, new_target_population,
+                                                                 island_pop_size)
                     target_island["population"] = new_target_population[:island_pop_size]
                     print(f"岛 {i} 向岛 {target_idx} 迁移 {migration_num} 个个体。")
             if island_stats_list:
@@ -1106,15 +1160,17 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                 "overall_best_candidate": overall_best,
                 "overall_best_fitness": overall_best_fitness,
             })
-            if (gen+1) % 100 == 0:
+            if (gen + 1) % 100 == 0:
                 try:
                     with open(checkpoint_file, "wb") as f:
-                        pickle.dump((gen+1, islands, overall_best, overall_best_fitness, all_history, global_generated_individuals), f)
+                        pickle.dump((gen + 1, islands, overall_best, overall_best_fitness, all_history,
+                                     global_generated_individuals), f)
                     print(f"第 {gen} 代 checkpoint 已保存。")
                 except Exception as e:
                     print(f"保存 checkpoint 时出错：{e}")
     print(f"\n遗传算法结束，全局最优: {overall_best}，净利率: {overall_best_fitness}")
     return overall_best, overall_best_fitness, all_history
+
 
 ##############################################
 # 主流程及数据加载
@@ -1132,14 +1188,15 @@ def ga_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
     while df_local["low"].min() < 1:
         df_local[["high", "low", "close"]] *= 10
     jingdu = "float32"
-    df_local["chg"] = (df_local["close"].pct_change()*100).astype("float16")
+    df_local["chg"] = (df_local["close"].pct_change() * 100).astype("float16")
     df_local["high"] = df_local["high"].astype(jingdu)
     df_local["low"] = df_local["low"].astype(jingdu)
     df_local["close"] = df_local["close"].astype(jingdu)
     df_local["timestamp"] = pd.to_datetime(df_local["timestamp"])
     df_monthly = df_local["timestamp"].dt.to_period("M")
     df_local = df_local[(df_monthly != df_monthly.min()) & (df_monthly != df_monthly.max())]
-    print(f"\n开始基于遗传算法回测 {base_name} ... 数据长度 {df_local.shape[0]} 时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
+    print(
+        f"\n开始基于遗传算法回测 {base_name} ... 数据长度 {df_local.shape[0]} 时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
     all_signals, key_name = generate_all_signals()
     long_signals = [sig for sig in all_signals if "long" in sig]
     short_signals = [sig for sig in all_signals if "short" in sig]
@@ -1150,12 +1207,13 @@ def ga_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
     print(f"种群规模: {population_size}，信号总数: {len(all_signals)}")
     best_candidate, best_fitness, history = genetic_algorithm_optimization(
         df_local, all_signals, all_signals,
-        population_size=population_size, generations=2400,
+        population_size=population_size, generations=1000,
         crossover_rate=0.9, mutation_rate=0.2,
         key_name=f'{base_name}_{key_name}',
         islands_count=4, migration_interval=10, migration_rate=0.05
     )
     print(f"数据 {base_name} 最优信号组合: {best_candidate}，净利率: {best_fitness}")
+
 
 def example():
     """
@@ -1174,10 +1232,11 @@ def example():
     for data_path in data_path_list:
         try:
             ga_optimize_breakthrough_signal(data_path)
-            print(f"{data_path} 总耗时 {time.time()-start_time:.2f} 秒。")
+            print(f"{data_path} 总耗时 {time.time() - start_time:.2f} 秒。")
         except Exception as e:
             traceback.print_exc()
             print(f"处理 {data_path} 出错：{e}")
+
 
 if __name__ == "__main__":
     example()

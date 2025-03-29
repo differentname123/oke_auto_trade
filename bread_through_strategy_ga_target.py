@@ -605,6 +605,7 @@ def load_or_compute_precomputed_signals(df, signals, key_name):
         print(f"Error saving precomputed signals: {e}")
     return precomputed
 
+
 def validation(market_data_file):
     base_name = os.path.basename(market_data_file)
     base_name = base_name.replace("-USDT-SWAP.csv", "").replace("origin_data_", "")
@@ -619,7 +620,7 @@ def validation(market_data_file):
             sys.exit(1)
     df_local = df_local[needed_columns]
     min_price = df_local["low"].min()
-    # 如果min_price在小数点很后面，那需要乘以10，直到大于1
+    # 如果min_price值小于1，则对价格进行放大
     while min_price < 1:
         df_local["high"] *= 10
         df_local["low"] *= 10
@@ -635,29 +636,31 @@ def validation(market_data_file):
 
     print(f"Loaded market data: 共 {df_local.shape[0]} 行")
 
-    # 3. 设置主进程 global df，用于预计算
+    # 3. 设置主进程全局变量，用于预计算
     global df
     df = df_local
 
-    stat_df_file_list = [f'temp_back/{inst_id}_origin_good_op_all_false_temp.csv']
+    # 注意：这里只读取需要的列： kai_column 和 pin_column
+    stat_df_file_list = [os.path.join('temp_back', f'{inst_id}_origin_good_op_all_false_temp.parquet')]
     for stat_df_file in stat_df_file_list:
         try:
-            # 1. 加载 stat_df 文件
-            stat_df = pd.read_csv(stat_df_file)
+            # 1. 加载 stat_df 文件（只读取必要的两列）
+            stat_df = pd.read_parquet(stat_df_file, columns=["kai_column", "pin_column"])
             stat_df_base_name = os.path.basename(stat_df_file)
             if "kai_column" not in stat_df.columns or "pin_column" not in stat_df.columns:
                 print("输入的 stat_df 文件中必须包含 'kai_column' 和 'pin_column' 两列")
                 sys.exit(1)
             print(f"Loaded stat_df: 共 {stat_df.shape[0]} 行")
 
+            # 2. 获取所有信号对
             pairs = list(stat_df[['kai_column', 'pin_column']].itertuples(index=False, name=None))
 
-            # 4. 从 stat_df 中提取所有候选信号（取 kai_column 和 pin_column 的并集）
+            # 3. 提取候选信号（取 kai_column 和 pin_column 并集），以便预计算
             unique_signals = set(stat_df["kai_column"].unique()).union(set(stat_df["pin_column"].unique()))
             unique_signals = list(unique_signals)
             print(f"Total unique signals to precompute: {len(unique_signals)}")
 
-            # 5. 预计算信号并保存（key_name 可根据需要自定义）
+            # 4. 预计算信号并保存（key_name 可根据需要自定义）
             key_name = base_name
             precomputed = load_or_compute_precomputed_signals(df_local, unique_signals, key_name)
             # 更新全局预计算信号数据
@@ -670,23 +673,39 @@ def validation(market_data_file):
             print(f"Total candidate signal pairs: {len(pairs)}")
             # 删除 stat_df，释放内存
             del stat_df
-            max_memory = 45
+
+            # 根据内存限制调整进程数
+            max_memory = 45  # 单位：GB
             pool_processes = min(30, int(max_memory * 1024 * 1024 * 1024 / total_size) if total_size > 0 else 1)
             print(f"进程数限制为 {pool_processes}，根据内存限制调整。")
-            with multiprocessing.Pool(processes=pool_processes, initializer=init_worker_with_signals,
-                                      initargs=(GLOBAL_SIGNALS, df)) as pool:
-                results = pool.map(process_signal_pair, pairs, chunksize=1000)
 
-            # 过滤掉返回 None 的结果
-            results_filtered = [r for r in results if r[2] is not None]
-            print(f"成功处理 {len(results_filtered)} 个信号对。")
+            # 定义每个批次处理的 pair 数量
+            BATCH_SIZE = 10000000
+            total_pairs = len(pairs)
+            total_batches = (total_pairs - 1) // BATCH_SIZE + 1
 
-            # 合并所有统计字典为 DataFrame 并保存到文件
-            stats_list = [r[2] for r in results_filtered]
-            stats_df = pd.DataFrame(stats_list)
-            output_file = os.path.join("temp_back", f"{stat_df_base_name}_{base_name}statistic_results.csv")
-            stats_df.to_csv(output_file, index=False)
-            print(f"所有统计结果已保存到 {output_file}")
+            for batch_index, start_idx in enumerate(range(0, total_pairs, BATCH_SIZE)):
+                end_idx = min(start_idx + BATCH_SIZE, total_pairs)
+                batch_pairs = pairs[start_idx:end_idx]
+                print(f"Processing batch {batch_index + 1}/{total_batches} with {len(batch_pairs)} pairs...")
+
+                with multiprocessing.Pool(processes=pool_processes,
+                                          initializer=init_worker_with_signals,
+                                          initargs=(GLOBAL_SIGNALS, df)) as pool:
+                    results = pool.map(process_signal_pair, batch_pairs, chunksize=1000)
+
+                # 过滤掉返回 None 的结果
+                results_filtered = [r for r in results if r[2] is not None]
+                print(f"Batch {batch_index + 1}: 成功处理 {len(results_filtered)} 个信号对。")
+
+                # 合并所有统计字典为 DataFrame 并保存到文件
+                stats_list = [r[2] for r in results_filtered]
+                stats_df = pd.DataFrame(stats_list)
+                output_file = os.path.join("temp_back",
+                                           f"{stat_df_base_name}_{base_name}statistic_results_{batch_index}.csv")
+                stats_df.to_csv(output_file, index=False)
+                print(f"Batch {batch_index + 1} 统计结果已保存到 {output_file}")
+
         except Exception as e:
             print(f"处理 {stat_df_file} 时出错：{e}")
 
@@ -940,7 +959,7 @@ def target_all(market_data_file):
 if __name__ == "__main__":
     start_time = time.time()
     data_path_list = [
-        # "kline_data/origin_data_1m_110000_SOL-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_110000_SOL-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_110000_BTC-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_110000_ETH-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000_SOL-USDT-SWAP.csv",
