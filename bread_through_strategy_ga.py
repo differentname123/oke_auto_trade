@@ -718,6 +718,34 @@ normal_keys = ["net_profit_rate", "kai_count",'min_profit','avg_profit_rate','fu
 inverted_keys = ["hold_time_mean", "hold_time_std", "loss_rate", "loss_time_rate",'max_profit', 'true_profit_std', 'monthly_trade_std', 'monthly_net_profit_std', 'monthly_avg_profit_std',
                  'top_loss_ratio', 'top_profit_ratio','weekly_trade_std', 'weekly_net_profit_std', 'weekly_avg_profit_std', 'weekly_loss_rate', 'weekly_net_profit_max']
 
+combined_keys = [
+    "net_profit_rate",  # 累计净收益率：总体收益水平（高收益不一定稳定，但也是评估的重要指标）
+    "kai_count",  # 交易次数：足够的样本数量更具说服力
+    "min_profit",  # 单笔最差收益：反映个别极端亏损
+
+    "true_profit_std",        # 单笔真实收益波动：最直观的波动性指标
+    "monthly_net_profit_std", # 月度净收益波动：反映月内稳定性
+    "weekly_net_profit_std",  # 周度净收益波动：反映短期稳定性
+    "loss_rate",              # 亏损率：亏损交易比例越低，策略越稳健
+    "loss_time_rate",         # 亏损时间占比：亏损时段越短越好
+    "monthly_avg_profit_std", # 月均收益波动：平稳的月均收益说明策略表现较一致
+    "weekly_avg_profit_std",  # 周均收益波动：短期内平均收益波动较低更稳定
+    "monthly_net_profit_min", # 最低月净收益：底部风险的重要参考
+    "weekly_net_profit_min",  # 最低周净收益：短期内的极值风险
+    "top_loss_ratio",         # 亏损集中比例：如果大部分亏损来自于几笔极端亏损，则不利于稳定
+    "top_profit_ratio",       # 盈利集中比例：过分依赖少数几笔大盈利，也容易让整体表现不稳定
+    "avg_profit_rate",        # 平均收益率：交易的整体盈利情况
+    "fu_profit_mean",         # 平均亏损额：亏损的平均幅度
+    "fu_profit_sum",          # 累计亏损额：总体亏损水平
+    "weekly_loss_rate",       # 周亏损率：反映短期亏损情况
+    "hold_time_std",          # 持仓时间波动：持仓时长越稳定越好
+    "hold_time_mean",         # 平均持仓时间：虽然影响不大，但也可辅助判断策略是否按预期执行
+    "monthly_trade_std",      # 月度交易次数波动：交易频率是否稳定
+    "weekly_trade_std",       # 周度交易次数波动：短期内交易次数的一致性
+    "max_profit",             # 单笔最高盈利：高盈利虽然好，但过于依赖极端事件可能代表不够稳定
+    "weekly_net_profit_max"   # 周最高净收益：同上，极端优异表现反映波动性较大
+]
+
 # 利用 functools.partial 生成各个适应度提取函数，并存储在字典中
 fitness_getters = {}
 
@@ -728,7 +756,7 @@ for key in inverted_keys:
     fitness_getters[key] = partial(get_fitness, key=key, invert=True)
 order_key = []
 # 如果需要以特定顺序生成一个列表，包含所有适应度提取函数
-get_fitness_list = [fitness_getters[key] for key in normal_keys + inverted_keys]
+get_fitness_list = [fitness_getters[key] for key in combined_keys]
 
 def evaluate_candidate_batch(candidates, fitness_func=get_fitness_net):
     """
@@ -859,7 +887,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     max_memory = 40
     pool_processes = min(32, int(max_memory * 1024 * 1024 * 1024 / total_size) if total_size > 0 else 1)
     print(f"使用 {pool_processes} 个进程。")
-    batch_size = 10
+    batch_size = 1000
     prev_overall_best = overall_best
     global_no_improve_count = 0
     single_generations_count = int(generations / len(get_fitness_list))  # 实际为 generations
@@ -931,6 +959,10 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                     unique_population = unique_population[:island_pop_size]
                 island["population"] = unique_population
                 print(f"岛 {idx} 第 {gen} 代最优: {island['best_candidate']}，适应度: {island['best_fitness']}")
+            # 获取sorted_fitness的均值
+            avg_sorted_fitness = np.mean([np.mean(island["sorted_fitness"]) for island in islands if "sorted_fitness" in island])
+            restart_similarity_threshold = min(10, avg_sorted_fitness * 0.1)
+            print(f"平均适应度排序均值: {avg_sorted_fitness:.2f}，重启相似度阈值: {restart_similarity_threshold:.2f}")
             for i in range(len(islands)):
                 for j in range(i+1, len(islands)):
                     if "sorted_fitness" in islands[i] and "sorted_fitness" in islands[j]:

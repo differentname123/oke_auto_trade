@@ -200,10 +200,10 @@ def process_feature_batch(batch_features, batch_feature_data, target_values, n_b
                 result = future.result()
                 if result is not None:
                     batch_results.append(result)
-                print(f"【process_feature_batch】：完成 {feat} 分箱处理")
+                # print(f"【process_feature_batch】：完成 {feat} 分箱处理")
             except Exception as e:
                 print(f"【process_feature_batch】：特征 {feat} 处理出错: {e}")
-    print("【process_feature_batch】：批次处理完成")
+    # print("【process_feature_batch】：批次处理完成")
     return batch_results
 
 
