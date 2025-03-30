@@ -26,13 +26,14 @@ import pickle
 import random
 import traceback
 import math
-import hashlib
 from functools import partial
+import threading
 
 import numpy as np
 import pandas as pd
 from numba import njit
 import multiprocessing
+import mmh3  # 请确保安装 mmh3: pip install mmh3
 
 
 ##############################################
@@ -54,10 +55,10 @@ class BloomFilter:
         self.count = 0  # 用于记录实际添加元素个数
 
     def _hashes(self, item):
-        """采用双哈希得到 k 个哈希值"""
-        item_bytes = str(item).encode("utf-8")
-        hash1 = int(hashlib.md5(item_bytes).hexdigest(), 16)
-        hash2 = int(hashlib.sha256(item_bytes).hexdigest(), 16)
+        """采用双哈希（利用 mmh3）得到 k 个哈希值"""
+        item_str = str(item)
+        hash1 = mmh3.hash(item_str, seed=0)
+        hash2 = mmh3.hash(item_str, seed=1)
         for i in range(self.hash_count):
             yield (hash1 + i * hash2) % self.size
 
@@ -912,7 +913,24 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
       1. 在每个岛屿评估后保存适应度信息到字段 "population_with_fitness"（以及可选的 "sorted_fitness"）。
       2. 在迁移阶段直接利用这些已保存评估数据进行排序，无需重复回测。
       3. 详细记录各阶段耗时日志，但只有当耗时大于 1 秒时才打印，以便找到异常耗时的阶段。
+      4. 引入异步保存检查点和统计信息的方式，降低 I/O 阻塞影响。
     """
+
+    # 异步保存 helper 函数
+    def save_checkpoint_async(data, checkpoint_file):
+        def _save():
+            with open(checkpoint_file, "wb") as f:
+                pickle.dump(data, f)
+        t = threading.Thread(target=_save)
+        t.daemon = True
+        t.start()
+
+    def save_stats_async(df_stats, file_name):
+        def _save():
+            df_stats.to_parquet(file_name, index=False, compression='snappy')
+        t = threading.Thread(target=_save)
+        t.daemon = True
+        t.start()
 
     # 辅助函数：当耗时超过 threshold 秒时打印日志
     def log_if_slow(label, delta, gen, idx=None, threshold=1.0):
@@ -1051,9 +1069,6 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                 adapt_start = time.time()
                 if island["no_improve_count"] >= no_improvement_threshold:
                     island["adaptive_mutation_rate"] = min(1, island["adaptive_mutation_rate"] + 0.05)
-                    if island["adaptive_mutation_rate"] > mutation_rate:
-                        # 即使变异率有调整，也只有当调整阶段耗时异常时才打印
-                        pass
                 else:
                     island["adaptive_mutation_rate"] = max(mutation_rate, island["adaptive_mutation_rate"] - 0.01)
                 adapt_end = time.time()
@@ -1228,15 +1243,15 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                 migration_end_time = time.time()
                 log_if_slow("迁移阶段", migration_end_time - migration_start_time, gen)
 
-            # -- 保存统计信息和检查点 --
+            # -- 保存统计信息和检查点（异步保存） --
             if island_stats_list:
                 stats_save_start = time.time()
                 df_stats = pd.DataFrame(island_stats_list).drop_duplicates(subset=["kai_column", "pin_column"])
-                file_name = os.path.join(checkpoint_dir, f"{key_name}_{gen}_stats.parquet")
-                df_stats.to_parquet(file_name, index=False, compression='snappy')
+                stats_file_name = os.path.join(checkpoint_dir, f"{key_name}_{gen}_stats.parquet")
+                save_stats_async(df_stats, stats_file_name)
                 stats_save_end = time.time()
-                log_if_slow("保存统计信息", stats_save_end - stats_save_start, gen)
-                print(f"[GEN {gen}] 保存统计信息，记录数: {df_stats.shape[0]}")
+                log_if_slow("保存统计信息异步发起", stats_save_end - stats_save_start, gen)
+                print(f"[GEN {gen}] 异步保存统计信息已发起，记录数: {df_stats.shape[0]}")
             all_history.append({
                 "generation": gen,
                 "islands": islands,
@@ -1245,15 +1260,12 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
             })
             if (gen + 1) % 100 == 0:
                 try:
-                    checkpoint_start = time.time()
-                    with open(checkpoint_file, "wb") as f:
-                        pickle.dump((gen + 1, islands, overall_best, overall_best_fitness, all_history,
-                                     global_generated_individuals), f)
-                    checkpoint_end = time.time()
-                    log_if_slow("保存 checkpoint", checkpoint_end - checkpoint_start, gen)
-                    print(f"[GEN {gen}] 第 {gen} 代 checkpoint 已保存。")
+                    data_to_save = (gen + 1, islands, overall_best, overall_best_fitness, all_history,
+                                     global_generated_individuals)
+                    save_checkpoint_async(data_to_save, checkpoint_file)
+                    print(f"[GEN {gen}] 第 {gen} 代 checkpoint 异步保存发起。")
                 except Exception as e:
-                    print(f"[GEN {gen}] 保存 checkpoint 时出错：{e}")
+                    print(f"[GEN {gen}] 异步保存 checkpoint 时出错：{e}")
     print(f"\n遗传算法结束，全局最优: {overall_best}，净利率: {overall_best_fitness}")
     return overall_best, overall_best_fitness, all_history
 
@@ -1307,7 +1319,7 @@ def example():
     """
     start_time = time.time()
     data_path_list = [
-        "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
