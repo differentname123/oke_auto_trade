@@ -277,9 +277,13 @@ def op_signal(df, sig):
 
 def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is_detail=False, is_reverse=False):
     """
-    根据预计算的信号数据获取回测统计结果。返回值为 (kai_data_df, statistic_dict)。
+    根据预计算的信号数据获取回测统计结果，只计算所需字段：
+    kai_column, pin_column, hold_time_mean, max_hold_time, hold_time_std,
+    loss_rate, net_profit_rate, fix_profit, avg_profit_rate, same_count
+    返回值为 (kai_data_df, statistic_dict)。
     若交易信号不足或数据不满足过滤条件，则返回 (None, None)。
     """
+    # 注意：需要保证 GLOBAL_SIGNALS, op_signal 和 safe_round 已经在其他地方定义好。
     global GLOBAL_SIGNALS
 
     try:
@@ -300,6 +304,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     pin_data_df["pin_price"] = pin_prices
 
     # 根据时间索引匹配信号（可能存在重复匹配）
+    # 同时计算 common_index 用于 same_count 字段
     common_index = kai_data_df.index.intersection(pin_data_df.index)
     kai_idx_arr = np.asarray(kai_data_df.index)
     pin_idx_arr = np.asarray(pin_data_df.index)
@@ -315,24 +320,25 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     kai_data_df["pin_time"] = matched_pin["timestamp"].values
     kai_data_df["hold_time"] = matched_pin.index.values - kai_idx_valid
 
-    # 判断方向
-    if is_reverse:
-        is_long = "short" in kai_column.lower()
-    else:
-        is_long = "long" in kai_column.lower()
-
+    # 过滤重复匹配
     if is_filter:
         kai_data_df = kai_data_df.sort_values("timestamp").drop_duplicates("pin_time", keep="first")
 
     trade_count = len(kai_data_df)
-    total_count = len(df)
+    if trade_count == 0:
+        return None, None
 
     # 若存在价格修正，则对交易价格进行映射
     pin_price_map = kai_data_df.set_index("pin_time")["pin_price"]
     mapped_prices = kai_data_df["timestamp"].map(pin_price_map)
     if mapped_prices.notna().sum() > 0:
         kai_data_df["kai_price"] = mapped_prices.combine_first(kai_data_df["kai_price"])
-    modification_rate = (100 * mapped_prices.notna().sum() / trade_count) if trade_count else 0
+
+    # 判断交易方向，根据 is_reverse 参数以及 kai_column 名称判断买/卖
+    if is_reverse:
+        is_long = "short" in kai_column.lower()
+    else:
+        is_long = "long" in kai_column.lower()
 
     # 计算收益率（含交易成本0.07）
     if is_long:
@@ -341,136 +347,40 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     else:
         profit_series = ((kai_data_df["kai_price"] - kai_data_df["pin_price"]) /
                          kai_data_df["kai_price"] * 100).round(4)
-    kai_data_df["profit"] = profit_series
+    # true_profit 扣除交易成本
     kai_data_df["true_profit"] = profit_series - 0.07
-    profit_sum = profit_series.sum()
-    max_single_profit = kai_data_df["true_profit"].max()
-    min_single_profit = kai_data_df["true_profit"].min()
 
-    true_profit_std = kai_data_df["true_profit"].std()
-    true_profit_mean = kai_data_df["true_profit"].mean() * 100 if trade_count > 0 else 0
+    # fix_profit: 仅对经过价格修正的交易进行累计计算（mapped_prices 不为 NaN 的部分）
     fix_profit = safe_round(kai_data_df[mapped_prices.notna()]["true_profit"].sum(), ndigits=4)
+    # net_profit_rate：所有 true_profit 累计后扣除 fix_profit
     net_profit_rate = kai_data_df["true_profit"].sum() - fix_profit
 
-    profits_arr = kai_data_df["true_profit"].values
-    max_loss, max_loss_start_idx, max_loss_end_idx, loss_trade_count = calculate_max_sequence_numba(profits_arr)
+    # 计算 avg_profit_rate：所有 true_profit 的均值 * 100（若没有交易则为0）
+    avg_profit_rate = safe_round(kai_data_df["true_profit"].mean() * 100 if trade_count else 0, 4)
 
-    max_profit, max_profit_start_idx, max_profit_end_idx, profit_trade_count = calculate_max_profit_numba(profits_arr)
-
-    if (trade_count > 0 and max_loss_start_idx < len(kai_data_df) and max_loss_end_idx < len(kai_data_df)):
-        max_loss_start_time = kai_data_df.iloc[max_loss_start_idx]["timestamp"]
-        max_loss_end_time = kai_data_df.iloc[max_loss_end_idx]["timestamp"]
-        max_loss_hold_time = kai_data_df.index[max_loss_end_idx] - kai_data_df.index[max_loss_start_idx]
-    else:
-        max_loss_start_time = max_loss_end_time = max_loss_hold_time = None
-
-    if (trade_count > 0 and max_profit_start_idx < len(kai_data_df) and max_profit_end_idx < len(kai_data_df)):
-        max_profit_start_time = kai_data_df.iloc[max_profit_start_idx]["timestamp"]
-        max_profit_end_time = kai_data_df.iloc[max_profit_end_idx]["timestamp"]
-        max_profit_hold_time = kai_data_df.index[max_profit_end_idx] - kai_data_df.index[max_profit_start_idx]
-    else:
-        max_profit_start_time = max_profit_end_time = max_profit_hold_time = None
-
-    profit_df = kai_data_df[kai_data_df["true_profit"] > 0]
-    loss_df = kai_data_df[kai_data_df["true_profit"] < 0]
-    fu_profit_sum = loss_df["true_profit"].sum()
-    fu_profit_mean = safe_round(loss_df["true_profit"].mean() if not loss_df.empty else 0, ndigits=4)
-    zhen_profit_sum = profit_df["true_profit"].sum()
-    zhen_profit_mean = safe_round(profit_df["true_profit"].mean() if not profit_df.empty else 0, ndigits=4)
-    loss_rate = (loss_df.shape[0] / trade_count) if trade_count else 0
-    loss_time = loss_df["hold_time"].sum() if not loss_df.empty else 0
-    profit_time = profit_df["hold_time"].sum() if not profit_df.empty else 0
-    loss_time_rate = (loss_time / (loss_time + profit_time)) if (loss_time + profit_time) else 0
-
-    trade_rate = (100 * trade_count / total_count) if total_count else 0
+    # 计算持仓时间指标
     hold_time_mean = kai_data_df["hold_time"].mean() if trade_count else 0
     max_hold_time = kai_data_df["hold_time"].max() if trade_count else 0
+    hold_time_std = kai_data_df["hold_time"].std() if trade_count else 0
 
+    # 计算 loss_rate：亏损的交易比例（true_profit < 0）
+    loss_count = (kai_data_df["true_profit"] < 0).sum()
+    loss_rate = loss_count / trade_count
 
-    monthly_groups = kai_data_df["timestamp"].dt.to_period("M")
-    monthly_agg = kai_data_df.groupby(monthly_groups)["true_profit"].agg(["sum", "mean", "count"])
-    monthly_trade_std = monthly_agg["count"].std() if "count" in monthly_agg else 0
-    active_months = monthly_agg.shape[0]
-    total_months = 22
-    active_month_ratio = active_months / total_months if total_months else 0
-    monthly_net_profit_std = monthly_agg["sum"].std() if "sum" in monthly_agg else 0
-    monthly_avg_profit_std = monthly_agg["mean"].std() if "mean" in monthly_agg else 0
-    monthly_net_profit_min = monthly_agg["sum"].min() if "sum" in monthly_agg else 0
-    monthly_net_profit_max = monthly_agg["sum"].max() if "sum" in monthly_agg else 0
-    monthly_loss_rate = ((monthly_agg["sum"] < 0).sum() / active_months) if active_months else 0
+    # same_count: 两个信号原始时间索引的交集数
+    same_count = len(common_index)
 
-    monthly_net_profit_detail = {str(month): round(val, 4) for month, val in monthly_agg["sum"].to_dict().items()}
-    monthly_trade_count_detail = {str(month): int(val) for month, val in monthly_agg["count"].to_dict().items()}
-
-    hold_time_std = kai_data_df["hold_time"].std()
-
-    if not profit_df.empty:
-        top_profit_count = max(1, int(np.ceil(len(profit_df) * 0.1)))
-        profit_sorted = profit_df.sort_values("true_profit", ascending=False)
-        top_profit_sum = profit_sorted["true_profit"].iloc[:top_profit_count].sum()
-        total_profit_sum = profit_df["true_profit"].sum()
-        top_profit_ratio = (top_profit_sum / total_profit_sum) if total_profit_sum != 0 else 0
-    else:
-        top_profit_ratio = 0
-
-    if not loss_df.empty:
-        top_loss_count = max(1, int(np.ceil(len(loss_df) * 0.1)))
-        loss_sorted = loss_df.sort_values("true_profit", ascending=True)
-        top_loss_sum = loss_sorted["true_profit"].iloc[:top_loss_count].sum()
-        total_loss_sum = loss_df["true_profit"].sum()
-        top_loss_ratio = (abs(top_loss_sum) / abs(total_loss_sum)) if total_loss_sum != 0 else 0
-    else:
-        top_loss_ratio = 0
-    same_count_rate = safe_round(100 * len(common_index) / min(len(kai_data_df), len(pin_data_df)) if trade_count else 0, 4)
     statistic_dict = {
-        "kai_side": "long" if is_long else "short",
         "kai_column": kai_column,
         "pin_column": pin_column,
-        "kai_count": trade_count,
-        "total_count": total_count,
-        "trade_rate": safe_round(trade_rate, 4),
         "hold_time_mean": hold_time_mean,
         "max_hold_time": max_hold_time,
         "hold_time_std": hold_time_std,
         "loss_rate": loss_rate,
-        "loss_time_rate": loss_time_rate,
-        "zhen_profit_sum": zhen_profit_sum,
-        "zhen_profit_mean": zhen_profit_mean,
-        "fu_profit_sum": fu_profit_sum,
-        "fu_profit_mean": fu_profit_mean,
-        "profit_rate": profit_sum,
-        "max_profit": max_single_profit,
-        "min_profit": min_single_profit,
-        "cost_rate": trade_count * 0.07,
         "net_profit_rate": net_profit_rate,
         "fix_profit": fix_profit,
-        "avg_profit_rate": safe_round(true_profit_mean, 4),
-        "true_profit_std": true_profit_std,
-        "max_consecutive_loss": safe_round(max_loss, 4),
-        "max_loss_trade_count": loss_trade_count,
-        "max_loss_hold_time": max_loss_hold_time,
-        "max_loss_start_time": max_loss_start_time,
-        "max_loss_end_time": max_loss_end_time,
-        "max_consecutive_profit": safe_round(max_profit, 4),
-        "max_profit_trade_count": profit_trade_count,
-        "max_profit_hold_time": max_profit_hold_time,
-        "max_profit_start_time": max_profit_start_time,
-        "max_profit_end_time": max_profit_end_time,
-        "same_count": len(common_index),
-        "same_count_rate": same_count_rate,
-        "true_same_count_rate": modification_rate,
-        "monthly_trade_std": safe_round(monthly_trade_std, 4),
-        "active_month_ratio": safe_round(active_month_ratio, 4),
-        "monthly_loss_rate": safe_round(monthly_loss_rate, 4),
-        "monthly_net_profit_min": safe_round(monthly_net_profit_min, 4),
-        "monthly_net_profit_max": safe_round(monthly_net_profit_max, 4),
-        "monthly_net_profit_std": safe_round(monthly_net_profit_std, 4),
-        "monthly_avg_profit_std": safe_round(monthly_avg_profit_std, 4),
-        "top_profit_ratio": safe_round(top_profit_ratio, 4),
-        "top_loss_ratio": safe_round(top_loss_ratio, 4),
-        "is_reverse": is_reverse,
-        "monthly_net_profit_detail": monthly_net_profit_detail,
-        "monthly_trade_count_detail": monthly_trade_count_detail
+        "avg_profit_rate": avg_profit_rate,
+        "same_count": same_count
     }
     return kai_data_df, statistic_dict
 
@@ -680,11 +590,16 @@ def validation(market_data_file):
             print(f"进程数限制为 {pool_processes}，根据内存限制调整。")
 
             # 定义每个批次处理的 pair 数量
-            BATCH_SIZE = 1000000
+            BATCH_SIZE = 10000000
             total_pairs = len(pairs)
             total_batches = (total_pairs - 1) // BATCH_SIZE + 1
 
             for batch_index, start_idx in enumerate(range(0, total_pairs, BATCH_SIZE)):
+                start_time = time.time()
+                output_file = os.path.join("temp_back",f"{stat_df_base_name}_{base_name}statistic_results_{batch_index}.parquet")
+                if os.path.exists(output_file):
+                    print(f"{output_file} 已存在，跳过处理。")
+                    continue
                 end_idx = min(start_idx + BATCH_SIZE, total_pairs)
                 batch_pairs = pairs[start_idx:end_idx]
                 print(f"Processing batch {batch_index + 1}/{total_batches} with {len(batch_pairs)} pairs...")
@@ -701,9 +616,8 @@ def validation(market_data_file):
                 # 合并所有统计字典为 DataFrame 并保存到文件
                 stats_list = [r[2] for r in results_filtered]
                 stats_df = pd.DataFrame(stats_list)
-                output_file = os.path.join("temp_back",f"{stat_df_base_name}_{base_name}statistic_results_{batch_index}.parquet")
                 stats_df.to_parquet(output_file, index=False, compression='snappy')
-                print(f"Batch {batch_index + 1} 统计结果已保存到 {output_file}")
+                print(f"Batch {batch_index + 1} 统计结果已保存到 {output_file} (共 {stats_df.shape[0]} 行) 耗时 {time.time() - start_time:.2f} 秒。")
 
         except Exception as e:
             print(f"处理 {stat_df_file} 时出错：{e}")
