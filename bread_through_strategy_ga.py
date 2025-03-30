@@ -995,7 +995,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     max_memory = 40
     pool_processes = min(32, int(max_memory * 1024 * 1024 * 1024 / total_size) if total_size > 0 else 1)
     print(f"使用 {pool_processes} 个进程。")
-    batch_size = 1000
+    batch_size = 500
     prev_overall_best = overall_best
     global_no_improve_count = 0
     single_generations_count = int(generations / len(get_fitness_list))  # 实际为 generations
