@@ -908,7 +908,20 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                                    restart_similarity_threshold=10):
     """
     利用遗传算法和岛屿模型搜索净利率高的 (长信号, 短信号) 组合，支持断点续跑。
+    优化内容：
+      1. 在每个岛屿评估后保存适应度信息到字段 "population_with_fitness"（以及可选的 "sorted_fitness"）。
+      2. 在迁移阶段直接利用这些已保存评估数据进行排序，无需重复回测。
+      3. 详细记录各阶段耗时日志，但只有当耗时大于 1 秒时才打印，以便找到异常耗时的阶段。
     """
+
+    # 辅助函数：当耗时超过 threshold 秒时打印日志
+    def log_if_slow(label, delta, gen, idx=None, threshold=1.0):
+        if delta > threshold:
+            if idx is not None:
+                print(f"[GEN {gen}][岛 {idx}] {label}耗时: {delta:.2f} 秒")
+            else:
+                print(f"[GEN {gen}] {label}耗时: {delta:.2f} 秒")
+
     checkpoint_dir = "temp"
     os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -926,9 +939,8 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     # 重置候选信号为预计算结果的 key
     candidate_long_signals = list(GLOBAL_SIGNALS.keys())
     candidate_short_signals = list(GLOBAL_SIGNALS.keys())
-    # 使用布隆过滤器记录已生成的个体，预估最大数为 2400 * 100000，错误率 0.01
-    global_generated_individuals = None
 
+    global_generated_individuals = None
     checkpoint_file = os.path.join(checkpoint_dir, f"{key_name}_ga_checkpoint.pkl")
     if os.path.exists(checkpoint_file):
         try:
@@ -966,8 +978,8 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     island_pop_size = population_size // islands_count
     if not islands:
         for _ in range(islands_count):
-            pop = get_unique_candidate(candidate_long_signals, candidate_short_signals, global_generated_individuals,
-                                       [], island_pop_size)
+            pop = get_unique_candidate(candidate_long_signals, candidate_short_signals,
+                                       global_generated_individuals, [], island_pop_size)
             island_state = {
                 "population": pop,
                 "best_candidate": None,
@@ -990,49 +1002,77 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     fitness_index = 0
     pre_fitness_index = 0
     partial_eval = partial(evaluate_candidate_batch, fitness_func=get_fitness_list[fitness_index])
-    print(
-        f"开始搜索，总代数: {generations}，每代种群大小: {population_size}，岛屿数量: {islands_count}，适应度函数个数: {len(get_fitness_list)} single_generations_count: {single_generations_count}")
+    print(f"开始搜索，总代数: {generations}，每代种群大小: {population_size}，岛屿数量: {islands_count}，适应度函数个数: {len(get_fitness_list)}。")
 
     with multiprocessing.Pool(processes=pool_processes, initializer=init_worker_ga,
                               initargs=(GLOBAL_SIGNALS, df)) as pool:
         for gen in range(start_gen, generations):
-            start_time = time.time()
+            gen_start_time = time.time()
+            print(f"\n========== 开始第 {gen} 代搜索 ==========")
             island_stats_list = []
-            print(
-                f"\n========== 第 {gen} 代搜索，适应度函数: {get_fitness_list[fitness_index].func.__name__} ==========")
             for idx, island in enumerate(islands):
+                island_start_time = time.time()
+                print(f"\n[GEN {gen}][岛 {idx}] 开始处理，当前种群大小: {len(island['population'])}")
+
+                # -- 评估阶段 --
+                eval_start_time = time.time()
                 pop = island["population"]
-                print(f"岛 {idx} 进化开始，overall_best 在种群中: {overall_best in pop}，种群大小: {len(pop)}")
                 pop_batches = [pop[i:i + batch_size] for i in range(0, len(pop), batch_size)]
                 results_batches = pool.map(partial_eval, pop_batches)
-                # 用布隆过滤器逐个添加
+                # 将当前个体逐个添加至全局布隆过滤器
                 for candidate in pop:
                     global_generated_individuals.add(candidate)
                 fitness_results = [item for batch in results_batches for item in batch]
+                eval_end_time = time.time()
+                log_if_slow("评估", eval_end_time - eval_start_time, gen, idx)
+
                 if not fitness_results:
                     continue
+
+                # 保存本次评估的适应度-个体配对信息
+                island["population_with_fitness"] = fitness_results
                 island["sorted_fitness"] = sorted([fr[0] for fr in fitness_results], reverse=True)
                 island_stats_list.extend([stat for (_, _, stat) in fitness_results if stat is not None])
                 island_best = max(fitness_results, key=lambda x: x[0])
                 current_best_fitness = island_best[0]
+
+                # -- 更新岛屿最优与无改进计数 --
+                update_start = time.time()
                 if current_best_fitness > island["best_fitness"]:
                     island["best_fitness"] = current_best_fitness
                     island["best_candidate"] = island_best[1]
                     island["no_improve_count"] = 0
                 else:
                     island["no_improve_count"] += 1
+                update_end = time.time()
+                log_if_slow("更新最优与无改进计数", update_end - update_start, gen, idx)
+
+                # -- 自适应调整变异率 --
+                adapt_start = time.time()
                 if island["no_improve_count"] >= no_improvement_threshold:
                     island["adaptive_mutation_rate"] = min(1, island["adaptive_mutation_rate"] + 0.05)
-                    print(
-                        f"岛 {idx} 连续 {island['no_improve_count']} 代无改进，变异率升至 {island['adaptive_mutation_rate']:.2f}")
+                    if island["adaptive_mutation_rate"] > mutation_rate:
+                        # 即使变异率有调整，也只有当调整阶段耗时异常时才打印
+                        pass
                 else:
                     island["adaptive_mutation_rate"] = max(mutation_rate, island["adaptive_mutation_rate"] - 0.01)
+                adapt_end = time.time()
+                log_if_slow("适应变异率调整", adapt_end - adapt_start, gen, idx)
+
+                # -- 选择、交叉、变异及后续处理阶段 --
+                process_start = time.time()
                 elite_count = max(1, int(elite_fraction * island_pop_size))
                 sorted_pop = [ind for _, ind, _ in sorted(fitness_results, key=lambda x: x[0], reverse=True)]
                 elites = sorted_pop[:elite_count]
                 pop_fitness = [fr[0] for fr in fitness_results]
+
+                selection_start = time.time()
                 selected_population = tournament_selection(pop, pop_fitness, tournament_size=3, selection_pressure=0.75)
+                selection_end = time.time()
+                log_if_slow("选择", selection_end - selection_start, gen, idx)
+
                 next_population = []
+                crossover_start = time.time()
                 for i in range(0, len(selected_population) - 1, 2):
                     parent1 = selected_population[i]
                     parent2 = selected_population[i + 1]
@@ -1040,48 +1080,71 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                     next_population.extend([child1, child2])
                 if len(selected_population) % 2 == 1:
                     next_population.append(selected_population[-1])
+                crossover_end = time.time()
+                log_if_slow("交叉", crossover_end - crossover_start, gen, idx)
+
+                mutation_start = time.time()
                 mutated_population = [
                     mutate(ind, island["adaptive_mutation_rate"], candidate_long_signals, candidate_short_signals)
                     for ind in next_population]
+                mutation_end = time.time()
+                log_if_slow("变异", mutation_end - mutation_start, gen, idx)
+
+                diversity_start = time.time()
                 diversity_count = max(1, int((0.1 + 0.05 * island["no_improve_count"]) * island_pop_size))
                 for _ in range(diversity_count):
-                    new_candidate = \
-                    get_unique_candidate(candidate_long_signals, candidate_short_signals, global_generated_individuals,
-                                         [], 1)[0]
+                    new_candidate = get_unique_candidate(candidate_long_signals, candidate_short_signals,
+                                                         global_generated_individuals, [], 1)[0]
                     replace_index = random.randint(0, len(mutated_population) - 1)
                     mutated_population[replace_index] = new_candidate
+                diversity_end = time.time()
+                log_if_slow("多样性补充", diversity_end - diversity_start, gen, idx)
+
+                filter_start = time.time()
                 mutated_population = filter_existing_individuals(mutated_population, global_generated_individuals)
+                filter_end = time.time()
+                log_if_slow("过滤重复个体", filter_end - filter_start, gen, idx)
+
                 unique_population = list({ind: None for ind in elites + mutated_population}.keys())
                 unique_population = get_unique_candidate(candidate_long_signals, candidate_short_signals,
                                                          global_generated_individuals, unique_population,
                                                          island_pop_size)
                 if island["no_improve_count"] >= restart_threshold:
-                    print(f"岛 {idx} 连续 {restart_threshold} 代无改进，执行局部重启。")
+                    print(f"[GEN {gen}][岛 {idx}] 连续 {restart_threshold} 代无改进，执行局部重启。")
+                    restart_start = time.time()
                     new_population_count = int(0.5 * island_pop_size)
                     random_candidates = get_unique_candidate(candidate_long_signals, candidate_short_signals,
                                                              global_generated_individuals, [], new_population_count)
                     unique_population = list(
-                        {ind: None for ind in elites + mutated_population + random_candidates}.keys())[:island_pop_size]
+                        {ind: None for ind in elites + mutated_population + random_candidates}.keys()
+                    )[:island_pop_size]
                     island["no_improve_count"] = 0
                     island["adaptive_mutation_rate"] = mutation_rate
+                    restart_end = time.time()
+                    log_if_slow("局部重启", restart_end - restart_start, gen, idx)
                 else:
                     unique_population = unique_population[:island_pop_size]
+                process_end = time.time()
+                log_if_slow("选择、交叉、变异及局部重启", process_end - process_start, gen, idx)
+
                 island["population"] = unique_population
-                print(f"岛 {idx} 第 {gen} 代最优: {island['best_candidate']}，适应度: {island['best_fitness']}")
-            # restart_similarity_threshold = max(5, abs(overall_best_fitness * 0.1))
-            # print(f"重启相似度阈值: {restart_similarity_threshold:.2f}")
+                island_elapsed_time = time.time() - island_start_time
+                log_if_slow("整个岛屿处理", island_elapsed_time, gen, idx)
+                print(f"[GEN {gen}][岛 {idx}] 当前代最优: {island['best_candidate']}，适应度: {island['best_fitness']}")
+
+            # -- 岛屿间对比及局部重启策略 --
+            pairwise_start = time.time()
             for i in range(len(islands)):
                 for j in range(i + 1, len(islands)):
                     if "sorted_fitness" in islands[i] and "sorted_fitness" in islands[j]:
                         sorted_fit1 = islands[i]["sorted_fitness"]
                         sorted_fit2 = islands[j]["sorted_fitness"]
                         n = len(sorted_fit1) // 2
-                        sim = sum(abs(a - b) for a, b in zip(sorted_fit1[:n], sorted_fit2[:n])) / n if n > 0 else float(
-                            'inf')
-                        print(f"岛 {i} 与岛 {j} 前50%个体相似度: {sim:.4f}")
+                        sim = sum(abs(a - b) for a, b in zip(sorted_fit1[:n], sorted_fit2[:n])) / n if n > 0 else float('inf')
+                        print(f"[GEN {gen}] 岛 {i} 与岛 {j} 前50%个体相似度: {sim:.4f}")
                         if sim < restart_similarity_threshold:
                             restart_idx = i if islands[i]["best_fitness"] < islands[j]["best_fitness"] else j
-                            print(f"岛 {restart_idx} 适应度较低且过于相似，执行重启。")
+                            print(f"[GEN {gen}] 岛 {restart_idx} 适应度较低且过于相似，执行重启。")
                             new_population = get_unique_candidate(candidate_long_signals, candidate_short_signals,
                                                                   global_generated_individuals, [], island_pop_size)
                             islands[restart_idx]["population"] = new_population
@@ -1090,18 +1153,28 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                             islands[restart_idx]["no_improve_count"] = 0
                             islands[restart_idx]["adaptive_mutation_rate"] = mutation_rate
                             islands[restart_idx].pop("sorted_fitness", None)
+            pairwise_end = time.time()
+            log_if_slow("岛屿对比及局部重启", pairwise_end - pairwise_start, gen)
+
+            # -- 更新全局最优 --
+            update_global_start = time.time()
             for island in islands:
                 if island["best_fitness"] > overall_best_fitness:
                     overall_best_fitness = island["best_fitness"]
                     overall_best = island["best_candidate"]
-            elapsed_gen = time.time() - start_time
+            update_global_end = time.time()
+            log_if_slow("更新全局最优", update_global_end - update_global_start, gen)
+
+            gen_elapsed_time = time.time() - gen_start_time
             if prev_overall_best is not None and overall_best == prev_overall_best:
                 global_no_improve_count += 1
             else:
                 global_no_improve_count = 0
             prev_overall_best = overall_best
-            print(
-                f"第 {gen} 代全局最优: {overall_best}，适应度: {overall_best_fitness}，耗时: {elapsed_gen:.2f} 秒。连续无改进: {global_no_improve_count}，评估组合数: {len(global_generated_individuals)}")
+            log_if_slow("全代总耗时", gen_elapsed_time, gen)
+            print(f"[GEN {gen}] 全局最优: {overall_best}，适应度: {overall_best_fitness}，连续无改进: {global_no_improve_count}")
+
+            # -- 判断是否需要切换适应度函数或执行全局重启 --
             need_restart = False
             fitness_index = gen // single_generations_count
             if fitness_index != pre_fitness_index:
@@ -1109,9 +1182,10 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                 pre_fitness_index = fitness_index
                 need_restart = True
             if global_no_improve_count >= 10 or need_restart:
+                restart_global_start = time.time()
                 overall_best_fitness = -1e9
                 overall_best = None
-                print(f"连续 {global_no_improve_count} 代无改进，进行全局重启。")
+                print(f"[GEN {gen}] 连续 {global_no_improve_count} 代无改进，进行全局重启。")
                 for island in islands:
                     new_population = get_unique_candidate(candidate_long_signals, candidate_short_signals,
                                                           global_generated_individuals, [], island_pop_size)
@@ -1121,39 +1195,48 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                     island["no_improve_count"] = 0
                     island["adaptive_mutation_rate"] = mutation_rate
                 global_no_improve_count = 0
+                restart_global_end = time.time()
+                log_if_slow("全局重启", restart_global_end - restart_global_start, gen)
+
+            # -- 迁移阶段 --
             if (gen + 1) % migration_interval == 0:
-                print("岛屿间进行迁移...")
-                for i in range(islands_count):
-                    target_idx = (i + 1) % islands_count
-                    source_island = islands[i]
+                migration_start_time = time.time()
+                print(f"[GEN {gen}] 开始岛屿迁移阶段...")
+                migration_num = max(1, int(migration_rate * island_pop_size))
+                for source_idx in range(islands_count):
+                    target_idx = (source_idx + 1) % islands_count
+                    source_island = islands[source_idx]
                     target_island = islands[target_idx]
-                    src_batches = [source_island["population"][j:j + batch_size] for j in
-                                   range(0, len(source_island["population"]), batch_size)]
-                    src_results = pool.map(partial_eval, src_batches)
-                    src_fitness_results = [item for batch in src_results for item in batch]
-                    tgt_batches = [target_island["population"][j:j + batch_size] for j in
-                                   range(0, len(target_island["population"]), batch_size)]
-                    tgt_results = pool.map(partial_eval, tgt_batches)
-                    tgt_fitness_results = [item for batch in tgt_results for item in batch]
-                    if not src_fitness_results or not tgt_fitness_results:
+                    if "population_with_fitness" not in source_island or "population_with_fitness" not in target_island:
+                        print(f"[GEN {gen}] 岛 {source_idx} 或岛 {target_idx} 缺少评估数据，本次迁移跳过。")
                         continue
-                    sorted_src = sorted(src_fitness_results, key=lambda x: x[0], reverse=True)
-                    sorted_tgt = sorted(tgt_fitness_results, key=lambda x: x[0])
-                    migration_num = max(1, int(migration_rate * island_pop_size))
+                    src_results = source_island["population_with_fitness"]
+                    tgt_results = target_island["population_with_fitness"]
+                    sorted_src = sorted(src_results, key=lambda x: x[0], reverse=True)
+                    sorted_tgt = sorted(tgt_results, key=lambda x: x[0])
                     emigrants = [ind for (fit, ind, _) in sorted_src[:migration_num]]
-                    worst_tgt = {ind for (fit, ind, _) in sorted_tgt[:migration_num]}
-                    new_target_population = [ind for ind in target_island["population"] if ind not in worst_tgt]
+                    worst_tgt_set = {ind for (fit, ind, _) in sorted_tgt[:migration_num]}
+                    new_target_population = [ind for ind in target_island["population"] if ind not in worst_tgt_set]
                     new_target_population.extend(emigrants)
-                    new_target_population = get_unique_candidate(candidate_long_signals, candidate_short_signals,
-                                                                 global_generated_individuals, new_target_population,
-                                                                 island_pop_size)
+                    new_target_population = get_unique_candidate(
+                        candidate_long_signals, candidate_short_signals,
+                        global_generated_individuals, new_target_population,
+                        island_pop_size
+                    )
                     target_island["population"] = new_target_population[:island_pop_size]
-                    print(f"岛 {i} 向岛 {target_idx} 迁移 {migration_num} 个个体。")
+                    print(f"[GEN {gen}] 岛 {source_idx} 向岛 {target_idx} 迁移 {migration_num} 个个体。")
+                migration_end_time = time.time()
+                log_if_slow("迁移阶段", migration_end_time - migration_start_time, gen)
+
+            # -- 保存统计信息和检查点 --
             if island_stats_list:
+                stats_save_start = time.time()
                 df_stats = pd.DataFrame(island_stats_list).drop_duplicates(subset=["kai_column", "pin_column"])
                 file_name = os.path.join(checkpoint_dir, f"{key_name}_{gen}_stats.parquet")
                 df_stats.to_parquet(file_name, index=False, compression='snappy')
-                print(f"保存第 {gen} 代统计信息，去重后长度 {df_stats.shape[0]}")
+                stats_save_end = time.time()
+                log_if_slow("保存统计信息", stats_save_end - stats_save_start, gen)
+                print(f"[GEN {gen}] 保存统计信息，记录数: {df_stats.shape[0]}")
             all_history.append({
                 "generation": gen,
                 "islands": islands,
@@ -1162,12 +1245,15 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
             })
             if (gen + 1) % 100 == 0:
                 try:
+                    checkpoint_start = time.time()
                     with open(checkpoint_file, "wb") as f:
                         pickle.dump((gen + 1, islands, overall_best, overall_best_fitness, all_history,
                                      global_generated_individuals), f)
-                    print(f"第 {gen} 代 checkpoint 已保存。")
+                    checkpoint_end = time.time()
+                    log_if_slow("保存 checkpoint", checkpoint_end - checkpoint_start, gen)
+                    print(f"[GEN {gen}] 第 {gen} 代 checkpoint 已保存。")
                 except Exception as e:
-                    print(f"保存 checkpoint 时出错：{e}")
+                    print(f"[GEN {gen}] 保存 checkpoint 时出错：{e}")
     print(f"\n遗传算法结束，全局最优: {overall_best}，净利率: {overall_best_fitness}")
     return overall_best, overall_best_fitness, all_history
 
