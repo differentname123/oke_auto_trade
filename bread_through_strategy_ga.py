@@ -789,7 +789,7 @@ def get_fitness(stat, key, invert=False):
     max_loss = stat.get("max_consecutive_loss", -10000)
     net_profit_rate = stat.get("net_profit_rate", -10000)
     trade_count = stat.get("kai_count", 0)
-    if max_loss < -20 or net_profit_rate < 50 or trade_count < 50:
+    if max_loss < -10 or net_profit_rate < 50 or trade_count < 50:
         return -10000
     hold_time_mean = stat.get("hold_time_mean", 0)
     true_profit_mean = stat.get("avg_profit_rate", 0)
@@ -938,14 +938,14 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                     start_gen, islands, overall_best, overall_best_fitness, all_history, loaded_gi = checkpoint_data
                     # 如果之前保存的是 set，则转换成 BloomFilter
                     if isinstance(loaded_gi, set):
-                        global_generated_individuals = BloomFilter(2400 * 100000, 0.01)
+                        global_generated_individuals = BloomFilter(generations * population_size, 0.01)
                         for cand in loaded_gi:
                             global_generated_individuals.add(cand)
                     else:
                         global_generated_individuals = loaded_gi
                 else:
                     start_gen, islands, overall_best, overall_best_fitness, all_history = checkpoint_data
-                    global_generated_individuals = BloomFilter(2400 * 100000, 0.01)
+                    global_generated_individuals = BloomFilter(generations * population_size, 0.01)
             print(f"加载断点，恢复至第 {start_gen} 代。全局最优: {overall_best}，净利率: {overall_best_fitness}")
         except Exception as e:
             print(f"加载断点失败：{e}，从头开始。")
@@ -954,14 +954,14 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
             overall_best = None
             overall_best_fitness = -1e9
             all_history = []
-            global_generated_individuals = BloomFilter(2400 * 100000, 0.01)
+            global_generated_individuals = BloomFilter(generations * population_size, 0.01)
     else:
         start_gen = 0
         islands = []
         overall_best = None
         overall_best_fitness = -1e9
         all_history = []
-        global_generated_individuals = BloomFilter(2400 * 100000, 0.01)
+        global_generated_individuals = BloomFilter(generations * population_size, 0.01)
 
     island_pop_size = population_size // islands_count
     if not islands:
