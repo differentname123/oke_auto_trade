@@ -680,7 +680,7 @@ def validation(market_data_file):
             print(f"进程数限制为 {pool_processes}，根据内存限制调整。")
 
             # 定义每个批次处理的 pair 数量
-            BATCH_SIZE = 5000000
+            BATCH_SIZE = 1000000
             total_pairs = len(pairs)
             total_batches = (total_pairs - 1) // BATCH_SIZE + 1
 
@@ -701,9 +701,8 @@ def validation(market_data_file):
                 # 合并所有统计字典为 DataFrame 并保存到文件
                 stats_list = [r[2] for r in results_filtered]
                 stats_df = pd.DataFrame(stats_list)
-                output_file = os.path.join("temp_back",
-                                           f"{stat_df_base_name}_{base_name}statistic_results_{batch_index}.csv")
-                stats_df.to_csv(output_file, index=False)
+                output_file = os.path.join("temp_back",f"{stat_df_base_name}_{base_name}statistic_results_{batch_index}.parquet")
+                stats_df.to_parquet(output_file, index=False, compression='snappy')
                 print(f"Batch {batch_index + 1} 统计结果已保存到 {output_file}")
 
         except Exception as e:
