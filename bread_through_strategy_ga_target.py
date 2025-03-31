@@ -924,11 +924,13 @@ def target_all(market_data_file):
 if __name__ == "__main__":
     start_time = time.time()
     data_path_list = [
-        "kline_data/origin_data_1m_110000_SOL-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_110000_BTC-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_110000_BTC-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_110000_ETH-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000_BTC-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_110000_SOL-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000_SOL-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_10000_BTC-USDT-SWAP.csv",
+
+
         # "kline_data/origin_data_1m_10000_ETH-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_110000_TON-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_10000_TON-USDT-SWAP.csv",

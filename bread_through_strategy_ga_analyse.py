@@ -350,45 +350,34 @@ def main(n_bins=50, batch_size=10):
 
     for inst_id in inst_id_list:
         print(f"\n【处理数据】：开始处理 {inst_id}")
-        data_file = f'temp/final_good_{inst_id}_false.csv'
-        data_df = pd.read_csv(data_file)
+        data_file = f'temp/final_good_{inst_id}_false_short.parquet'
+        data_df = pd.read_parquet(data_file)
         data_df = data_df[(data_df['kai_count_new'] > 0)]
-        data_df = auto_reduce_precision(data_df)
 
         # 获取所有数值型特征，排除 'timestamp', 'net_profit_rate_new' 以及包含 'new' 的特征
         all_numeric_columns = data_df.select_dtypes(include=np.number).columns.tolist()
         orig_feature_cols = [col for col in all_numeric_columns
                              if col not in ['timestamp', 'net_profit_rate_new'] and 'new' not in col]
 
-        # 将原始特征转换为 numpy 数组（float32）
+        # 将原始特征转换为 numpy 数组（float32），目标变量数组
         orig_values = data_df[orig_feature_cols].to_numpy(dtype=np.float32)
         target_values = data_df['net_profit_rate_new'].values
         num_features = orig_values.shape[1]
 
         all_bin_analyses = []
 
-        # --- 原始特征逐批处理 ---
+        # --- 原始特征逐批处理（取消外层多进程，顺序调用）---
         print("【提示】：开始处理原始特征批次...")
         orig_feature_data = {feature: data_df[feature].values for feature in orig_feature_cols}
-        # 利用多进程（批次数量通常较少，可以并行加速）
-        with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
-            orig_futures = []
-            orig_batch_ids = []
-            for i in range(0, len(orig_feature_cols), batch_size):
-                batch_features = orig_feature_cols[i:i + batch_size]
-                batch_feature_data = {feature: orig_feature_data[feature] for feature in batch_features}
-                batch_id = i // batch_size + 1
-                print(f"【原始批次】：提交批次 {batch_id}，处理特征数：{len(batch_features)}")
-                orig_futures.append(
-                    executor.submit(process_feature_batch, batch_features, batch_feature_data, target_values, n_bins))
-                orig_batch_ids.append(batch_id)
-            batch_no = 0
-            for future in concurrent.futures.as_completed(orig_futures):
-                batch_no += 1
-                batch_results = future.result()
-                if batch_results:
-                    all_bin_analyses.extend(batch_results)
-                print(f"【原始批次】：已完成 {batch_no} / {len(orig_futures)} 批次")
+        total_batches = (len(orig_feature_cols) + batch_size - 1) // batch_size
+        for batch_id, i in enumerate(range(0, len(orig_feature_cols), batch_size), start=1):
+            batch_features = orig_feature_cols[i:i + batch_size]
+            batch_feature_data = {feature: orig_feature_data[feature] for feature in batch_features}
+            print(f"【原始批次】：处理批次 {batch_id}/{total_batches}，处理特征数：{len(batch_features)}")
+            batch_results = process_feature_batch(batch_features, batch_feature_data, target_values, n_bins)
+            if batch_results:
+                all_bin_analyses.extend(batch_results)
+            print(f"【原始批次】：已完成 {batch_id} / {total_batches} 批次")
         print("【原始批次】：所有原始特征批次完成")
 
         # # --- 派生（交叉）特征逐批处理 ---
@@ -456,10 +445,10 @@ def main(n_bins=50, batch_size=10):
         #
         # print(f"{inst_id}【提示】：原始批次与派生批次全部处理完成，共计派生特征数: {derived_total_count}")
 
-        # 合并所有结果并保存
+
         if all_bin_analyses:
             combined_bin_analysis_df = pd.concat(all_bin_analyses, ignore_index=True)
-            combined_csv_file = os.path.join(images_dir, f"combined_bin_analysis_{inst_id}_false.csv")
+            combined_csv_file = os.path.join(images_dir, f"combined_bin_analysis_{inst_id}_false_short.csv")
             combined_bin_analysis_df.to_csv(combined_csv_file, index=False)
             print(f"【提示】：合并后的 bin_analysis 已保存为 CSV 文件：{combined_csv_file}")
         else:
