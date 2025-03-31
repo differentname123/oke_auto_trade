@@ -342,6 +342,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         statistic_dict = {
             "kai_column": kai_column,
             "pin_column": pin_column,
+            'kai_count':trade_count,
             "hold_time_mean": 0,
             "max_hold_time": 0,
             "hold_time_std": 0,
@@ -398,6 +399,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     statistic_dict = {
         "kai_column": kai_column,
         "pin_column": pin_column,
+        'kai_count': trade_count,
         "hold_time_mean": hold_time_mean,
         "max_hold_time": max_hold_time,
         "hold_time_std": hold_time_std,
@@ -615,19 +617,26 @@ def validation(market_data_file):
             print(f"进程数限制为 {pool_processes}，根据内存限制调整。")
 
             # 定义每个批次处理的 pair 数量
-            BATCH_SIZE = 1000000000
+            BATCH_SIZE = 10000000
             total_pairs = len(pairs)
             total_batches = (total_pairs - 1) // BATCH_SIZE + 1
 
+            # 用于存储每个批次产出的结果文件路径，用于后续合并
+            batch_output_files = []
+
             for batch_index, start_idx in enumerate(range(0, total_pairs, BATCH_SIZE)):
+                # 获取当前时间
+                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 start_time = time.time()
-                output_file = os.path.join("temp_back",f"{stat_df_base_name}_{base_name}statistic_results_{batch_index}.parquet")
+                output_file = os.path.join("temp_back",
+                                           f"{stat_df_base_name}_{base_name}statistic_results_{batch_index}.parquet")
                 if os.path.exists(output_file):
                     print(f"{output_file} 已存在，跳过处理。")
+                    batch_output_files.append(output_file)
                     continue
                 end_idx = min(start_idx + BATCH_SIZE, total_pairs)
                 batch_pairs = pairs[start_idx:end_idx]
-                print(f"Processing batch {batch_index + 1}/{total_batches} with {len(batch_pairs)} pairs...")
+                print(f"Processing batch {batch_index + 1}/{total_batches} with {len(batch_pairs)} pairs... [{current_time}]")
 
                 with multiprocessing.Pool(processes=pool_processes,
                                           initializer=init_worker_with_signals,
@@ -642,7 +651,25 @@ def validation(market_data_file):
                 stats_list = [r[2] for r in results_filtered]
                 stats_df = pd.DataFrame(stats_list)
                 stats_df.to_parquet(output_file, index=False, compression='snappy')
+                batch_output_files.append(output_file)
                 print(f"Batch {batch_index + 1} 统计结果已保存到 {output_file} (共 {stats_df.shape[0]} 行) 耗时 {time.time() - start_time:.2f} 秒。")
+
+            # 合并所有批次的结果文件并保存最终结果
+            merged_dfs = []
+            for file in batch_output_files:
+                if os.path.exists(file):
+                    print(f"正在加载批次文件: {file}")
+                    batch_df = pd.read_parquet(file)
+                    merged_dfs.append(batch_df)
+                else:
+                    print(f"文件 {file} 不存在，跳过加载。")
+            if merged_dfs:
+                merged_df = pd.concat(merged_dfs, ignore_index=True)
+                final_output_file = os.path.join("temp_back", f"{stat_df_base_name}_{base_name}statistic_results_final.parquet")
+                merged_df.to_parquet(final_output_file, index=False, compression='snappy')
+                print(f"所有批次结果已合并，并保存到 {final_output_file} (共 {merged_df.shape[0]} 行)。")
+            else:
+                print("没有找到任何批次结果文件，无法合并。")
 
         except Exception as e:
             print(f"处理 {stat_df_file} 时出错：{e}")
