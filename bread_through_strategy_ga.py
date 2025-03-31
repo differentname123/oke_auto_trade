@@ -1010,7 +1010,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     elite_fraction = 0.05
     no_improvement_threshold = 3
     restart_threshold = 5
-    max_memory = 40
+    max_memory = 45
     pool_processes = min(32, int(max_memory * 1024 * 1024 * 1024 / total_size) if total_size > 0 else 1)
     print(f"使用 {pool_processes} 个进程。")
     batch_size = 500

@@ -281,7 +281,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     kai_column, pin_column, hold_time_mean, max_hold_time, hold_time_std,
     loss_rate, net_profit_rate, fix_profit, avg_profit_rate, same_count
     返回值为 (kai_data_df, statistic_dict)。
-    若交易信号不足或数据不满足过滤条件，则返回 (None, None)。
+    当交易信号数为 0 时，返回的统计信息各项值均为 0，而不是返回 None。
     """
     # 注意：需要保证 GLOBAL_SIGNALS, op_signal 和 safe_round 已经在其他地方定义好。
     global GLOBAL_SIGNALS
@@ -293,7 +293,20 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         result_kai = op_signal(df, kai_column)
         result_pin = op_signal(df, pin_column)
         if result_kai is None or result_pin is None:
-            return None, None
+            # 即使获取不到信号，也返回统计信息为 0
+            statistic_dict = {
+                "kai_column": kai_column,
+                "pin_column": pin_column,
+                "hold_time_mean": 0,
+                "max_hold_time": 0,
+                "hold_time_std": 0,
+                "loss_rate": 0,
+                "net_profit_rate": 0,
+                "fix_profit": 0,
+                "avg_profit_rate": 0,
+                "same_count": 0
+            }
+            return df.iloc[[]].copy(), statistic_dict
         kai_idx, kai_prices = result_kai
         pin_idx, pin_prices = result_pin
 
@@ -326,7 +339,19 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
 
     trade_count = len(kai_data_df)
     if trade_count == 0:
-        return None, None
+        statistic_dict = {
+            "kai_column": kai_column,
+            "pin_column": pin_column,
+            "hold_time_mean": 0,
+            "max_hold_time": 0,
+            "hold_time_std": 0,
+            "loss_rate": 0,
+            "net_profit_rate": 0,
+            "fix_profit": 0,
+            "avg_profit_rate": 0,
+            "same_count": len(common_index)
+        }
+        return kai_data_df, statistic_dict
 
     # 若存在价格修正，则对交易价格进行映射
     pin_price_map = kai_data_df.set_index("pin_time")["pin_price"]
@@ -340,30 +365,30 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     else:
         is_long = "long" in kai_column.lower()
 
-    # 计算收益率（含交易成本0.07）
+    # 计算收益率（含交易成本 0.07）
     if is_long:
         profit_series = ((kai_data_df["pin_price"] - kai_data_df["kai_price"]) /
                          kai_data_df["kai_price"] * 100).round(4)
     else:
         profit_series = ((kai_data_df["kai_price"] - kai_data_df["pin_price"]) /
                          kai_data_df["kai_price"] * 100).round(4)
-    # true_profit 扣除交易成本
+    # true_profit 扣除固定交易成本
     kai_data_df["true_profit"] = profit_series - 0.07
 
-    # fix_profit: 仅对经过价格修正的交易进行累计计算（mapped_prices 不为 NaN 的部分）
+    # fix_profit: 累积经过价格修正的交易收益
     fix_profit = safe_round(kai_data_df[mapped_prices.notna()]["true_profit"].sum(), ndigits=4)
-    # net_profit_rate：所有 true_profit 累计后扣除 fix_profit
+    # net_profit_rate：所有 true_profit 累计减去 fix_profit
     net_profit_rate = kai_data_df["true_profit"].sum() - fix_profit
 
-    # 计算 avg_profit_rate：所有 true_profit 的均值 * 100（若没有交易则为0）
-    avg_profit_rate = safe_round(kai_data_df["true_profit"].mean() * 100 if trade_count else 0, 4)
+    # 计算 avg_profit_rate：所有 true_profit 均值乘以 100
+    avg_profit_rate = safe_round(kai_data_df["true_profit"].mean() * 100, 4)
 
     # 计算持仓时间指标
-    hold_time_mean = kai_data_df["hold_time"].mean() if trade_count else 0
-    max_hold_time = kai_data_df["hold_time"].max() if trade_count else 0
-    hold_time_std = kai_data_df["hold_time"].std() if trade_count else 0
+    hold_time_mean = kai_data_df["hold_time"].mean()
+    max_hold_time = kai_data_df["hold_time"].max()
+    hold_time_std = kai_data_df["hold_time"].std()
 
-    # 计算 loss_rate：亏损的交易比例（true_profit < 0）
+    # 计算 loss_rate：亏损交易比例（true_profit < 0）
     loss_count = (kai_data_df["true_profit"] < 0).sum()
     loss_rate = loss_count / trade_count
 
@@ -590,7 +615,7 @@ def validation(market_data_file):
             print(f"进程数限制为 {pool_processes}，根据内存限制调整。")
 
             # 定义每个批次处理的 pair 数量
-            BATCH_SIZE = 10000000
+            BATCH_SIZE = 1000000000
             total_pairs = len(pairs)
             total_batches = (total_pairs - 1) // BATCH_SIZE + 1
 
