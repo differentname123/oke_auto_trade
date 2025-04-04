@@ -314,7 +314,7 @@ def auto_reduce_precision(df, verbose=True):
 
 
 def debug():
-    inst_id_list = ['SOL']
+    inst_id_list = ['TON']
     df_list = []
     df_list.append(pd.read_csv(f'images/combined_bin_analysis_SOL_false_short.csv').drop_duplicates(subset=["feature"]))
     for inst_id in inst_id_list:
@@ -343,14 +343,14 @@ def main(n_bins=50, batch_size=10):
     debug()
 
     print("【主流程】：开始处理数据")
-    inst_id_list = ['SOL']
+    inst_id_list = ['ETH', 'SOL', 'TON', 'DOGE', 'XRP']
     images_dir = "images"
     if not os.path.exists(images_dir):
         os.makedirs(images_dir)
 
     for inst_id in inst_id_list:
         print(f"\n【处理数据】：开始处理 {inst_id}")
-        data_file = f'temp/final_good_{inst_id}_false_short.parquet'
+        data_file = f'temp/final_good_{inst_id}_false.parquet'
         data_df = pd.read_parquet(data_file)
         data_df = data_df[(data_df['kai_count_new'] > 0)]
 
@@ -448,7 +448,7 @@ def main(n_bins=50, batch_size=10):
 
         if all_bin_analyses:
             combined_bin_analysis_df = pd.concat(all_bin_analyses, ignore_index=True)
-            combined_csv_file = os.path.join(images_dir, f"combined_bin_analysis_{inst_id}_false_short.csv")
+            combined_csv_file = os.path.join(images_dir, f"combined_bin_analysis_{inst_id}_false.csv")
             combined_bin_analysis_df.to_csv(combined_csv_file, index=False)
             print(f"【提示】：合并后的 bin_analysis 已保存为 CSV 文件：{combined_csv_file}")
         else:
