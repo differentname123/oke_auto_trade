@@ -1,3 +1,5 @@
+import datetime
+
 import pandas as pd
 import numpy as np
 import os
@@ -1947,11 +1949,16 @@ def download_data():
     if not os.path.exists(backtest_path):
         os.makedirs(backtest_path)
     bar_list = ['1m']
+    #获取当前时间，精确到天
+    now = datetime.datetime.now()
+    # 转换为可读性格式
+    readable_time = now.strftime("%Y-%m-%d")
     max_candles_list = [10000]
+
     for max_candles in max_candles_list:
         for bar in bar_list:
             for inst_id in inst_id_list:
-                final_file_path = f'{backtest_path}/{base_file_path[:-4]}_{bar}_{max_candles}_{inst_id}.csv'
+                final_file_path = f'{backtest_path}/{base_file_path[:-4]}_{bar}_{max_candles}_{inst_id}_{readable_time}.csv'
                 # 判断文件是否存在，并且有一定的大小
                 if not is_reload and os.path.exists(final_file_path) and os.path.getsize(final_file_path) > 1024:
                     print('已经存在该文件，直接读取')

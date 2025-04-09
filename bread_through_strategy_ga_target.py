@@ -546,7 +546,10 @@ def load_or_compute_precomputed_signals(df, signals, key_name):
 def validation(market_data_file):
     base_name = os.path.basename(market_data_file)
     base_name = base_name.replace("-USDT-SWAP.csv", "").replace("origin_data_", "")
-    inst_id = base_name.split("_")[-1]
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    for inst_id in inst_id_list:
+        if inst_id in base_name:
+            continue
 
     # 2. 加载行情数据（market data），确保字段正确并转换 timestamp 字段
     df_local = pd.read_csv(market_data_file)
@@ -613,7 +616,7 @@ def validation(market_data_file):
 
             # 根据内存限制调整进程数
             max_memory = 45  # 单位：GB
-            pool_processes = min(30, int(max_memory * 1024 * 1024 * 1024 / total_size) if total_size > 0 else 1)
+            pool_processes = min(20, int(max_memory * 1024 * 1024 * 1024 / total_size) if total_size > 0 else 1)
             print(f"进程数限制为 {pool_processes}，根据内存限制调整。")
 
             # 定义每个批次处理的 pair 数量
@@ -929,17 +932,26 @@ if __name__ == "__main__":
         # "kline_data/origin_data_1m_110000_SOL-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_10000_SOL-USDT-SWAP.csv",
 
-        "kline_data/origin_data_1m_110000_ETH-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_10000_ETH-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_110000_ETH-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_10000_ETH-USDT-SWAP.csv",
+        #
+        # "kline_data/origin_data_1m_110000_TON-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_10000_TON-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_110000_DOGE-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_110000_XRP-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_110000_PEPE-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_10000_DOGE-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_10000_XRP-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_10000_PEPE-USDT-SWAP.csv",
 
-        "kline_data/origin_data_1m_110000_TON-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_10000_TON-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_110000_DOGE-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_110000_XRP-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_110000_PEPE-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_10000_DOGE-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_10000_XRP-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_10000_PEPE-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000_BTC-USDT-SWAP_2025-04-07.csv",
+        "kline_data/origin_data_1m_10000_ETH-USDT-SWAP_2025-04-07.csv",
+        "kline_data/origin_data_1m_10000_SOL-USDT-SWAP_2025-04-07.csv",
+        "kline_data/origin_data_1m_10000_TON-USDT-SWAP_2025-04-07.csv",
+        "kline_data/origin_data_1m_10000_DOGE-USDT-SWAP_2025-04-07.csv",
+        "kline_data/origin_data_1m_10000_XRP-USDT-SWAP_2025-04-07.csv",
+        "kline_data/origin_data_1m_10000_PEPE-USDT-SWAP_2025-04-07.csv",
+
 
         # "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
