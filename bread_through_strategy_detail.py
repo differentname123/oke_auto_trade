@@ -2970,7 +2970,7 @@ def debug():
     # # 取中间 20% 的数据
     # df = df.iloc[start_idx:end_idx]
 
-    df = df.head(int(1.1 * df_len))
+    df = df.head(int(0.1 * df_len))
     clusters_df = cluster_correlations(df, correlation_threshold=90)
     # 将result_df与good_df合并，以good_df为基准
     good_df = good_df.merge(clusters_df, on='index', how='left')
