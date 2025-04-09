@@ -2957,7 +2957,7 @@ def get_statistic(df, target_column):
 
 def debug():
 
-    good_df = pd.read_csv('temp/final_good.csv')
+    good_df = pd.read_parquet('temp/final_good.parquet')
     df = pd.read_csv(f'temp/df.csv')
     # 将Correlation从小到大排序
     df = df.sort_values('Correlation', ascending=True)

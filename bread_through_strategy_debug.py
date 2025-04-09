@@ -2180,8 +2180,8 @@ def compute_robust_correlation(detail_dict1, detail_dict2):
     if len(common_keys) < 3:
         return 0
 
-    x = np.array([detail_dict1[k] for k in common_keys])
-    y = np.array([detail_dict2[k] for k in common_keys])
+    x = np.array([detail_dict1[k] if detail_dict1[k] is not None else 0 for k in common_keys])
+    y = np.array([detail_dict2[k] if detail_dict2[k] is not None else 0 for k in common_keys])
 
     std_x = np.std(x)
     std_y = np.std(y)
@@ -2239,90 +2239,16 @@ def calculate_row_correlation(row1, row2, is_debug=False):
 
     如 is_debug 为 True，同时绘制出对应的曲线图以直观观察数据对比。
     """
-    profit_detail1 = row1.get("monthly_net_profit_detail", {})
-    profit_detail2 = row2.get("monthly_net_profit_detail", {})
-    trade_detail1 = row1.get("monthly_trade_count_detail", {})
-    trade_detail2 = row2.get("monthly_trade_count_detail", {})
+    target_column = "monthly_net_profit_detail"
+    profit_detail1 = row1.get(target_column, {})
+    profit_detail2 = row2.get(target_column, {})
 
     if is_debug:
         # 绘制净利润对比图及交易次数对比图
         plot_comparison_chart(profit_detail1, profit_detail2, "net_profit")
-        plot_comparison_chart(trade_detail1, trade_detail2, "kai_count")
 
     net_profit_corr = compute_robust_correlation(profit_detail1, profit_detail2)
     return net_profit_corr * 100
-    trade_count_corr = compute_robust_correlation(trade_detail1, trade_detail2)
-    combined_corr = (net_profit_corr + trade_count_corr) / 2.0
-    # 保证结果在 [-1, 1] 内
-    combined_corr = max(min(combined_corr, 1), -1)
-    # 映射到 [-100, 100] 并转换为整数
-    final_value = int(round(combined_corr * 100))
-    return final_value
-
-
-def filter_similar_rows(inst_id, sort_key, threshold=10):
-    """
-    根据相关性过滤高度相似的数据行。
-    逻辑说明：
-      1. 按照sort_key从高到低排序，并筛选出sort_key大于0.1的行；
-      2. 遍历排序后的每一行，与已经筛选出的行进行两两相关性比较；
-      3. 如果该行与已经筛选出的每一行的相关性都小于或等于threshold，
-         则将该行加入筛选结果 filtered_rows 中。
-
-    参数:
-      inst_id (str): 用于构成文件名的实例ID；
-      sort_key (str): 用于排序的键；
-      threshold (float): 相关性阈值，若相关性大于该值则认为两行过于相关，默认值为10。
-
-    返回:
-      pd.DataFrame: 筛选后的数据。
-    """
-    # 读取并预处理数据
-    df = pd.read_csv(f'temp/final_good.csv')
-    # df = df.sort_values(sort_key, ascending=False)
-    # df = df[df[sort_key] > 0.1]
-
-
-    # df = df[df['net_profit_rate'] > 50]
-    # df = df[df['hold_time_mean'] < 1000]
-    # 重置索引，并保留原始行标到 "index" 列中
-    df = df.reset_index(drop=True)
-    df = df.reset_index()  # 将原先的行号存到 "index" 列中
-
-    # 对部分需要用字典进行解析的字段进行预处理
-    df["monthly_net_profit_detail"] = df["monthly_net_profit_detail"].apply(safe_parse_dict)
-    df["monthly_trade_count_detail"] = df["monthly_trade_count_detail"].apply(safe_parse_dict)
-
-    # 转换为字典列表，保证遍历顺序与原 DataFrame 顺序一致
-    parsed_rows = df.to_dict("records")
-    filtered_rows = []
-    print(f"初始数据量：{len(df)}")
-
-    start_time = time.time()
-    i = 0
-    # 遍历每一条记录
-    for candidate in parsed_rows:
-        candidate_kai_count = candidate.get("kai_count")
-        i += 1
-        add_candidate = True
-        # 与已筛选记录进行遍历对比
-        for accepted in filtered_rows:
-            accepted_kai_count = accepted.get("kai_count")
-            corr_val = calculate_row_correlation(candidate, accepted)
-            # 如果任一相关性大于阈值，则不加入该候选记录
-            if abs(accepted_kai_count - candidate_kai_count) < 1 or corr_val > threshold:
-                add_candidate = False
-                break
-        if add_candidate:
-            filtered_rows.append(candidate)
-
-    print(f"过滤后数据量：{len(filtered_rows)}")
-    print(f"过滤耗时：{time.time() - start_time:.2f} 秒")
-
-    # 构造返回数据 DataFrame
-    filtered_df = pd.DataFrame(filtered_rows)
-    filtered_df.to_csv(f'temp/{inst_id}_filtered_data.csv', index=False)
-    return filtered_df
 
 
 PARSED_ROWS = None
@@ -2594,7 +2520,7 @@ def filtering(origin_good_df, target_column, sort_key, threshold):
     filtered_df.to_csv('temp/origin_good.csv', index=False)
     return filtered_df
 
-def gen_statistic_data(origin_good_df, threshold=99):
+def gen_statistic_data(origin_good_df, threshold=99,target_column='monthly_net_profit_detail'):
     """
     对原始 DataFrame 进行预处理：
       1. 重置索引并将原始索引保存到一列中；
@@ -2618,10 +2544,9 @@ def gen_statistic_data(origin_good_df, threshold=99):
         pass
 
     # 对指定字段进行解析
-    origin_good_df["monthly_net_profit_detail"] = origin_good_df["monthly_net_profit_detail"].apply(safe_parse_dict)
-    origin_good_df["monthly_trade_count_detail"] = origin_good_df["monthly_trade_count_detail"].apply(safe_parse_dict)
+    origin_good_df[target_column] = origin_good_df[target_column].apply(safe_parse_dict)
     print(f'待计算的数据量：{len(origin_good_df)}')
-    origin_good_df = filtering(origin_good_df, 'kai_count', 'net_profit_rate', 99)
+    origin_good_df = filtering(origin_good_df, 'kai_count', 'net_profit_rate', 60)
     print(f'过滤后的数据量：{len(origin_good_df)}')
 
     # 转换为字典列表，保持 DataFrame 内的顺序
@@ -3049,10 +2974,10 @@ def debug():
         # # good_df = good_df.sort_values(by=sort_key, ascending=True)
         # # good_df = good_df.drop_duplicates(subset=['kai_column', 'kai_side'], keep='first')
         #
-        good_df = pd.read_csv(f'temp/final_good.csv')
+        good_df = pd.read_parquet(f'temp/final_good.parquet')
         # good_df = good_df[(good_df['net_profit_rate'] > 300)]
         result, good_df, df = find_all_valid_groups(good_df, 10)
-        good_df.to_csv('temp/final_good.csv', index=False)
+        good_df.to_parquet('temp/final_good.parquet', index=False)
         # get_metrics_df(good_df)
         return
 
