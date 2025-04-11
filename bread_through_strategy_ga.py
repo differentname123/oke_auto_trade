@@ -368,7 +368,6 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         kai_data_df = kai_data_df.sort_values("timestamp").drop_duplicates("pin_time", keep="first")
 
     trade_count = len(kai_data_df)
-    total_count = len(df)
 
     pin_price_map = kai_data_df.set_index("pin_time")["pin_price"]
     mapped_prices = kai_data_df["timestamp"].map(pin_price_map)
@@ -399,17 +398,11 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         return None, None
 
     if max_loss_start_idx < len(kai_data_df) and max_loss_end_idx < len(kai_data_df):
-        max_loss_start_time = kai_data_df.iloc[max_loss_start_idx]["timestamp"]
-        max_loss_end_time = kai_data_df.iloc[max_loss_end_idx]["timestamp"]
         max_loss_hold_time = kai_data_df.index[max_loss_end_idx] - kai_data_df.index[max_loss_start_idx]
-    else:
-        max_loss_start_time = max_loss_end_time = max_loss_hold_time = None
 
     if max_loss_start_idx < len(kai_data_df) and max_loss_end_idx < len(kai_data_df):
         max_profit, max_profit_start_idx, max_profit_end_idx, profit_trade_count = calculate_max_profit_numba(
             profits_arr)
-        max_profit_start_time = kai_data_df.iloc[max_profit_start_idx]["timestamp"]
-        max_profit_end_time = kai_data_df.iloc[max_profit_end_idx]["timestamp"]
         max_profit_hold_time = kai_data_df.index[max_profit_end_idx] - kai_data_df.index[max_profit_start_idx]
     else:
         max_profit, max_profit_start_time, max_profit_end_time, max_profit_hold_time = None, None, None, None
@@ -425,12 +418,8 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     profit_time = profit_df["hold_time"].sum() if not profit_df.empty else 0
     loss_time_rate = (loss_time / (loss_time + profit_time)) if (loss_time + profit_time) else 0
 
-    trade_rate = (100 * trade_count / total_count) if total_count else 0
     hold_time_mean = kai_data_df["hold_time"].mean() if trade_count else 0
     max_hold_time = kai_data_df["hold_time"].max() if trade_count else 0
-
-    # if hold_time_mean > 2000 or true_profit_mean < 10:
-    #     return None, None
 
     # Monthly statistics
     monthly_groups = kai_data_df["timestamp"].dt.to_period("M")
@@ -446,7 +435,6 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     monthly_loss_rate = ((monthly_agg["sum"] < 0).sum() / active_months) if active_months else 0
 
     monthly_net_profit_detail = {str(month): round(val, 4) for month, val in monthly_agg["sum"].to_dict().items()}
-    monthly_trade_count_detail = {str(month): int(val) for month, val in monthly_agg["count"].to_dict().items()}
 
     # Weekly statistics
     weekly_groups = kai_data_df["timestamp"].dt.to_period("W")
@@ -462,7 +450,6 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     weekly_net_profit_max = weekly_agg["sum"].max() if "sum" in weekly_agg else 0
     weekly_loss_rate = ((weekly_agg["sum"] < 0).sum() / active_weeks) if active_weeks else 0
     weekly_net_profit_detail = {str(week): round(val, 4) for week, val in weekly_agg["sum"].to_dict().items()}
-    weekly_trade_count_detail = {str(week): int(val) for week, val in weekly_agg["count"].to_dict().items()}
 
     hold_time_std = kai_data_df["hold_time"].std()
 
@@ -489,12 +476,9 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         100 * len(common_index) / min(len(kai_data_df), len(pin_data_df)) if trade_count else 0, 4)
 
     statistic_dict = {
-        # "kai_side": "long" if is_long else "short",
         "kai_column": kai_column,
         "pin_column": pin_column,
         "kai_count": trade_count,
-        "total_count": total_count,
-        "trade_rate": safe_round(trade_rate, 4),
         "hold_time_mean": hold_time_mean,
         "max_hold_time": max_hold_time,
         "hold_time_std": hold_time_std,
@@ -515,13 +499,9 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         "max_consecutive_loss": safe_round(max_loss, 4),
         "max_loss_trade_count": loss_trade_count,
         "max_loss_hold_time": max_loss_hold_time,
-        # "max_loss_start_time": max_loss_start_time,
-        # "max_loss_end_time": max_loss_end_time,
         "max_consecutive_profit": safe_round(max_profit, 4) if max_profit is not None else None,
         "max_profit_trade_count": profit_trade_count if max_profit is not None else None,
         "max_profit_hold_time": max_profit_hold_time,
-        # "max_profit_start_time": max_profit_start_time,
-        # "max_profit_end_time": max_profit_end_time,
         "same_count": len(common_index),
         "same_count_rate": same_count_rate,
         "true_same_count_rate": modification_rate,
@@ -536,7 +516,6 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         "top_loss_ratio": safe_round(top_loss_ratio, 4),
         "is_reverse": is_reverse,
         "monthly_net_profit_detail": monthly_net_profit_detail,
-        "monthly_trade_count_detail": monthly_trade_count_detail,
         "weekly_trade_std": safe_round(weekly_trade_std, 4),
         "active_week_ratio": safe_round(active_week_ratio, 4),
         "weekly_loss_rate": safe_round(weekly_loss_rate, 4),
@@ -545,7 +524,6 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         "weekly_net_profit_std": safe_round(weekly_net_profit_std, 4),
         "weekly_avg_profit_std": safe_round(weekly_avg_profit_std, 4),
         "weekly_net_profit_detail": weekly_net_profit_detail,
-        "weekly_trade_count_detail": weekly_trade_count_detail
     }
     kai_data_df = kai_data_df[["hold_time", "true_profit"]]
     return kai_data_df, statistic_dict
@@ -1258,7 +1236,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                 "overall_best_candidate": overall_best,
                 "overall_best_fitness": overall_best_fitness,
             })
-            if (gen + 1) % 100 == 0:
+            if (gen + 1) % 50 == 0:
                 try:
                     data_to_save = (gen + 1, islands, overall_best, overall_best_fitness, all_history,
                                      global_generated_individuals)
@@ -1305,7 +1283,7 @@ def ga_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
     print(f"种群规模: {population_size}，信号总数: {len(all_signals)}")
     best_candidate, best_fitness, history = genetic_algorithm_optimization(
         df_local, all_signals, all_signals,
-        population_size=population_size, generations=1000,
+        population_size=population_size, generations=500,
         crossover_rate=0.9, mutation_rate=0.2,
         key_name=f'{base_name}_{key_name}',
         islands_count=4, migration_interval=10, migration_rate=0.05
@@ -1319,13 +1297,13 @@ def example():
     """
     start_time = time.time()
     data_path_list = [
-        # "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_10000000_DOGE-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_10000000_XRP-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_10000000_PEPE-USDT-SWAP.csv"
+        # "kline_data/origin_data_1m_10000000_PEPE-USDT-SWAP.csv"
     ]
     for data_path in data_path_list:
         try:

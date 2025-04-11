@@ -274,6 +274,32 @@ def op_signal(df, sig):
         return None
     return (indices.astype(np.int32), p_np[indices])
 
+def optimize_detail(detail):
+    # 缓存 pd.isna 函数以减少查找开销
+    isna = pd.isna
+
+    # 如果 detail 为 None 或 NaN，返回数组 [0]
+    if detail is None or isna(detail):
+        return np.array([0], dtype=np.float32)
+
+    # 如果 detail 是字典：按 key 中日期排序（假定 key 格式为 "YYYY-MM-DD/..."），同时替换 None/NaN
+    if isinstance(detail, dict):
+        # sorted(detail.items()) 避免多余的 dict 查询操作
+        sorted_items = sorted(detail.items(), key=lambda item: item[0].split('/')[0])
+        return np.array(
+            [val if (val is not None and not isna(val)) else 0 for _, val in sorted_items],
+            dtype=np.float32
+        )
+
+    # 如果 detail 是列表，逐个检查并替换 None 或 NaN
+    if isinstance(detail, list):
+        return np.array(
+            [val if (val is not None and not isna(val)) else 0 for val in detail],
+            dtype=np.float32
+        )
+
+    # 对其他类型的数据，返回默认数组 [0]
+    return np.array([0], dtype=np.float32)
 
 def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is_detail=False, is_reverse=False):
     """
@@ -396,6 +422,20 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     # same_count: 两个信号原始时间索引的交集数
     same_count = len(common_index)
 
+    # Weekly statistics
+    weekly_groups = kai_data_df["timestamp"].dt.to_period("W")
+    weekly_agg = kai_data_df.groupby(weekly_groups)["true_profit"].agg(["sum", "mean", "count"])
+    active_weeks = weekly_agg.shape[0]
+    total_weeks = len(
+        pd.period_range(start=kai_data_df["timestamp"].min(), end=kai_data_df["timestamp"].max(), freq='W'))
+    active_week_ratio = active_weeks / total_weeks if total_weeks else 0
+    weekly_net_profit_std = weekly_agg["sum"].std() if "sum" in weekly_agg else 0
+    weekly_avg_profit_std = weekly_agg["mean"].std() if "mean" in weekly_agg else 0
+    weekly_net_profit_min = weekly_agg["sum"].min() if "sum" in weekly_agg else 0
+    weekly_net_profit_max = weekly_agg["sum"].max() if "sum" in weekly_agg else 0
+    weekly_loss_rate = ((weekly_agg["sum"] < 0).sum() / active_weeks) if active_weeks else 0
+    weekly_net_profit_detail = {str(week): round(val, 4) for week, val in weekly_agg["sum"].to_dict().items()}
+
     statistic_dict = {
         "kai_column": kai_column,
         "pin_column": pin_column,
@@ -407,7 +447,14 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         "net_profit_rate": net_profit_rate,
         "fix_profit": fix_profit,
         "avg_profit_rate": avg_profit_rate,
-        "same_count": same_count
+        "same_count": same_count,
+        "active_week_ratio": safe_round(active_week_ratio, 4),
+        "weekly_loss_rate": safe_round(weekly_loss_rate, 4),
+        "weekly_net_profit_min": safe_round(weekly_net_profit_min, 4),
+        "weekly_net_profit_max": safe_round(weekly_net_profit_max, 4),
+        "weekly_net_profit_std": safe_round(weekly_net_profit_std, 4),
+        "weekly_avg_profit_std": safe_round(weekly_avg_profit_std, 4),
+        "weekly_net_profit_detail": optimize_detail(weekly_net_profit_detail),
     }
     return kai_data_df, statistic_dict
 
@@ -549,7 +596,7 @@ def validation(market_data_file):
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     for inst_id in inst_id_list:
         if inst_id in base_name:
-            continue
+            break
 
     # 2. 加载行情数据（market data），确保字段正确并转换 timestamp 字段
     df_local = pd.read_csv(market_data_file)
@@ -581,7 +628,7 @@ def validation(market_data_file):
     df = df_local
 
     # 注意：这里只读取需要的列： kai_column 和 pin_column
-    stat_df_file_list = [os.path.join('temp_back', f'{inst_id}_origin_good_op_all_false_temp.parquet')]
+    stat_df_file_list = [os.path.join('temp_back', f'{inst_id}_origin_good_op_all_false.parquet')]
     for stat_df_file in stat_df_file_list:
         try:
             # 1. 加载 stat_df 文件（只读取必要的两列）
@@ -615,8 +662,8 @@ def validation(market_data_file):
             del stat_df
 
             # 根据内存限制调整进程数
-            max_memory = 45  # 单位：GB
-            pool_processes = min(20, int(max_memory * 1024 * 1024 * 1024 / total_size) if total_size > 0 else 1)
+            max_memory = 50  # 单位：GB
+            pool_processes = min(30, int(max_memory * 1024 * 1024 * 1024 / total_size) if total_size > 0 else 1)
             print(f"进程数限制为 {pool_processes}，根据内存限制调整。")
 
             # 定义每个批次处理的 pair 数量
@@ -944,13 +991,16 @@ if __name__ == "__main__":
         # "kline_data/origin_data_1m_10000_XRP-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_10000_PEPE-USDT-SWAP.csv",
 
-        "kline_data/origin_data_1m_10000_BTC-USDT-SWAP_2025-04-07.csv",
-        "kline_data/origin_data_1m_10000_ETH-USDT-SWAP_2025-04-07.csv",
-        "kline_data/origin_data_1m_10000_SOL-USDT-SWAP_2025-04-07.csv",
-        "kline_data/origin_data_1m_10000_TON-USDT-SWAP_2025-04-07.csv",
-        "kline_data/origin_data_1m_10000_DOGE-USDT-SWAP_2025-04-07.csv",
-        "kline_data/origin_data_1m_10000_XRP-USDT-SWAP_2025-04-07.csv",
-        "kline_data/origin_data_1m_10000_PEPE-USDT-SWAP_2025-04-07.csv",
+        "kline_data/origin_data_1m_140000_BTC-USDT-SWAP_2025-04-10.csv",
+        "kline_data/origin_data_1m_140000_SOL-USDT-SWAP_2025-04-10.csv",
+        "kline_data/origin_data_1m_140000_ETH-USDT-SWAP_2025-04-10.csv",
+        "kline_data/origin_data_1m_140000_TON-USDT-SWAP_2025-04-10.csv",
+        # "kline_data/origin_data_1m_10000_ETH-USDT-SWAP_2025-04-07.csv",
+        # "kline_data/origin_data_1m_10000_SOL-USDT-SWAP_2025-04-07.csv",
+        # "kline_data/origin_data_1m_10000_TON-USDT-SWAP_2025-04-07.csv",
+        # "kline_data/origin_data_1m_10000_DOGE-USDT-SWAP_2025-04-07.csv",
+        # "kline_data/origin_data_1m_10000_XRP-USDT-SWAP_2025-04-07.csv",
+        # "kline_data/origin_data_1m_10000_PEPE-USDT-SWAP_2025-04-07.csv",
 
 
         # "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
