@@ -240,16 +240,16 @@ def main(n_bins=50, batch_size=10):
     """
     print("【主流程】：开始处理数据")
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
-    images_dir = "images"
+    images_dir = "temp_back"
     if not os.path.exists(images_dir):
         os.makedirs(images_dir)
 
     for inst_id in inst_id_list:
         print(f"\n【处理数据】：开始处理 {inst_id}")
-        data_file = f'temp/final_good_{inst_id}_false_2025-04-07.parquet'
+        data_file = f'temp/final_good_{inst_id}_false.parquet'
         data_df = pd.read_parquet(data_file)
         print(f"【提示】：数据加载完成，数据行数：{data_df.shape[0]}")
-        data_df = data_df[data_df['kai_count_new'] > 0]
+        # data_df = data_df[data_df['kai_count_new'] > 0]
         print(f"【提示】：数据加载完成，数据行数：{data_df.shape[0]}")
 
         all_numeric_columns = data_df.select_dtypes(include=np.number).columns.tolist()
@@ -257,6 +257,7 @@ def main(n_bins=50, batch_size=10):
             col for col in all_numeric_columns
             if col not in ['timestamp', 'net_profit_rate_new'] and 'new' not in col
         ]
+        print(f'待处理的特征长度为{len(orig_feature_cols)}')
         # 原始特征数据字典
         orig_feature_data = {feature: data_df[feature].values for feature in orig_feature_cols}
         target_values = data_df['net_profit_rate_new'].values
@@ -314,7 +315,7 @@ def main(n_bins=50, batch_size=10):
 
         if all_bin_analyses:
             combined_bin_analysis_df = pd.concat(all_bin_analyses, ignore_index=True)
-            combined_csv_file = os.path.join(images_dir, f"combined_bin_analysis_{inst_id}_false_2025-04-07.parquet")
+            combined_csv_file = os.path.join(images_dir, f"combined_bin_analysis_{inst_id}_false.parquet")
             combined_bin_analysis_df.to_parquet(combined_csv_file, index=False, compression='snappy')
             print(f"【提示】：合并后的 bin_analysis 已保存为 CSV 文件：{combined_csv_file}")
         else:
