@@ -28,7 +28,8 @@ import matplotlib.pyplot as plt
 
 # 过滤 Pandas 性能警告
 warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
-
+import warnings
+warnings.filterwarnings("ignore", category=RuntimeWarning)
 # 设置中文显示，防止中文乱码（根据系统环境适当调整字体）
 plt.rcParams['font.sans-serif'] = ['Microsoft YaHei']
 plt.rcParams['axes.unicode_minus'] = False
@@ -87,7 +88,7 @@ def process_single_feature(feature, feat_values, target_values, n_bins=50):
 
     优化：对分箱聚合采用先排序后利用 np.unique 获取分箱索引分组信息，减少 Python 循环次数。
     """
-    start_time = time.time()
+    # start_time = time.time()
     try:
         if feat_values.size == 0:
             return None
@@ -148,14 +149,14 @@ def process_single_feature(feature, feat_values, target_values, n_bins=50):
         result_df["spearman_avg_net_profit_rate"] = spearman_avg
         result_df["spearman_pos_ratio"] = spearman_pos
 
-        print(f"特征 {feature} 处理完成，耗时 {time.time() - start_time:.2f} 秒")
+        # print(f"特征 {feature} 处理完成，耗时 {time.time() - start_time:.2f} 秒")
         return result_df
     except Exception as e:
         print(f"处理特征 {feature} 时遇到异常: {e}")
         return None
 
 
-def process_features_parallel(feature_names, feature_data, target_values, n_bins=50, max_workers=20):
+def process_features_parallel(feature_names, feature_data, target_values, n_bins=50, max_workers=30):
     """
     利用全局进程池并行处理特征，避免在每个批次中重复创建进程池。
 
@@ -239,89 +240,168 @@ def main(n_bins=50, batch_size=10):
       4. 可根据需要调用 process_data_flat、merge_and_compute、auto_reduce_precision 进行后续处理。
     """
     print("【主流程】：开始处理数据")
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = ['DOGE', 'DOGE', 'XRP', 'PEPE']
     images_dir = "temp_back"
     if not os.path.exists(images_dir):
         os.makedirs(images_dir)
 
-    for inst_id in inst_id_list:
-        print(f"\n【处理数据】：开始处理 {inst_id}")
+    total_inst = len(inst_id_list)
+    for inst_index, inst_id in enumerate(inst_id_list):
+        print(f"\n【处理数据】：开始处理 {inst_id} ({inst_index+1}/{total_inst})")
         data_file = f'temp/final_good_{inst_id}_false.parquet'
         data_df = pd.read_parquet(data_file)
         print(f"【提示】：数据加载完成，数据行数：{data_df.shape[0]}")
-        # data_df = data_df[data_df['kai_count_new'] > 0]
-        print(f"【提示】：数据加载完成，数据行数：{data_df.shape[0]}")
 
+        # 1. 筛选原始数值特征（排除 'timestamp'、'net_profit_rate_new' 和包含 'new' 的字段）
         all_numeric_columns = data_df.select_dtypes(include=np.number).columns.tolist()
         orig_feature_cols = [
             col for col in all_numeric_columns
             if col not in ['timestamp', 'net_profit_rate_new'] and 'new' not in col
         ]
-        print(f'待处理的特征长度为{len(orig_feature_cols)}')
-        # 原始特征数据字典
+        print(f"【提示】：待处理的原始特征数量: {len(orig_feature_cols)}")
         orig_feature_data = {feature: data_df[feature].values for feature in orig_feature_cols}
         target_values = data_df['net_profit_rate_new'].values
         orig_values = data_df[orig_feature_cols].to_numpy(dtype=np.float32)
         num_features = orig_values.shape[1]
+
         all_bin_analyses = []
 
-        # 使用全局进程池并行处理原始特征
+        # 2. 原始特征分箱处理
         print("【提示】：开始处理原始特征并行任务...")
         original_results = process_features_parallel(
-            orig_feature_cols, orig_feature_data, target_values, n_bins, max_workers=10
+            orig_feature_cols, orig_feature_data, target_values, n_bins, max_workers=30
         )
         all_bin_analyses.extend(original_results)
         print("【原始特征】：所有原始特征处理完成")
 
-        # 并行处理派生特征（此处采用批量提交方式，避免一次性生成太多任务）
-        print("【提示】：开始处理派生特征并行任务...")
+        # 3. 单特征变换处理
+        print("【提示】：开始处理单特征变换任务...")
+        single_feature_names = []
+        single_feature_data = {}
+        single_batch_counter = 0
+        single_transform_results = []
+        expected_single_transform_features = 0
+
+        for idx, col in enumerate(orig_feature_cols):
+            print(f"【单特征变换】：处理原始特征 {col} ({idx+1}/{len(orig_feature_cols)})")
+            a = orig_feature_data[col]
+            transforms = {}
+
+            # 对数变换：仅当所有值均大于0时
+            if np.all(a > 0):
+                transforms[f'{col}-log'] = np.log1p(a).astype(np.float32)
+            # 平方变换
+            transforms[f'{col}-square'] = (a ** 2).astype(np.float32)
+            # 倒数变换（处理除 0 问题）
+            transforms[f'{col}-reciprocal'] = np.where(a == 0, np.nan, 1 / a).astype(np.float32)
+            # 立方变换
+            transforms[f'{col}-cube'] = (a ** 3).astype(np.float32)
+            # 平方根变换：仅当所有值均不为负时
+            if np.all(a >= 0):
+                transforms[f'{col}-sqrt'] = np.sqrt(a).astype(np.float32)
+            # 双曲正切变换
+            transforms[f'{col}-tanh'] = np.tanh(a).astype(np.float32)
+            # 标准化 zscore： (a - mean) / std，当 std==0 时返回 NaN
+            std_val = np.std(a)
+            mean_val = np.mean(a)
+            if std_val == 0:
+                zscore = np.full_like(a, np.nan)
+            else:
+                zscore = ((a - mean_val) / std_val).astype(np.float32)
+            transforms[f'{col}-zscore'] = zscore
+
+            # 将每个转化后的特征添加到任务队列中
+            for trans_name, trans_values in transforms.items():
+                single_feature_names.append(trans_name)
+                single_feature_data[trans_name] = trans_values
+                expected_single_transform_features += 1
+                single_batch_counter += 1
+
+                if single_batch_counter >= batch_size:
+                    print(f"【单特征变换】：提交批次任务，共 {len(single_feature_names)} 特征（已累计处理 {expected_single_transform_features} 个单特征变换）")
+                    batch_results = process_features_parallel(
+                        single_feature_names, single_feature_data, target_values, n_bins, max_workers=30
+                    )
+                    single_transform_results.extend(batch_results)
+                    single_feature_names, single_feature_data = [], {}
+                    single_batch_counter = 0
+
+        # 处理最后不足 batch_size 的剩余任务
+        if single_feature_names:
+            print(f"【单特征变换】：提交最后剩余批次任务，共 {len(single_feature_names)} 特征")
+            batch_results = process_features_parallel(
+                single_feature_names, single_feature_data, target_values, n_bins, max_workers=30
+            )
+            single_transform_results.extend(batch_results)
+        all_bin_analyses.extend(single_transform_results)
+        print(f"【提示】：预计新增单特征变换数量为: {expected_single_transform_features}")
+        print("【单特征变换】：所有单特征变换处理完成")
+
+        # 4. 两两组合派生特征处理
+        expected_derived_features = (num_features * (num_features - 1) // 2) * 6
+        print(f"【提示】：预计通过两两组合生成的派生特征数量为: {expected_derived_features}")
+
         derived_feature_names = []
         derived_feature_data = {}
-        batch_counter = 0
+        derived_batch_counter = 0
         derived_results = []
+
+        total_pairs = num_features * (num_features - 1) // 2
+        pair_counter = 0
+
         for i in range(num_features):
             a = orig_values[:, i]
             col1 = orig_feature_cols[i]
             for j in range(i + 1, num_features):
+                pair_counter += 1
+                # 每处理100个组合打印一次进度
+                if pair_counter % 100 == 0 or pair_counter == total_pairs:
+                    print(f"【派生特征】：已处理派生特征组合 {pair_counter}/{total_pairs}")
                 b = orig_values[:, j]
                 col2 = orig_feature_cols[j]
                 features = {
-                    f'{col1}-{col2}-sum': (a + b).astype(np.float32),
+                    f'{col1}-{col2}-ratio': np.where(b == 0, np.nan, a / b).astype(np.float32),
                     f'{col1}-{col2}-diff': (a - b).astype(np.float32),
-                    f'{col1}-{col2}-prod': np.where((a < 0) & (b < 0), - (np.abs(a) * np.abs(b)), a * b).astype(
-                        np.float32),
-                    f'{col1}-{col2}-ratio': np.where(b == 0, np.nan, a / b).astype(np.float32)
+                    f'{col1}-{col2}-abs_diff': np.abs(a - b).astype(np.float32),
+                    f'{col1}-{col2}-mean': ((a + b) / 2).astype(np.float32),
+                    f'{col1}-{col2}-prod': np.where((a < 0) & (b < 0), - (np.abs(a) * np.abs(b)), a * b).astype(np.float32),
+                    f'{col1}-{col2}-norm_diff': np.where((a + b) == 0, np.nan, (a - b) / (a + b + 1e-8)).astype(np.float32)
                 }
                 for feature_name, values in features.items():
                     derived_feature_names.append(feature_name)
                     derived_feature_data[feature_name] = values
-                    batch_counter += 1
-                    if batch_counter >= batch_size:
-                        print(f"【派生特征】：处理批次，特征数：{len(derived_feature_names)}")
+                    derived_batch_counter += 1
+                    if derived_batch_counter >= batch_size:
+                        print(f"【派生特征】：提交批次任务，共 {len(derived_feature_names)} 派生特征")
                         batch_results = process_features_parallel(
-                            derived_feature_names, derived_feature_data, target_values, n_bins, max_workers=10
+                            derived_feature_names, derived_feature_data, target_values, n_bins, max_workers=30
                         )
                         derived_results.extend(batch_results)
                         derived_feature_names, derived_feature_data = [], {}
-                        batch_counter = 0
+                        derived_batch_counter = 0
+
         if derived_feature_names:
-            print(f"【派生特征】：提交剩余批次，特征数：{len(derived_feature_names)}")
+            print(f"【派生特征】：提交最后剩余批次任务，共 {len(derived_feature_names)} 派生特征")
             batch_results = process_features_parallel(
-                derived_feature_names, derived_feature_data, target_values, n_bins, max_workers=10
+                derived_feature_names, derived_feature_data, target_values, n_bins, max_workers=30
             )
             derived_results.extend(batch_results)
         all_bin_analyses.extend(derived_results)
         print("【派生特征】：所有派生特征处理完成")
 
+        # 5. 合并所有分箱结果，并保存为 Parquet 文件
         if all_bin_analyses:
             combined_bin_analysis_df = pd.concat(all_bin_analyses, ignore_index=True)
-            combined_csv_file = os.path.join(images_dir, f"combined_bin_analysis_{inst_id}_false.parquet")
-            combined_bin_analysis_df.to_parquet(combined_csv_file, index=False, compression='snappy')
-            print(f"【提示】：合并后的 bin_analysis 已保存为 CSV 文件：{combined_csv_file}")
+            combined_file = os.path.join(images_dir, f"combined_bin_analysis_{inst_id}_false.parquet")
+            combined_bin_analysis_df.to_parquet(combined_file, index=False, compression='snappy')
+            print(f"【提示】：合并后的 bin_analysis 已保存为 Parquet 文件：{combined_file}")
         else:
             print("【提示】：未生成任何 bin_analysis 结果。")
+
+        print(f"【处理数据】：{inst_id} 处理完成")
+
     print("【主流程】：所有数据处理完成")
 
 
 if __name__ == '__main__':
-    main(n_bins=1000, batch_size=100)
+    main(n_bins=1000, batch_size=200)
