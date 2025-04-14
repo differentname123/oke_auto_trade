@@ -404,4 +404,4 @@ def main(n_bins=50, batch_size=10):
 
 
 if __name__ == '__main__':
-    main(n_bins=1000, batch_size=300)
+    main(n_bins=1000, batch_size=100)
