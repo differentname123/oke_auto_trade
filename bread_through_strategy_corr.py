@@ -702,4 +702,4 @@ def choose_final_good_df():
 
 
 if __name__ == '__main__':
-    debug1()
+    merger_data()

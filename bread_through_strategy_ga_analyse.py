@@ -240,7 +240,7 @@ def main(n_bins=50, batch_size=10):
       4. 可根据需要调用 process_data_flat、merge_and_compute、auto_reduce_precision 进行后续处理。
     """
     print("【主流程】：开始处理数据")
-    inst_id_list = ['DOGE','XRP', 'PEPE']
+    inst_id_list = ['BTC','ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     images_dir = "temp_back"
     if not os.path.exists(images_dir):
         os.makedirs(images_dir)
@@ -250,6 +250,8 @@ def main(n_bins=50, batch_size=10):
         print(f"\n【处理数据】：开始处理 {inst_id} ({inst_index+1}/{total_inst})")
         data_file = f'temp/final_good_{inst_id}_false.parquet'
         data_df = pd.read_parquet(data_file)
+        data_df = data_df[data_df['hold_time_mean'] < 5000]
+        data_df = data_df[data_df['kai_column'].str.contains('long', na=False)]
         print(f"【提示】：数据加载完成，数据行数：{data_df.shape[0]}")
 
         # 1. 筛选原始数值特征（排除 'timestamp'、'net_profit_rate_new' 和包含 'new' 的字段）
