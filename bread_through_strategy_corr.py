@@ -1,3 +1,4 @@
+import multiprocessing
 import os
 import time
 import pandas as pd
@@ -335,7 +336,7 @@ def process_pair(file_pair):
         inst_id = base_name.split('_')[0]
         feature = base_name.split('feature_')[1].split('.parquet')[0]
         base_dir = os.path.dirname(file_path)
-        output_path = os.path.join(base_dir, f"{inst_id}_{feature}_good_corr_agg.parquet")
+        output_path = os.path.join(base_dir, f"{inst_id}_{feature}_good_corr_agg_long.parquet")
         if os.path.exists(output_path):
             print(f"文件已存在，跳过处理：{output_path}")
             return (file_path, "skipped")
@@ -343,6 +344,9 @@ def process_pair(file_pair):
         corr_df = pd.read_parquet(file_path)
         good_df = pd.read_parquet(good_file_path)
         good_df = good_df[good_df['hold_time_mean'] < 5000]
+        # 只保留kai_column包含long的行
+        good_df = good_df[good_df['kai_column'].str.contains('long', na=False)]
+
         idxs = good_df['index'].unique()
         corr_df = corr_df[corr_df['Row1'].isin(idxs) & corr_df['Row2'].isin(idxs)]
 
@@ -376,12 +380,126 @@ def debug1():
     print(f"共 {len(pairs)} 对待处理。")
     if not pairs:
         return
-    with Pool(30) as p:
+    with Pool(1) as p:
         res = list(p.imap_unordered(process_pair, pairs))
     succ = sum(1 for _,st in res if st=="success")
     fail = sum(1 for _,st in res if st=="failed")
     print(f"完成，成功 {succ}，失败 {fail}。")
 
+
+def get_selection_result_from_agg(agg_row):
+    """
+    根据 agg_row 中的信息通过固定的文件路径加载 good_df 与 corr_df，
+    再执行选择策略并返回候选行结果列表。
+
+    参数:
+      agg_row: 聚合结果中的一行（Series 或字典），必须包含以下字段：
+               - inst_id
+               - feature
+               - sort_column
+               - sort_side
+               - selection_strategy
+               - 针对不同策略，可能还需包含：
+                 * 对于 "greedy_corr": threshold, corr_select_mode, (mode=="middle" 时) middle_interval
+                 * 对于 "max_min_distance": k
+                 * 对于 "cluster_based": sim_threshold, cluster_select_method
+
+    返回：
+      被选中的候选行列表，每一项为一个字典（原始 good_df 中的行数据）。
+    """
+
+    # 根据 agg_row 中的 inst_id 与 feature 构造文件路径
+    inst_id = agg_row.get("inst_id")
+    feature = agg_row.get("feature")
+    if not inst_id or not feature:
+        raise ValueError("agg_row 中缺少 inst_id 或 feature 信息，无法定位原始数据。")
+
+    base_dir = "temp/corr"
+    # 假设 good_df 文件命名规则如下：
+    good_file = os.path.join(base_dir, f"{inst_id}_feature_{feature}.parquet_origin_good_monthly_net_profit_detail.parquet")
+    corr_file = os.path.join(base_dir, f"{inst_id}_feature_{feature}.parquet_corr_monthly_net_profit_detail.parquet")
+    if not os.path.exists(good_file):
+        raise FileNotFoundError(f"未找到 good_df 文件: {good_file}")
+    if not os.path.exists(corr_file):
+        raise FileNotFoundError(f"未找到 corr_df 文件: {corr_file}")
+
+    good_df = pd.read_parquet(good_file)
+    good_df = good_df[good_df['hold_time_mean'] < 5000]
+    corr_df = pd.read_parquet(corr_file)
+
+    # 后续和之前相同：调用已实现的选择函数
+    # 本例中假设之前定义的函数 get_candidate_columns, create_sorted_df_dict,
+    # build_corr_matrix, select_valid_candidates_from_sorted, max_min_distance_sampling,
+    # cluster_based_selection 已经导入
+
+    # 1. 生成候选列与排序后的 DataFrame 字典
+    candidate_columns = get_candidate_columns(good_df)
+    sorted_df_dict = create_sorted_df_dict(good_df, candidate_columns)
+
+    # 2. 构造相关性矩阵及 id 到索引的映射
+    id_list = good_df['index'].unique().tolist()
+    corr_mat, id2idx = build_corr_matrix(corr_df, id_list)
+
+    # 3. 定位排序使用的 DataFrame: key 为 (sort_column, sort_side)
+    sort_column = agg_row.get("sort_column")
+    sort_side = agg_row.get("sort_side")
+    key = (sort_column, sort_side)
+    if key not in sorted_df_dict:
+        raise ValueError(f"在排序字典中未找到键：{key}")
+    sdf = sorted_df_dict[key]
+
+    strategy = agg_row.get("selection_strategy")
+    if strategy == "greedy_corr":
+        threshold = agg_row.get("threshold")
+        mode = agg_row.get("corr_select_mode")
+        # 如果采用 middle 模式，必须获得 middle_interval 参数
+        middle_interval = agg_row.get("middle_interval", 0) if mode == "middle" else 0
+        candidates = select_valid_candidates_from_sorted(
+            sdf, mode, threshold, corr_mat, id2idx, middle_interval=middle_interval
+        )
+        return candidates
+
+    elif strategy == "max_min_distance":
+        k = agg_row.get("k")
+        candidates = max_min_distance_sampling(sdf, k, corr_mat, id2idx)
+        return candidates
+
+    elif strategy == "cluster_based":
+        res = cluster_based_selection(sdf, corr_mat, id2idx, precomputed=None)
+        if isinstance(res, list):  # 单候选返回的情况
+            return res
+        filt, Z = res
+        if not filt:
+            return []
+        # 若聚类策略中聚类阈值为 None 或只有单个候选，则直接返回
+        if len(filt) < 2 or agg_row.get("sim_threshold") is None:
+            return [filt[0]._asdict()]
+
+        sim_threshold = agg_row.get("sim_threshold")
+        cluster_select_method = agg_row.get("cluster_select_method")
+        from scipy.cluster.hierarchy import fcluster
+        cutoff = 2.0 - (sim_threshold / 50.0)
+        labels = fcluster(Z, t=cutoff, criterion='distance')
+        clusters = {}
+        for cand, lab in zip(filt, labels):
+            clusters.setdefault(lab, []).append(cand)
+        selected = []
+        for group in clusters.values():
+            if cluster_select_method == 'first':
+                chosen = group[0]
+            elif cluster_select_method == 'middle':
+                chosen = group[len(group) // 2]
+            elif cluster_select_method == 'last':
+                chosen = group[-1]
+            else:
+                chosen = group[0]
+            selected.append(chosen._asdict())
+        # 将selected转换为 DataFrame
+        selected_df = pd.DataFrame(selected)
+        return selected
+
+    else:
+        raise ValueError(f"未知的选择策略: {strategy}")
 
 def get_good_file():
     """
@@ -447,10 +565,10 @@ def merger_data():
     并对合并后的 DataFrame 按指定分组字段计算聚合统计信息。
     """
     # 如果需要根据 good_feature_df 进行筛选，可取消注释以下代码
-    # good_feature_df = get_good_file()
-    # good_feature_df['feature_bin_seq'] = good_feature_df['feature'].astype(str) + '_' + good_feature_df['bin_seq'].astype(str)
-    # feature_bin_seq_list = good_feature_df['feature_bin_seq'].tolist()
-    feature_bin_seq_list = []
+    good_feature_df = get_good_file()
+    good_feature_df['feature_bin_seq'] = good_feature_df['feature'].astype(str) + '_' + good_feature_df['bin_seq'].astype(str)
+    feature_bin_seq_list = good_feature_df['feature_bin_seq'].tolist()
+    # feature_bin_seq_list = []
 
     base_dir = 'temp/corr'
     if not os.path.exists(base_dir):
@@ -475,13 +593,113 @@ def merger_data():
 
     group_stats_df = group_statistics(
         merged_df,
-        group_column_list=['sort_column', 'sort_side', 'corr_select_mode', 'threshold', 'middle_interval'],
-        target_column_list=['net_profit_rate_new_mean', 'net_profit_rate_new_min',
+        group_column_list=['sort_column', 'sort_side', 'corr_select_mode', 'threshold', 'middle_interval','selection_strategy','k','sim_threshold','cluster_select_method'],
+        target_column_list=['n_selected','net_profit_rate_new_mean', 'net_profit_rate_new_min',
                             'net_profit_rate_new_mean_diff', 'net_profit_rate_new_min_diff']
     )
     group_stats_df.to_parquet('temp/corr/merged_group_stats.parquet', index=False)
     print("合并与分组统计完成。")
     # 可根据需求保存或进一步处理 group_stats_df
+
+
+def process_file(file, merged_group_stats_df):
+    """
+    处理单个文件，提取 inst_id 和 feature 后：
+    1. 复制 merged_group_stats_df，并为整个副本添加 inst_id 和 feature 两列；
+    2. 遍历 temp_df 的所有行，分别调用 get_selection_result_from_agg 处理每行；
+    3. 将所有选择结果转换成 DataFrame 后合并返回。
+    """
+    inst_id = file.split('_')[0]
+    feature = file.split(f'{inst_id}_')[1].split('_good')[0]
+
+    # 为避免修改共享的 DataFrame，这里用 copy() 制作副本
+    temp_df = merged_group_stats_df.copy()
+    temp_df['inst_id'] = inst_id
+    temp_df['feature'] = feature
+
+    # 遍历 temp_df 的每一行，调用 get_selection_result_from_agg 获取选择结果
+    result_dfs = []
+    for _, row in temp_df.iterrows():
+        # 获取当前行的选择结果数据，假定返回的数据可以构造 DataFrame
+        selection_result = get_selection_result_from_agg(row)
+        selection_result_df = pd.DataFrame(selection_result)
+        # 添加 inst_id 和 feature 信息
+        selection_result_df['inst_id'] = inst_id
+        selection_result_df['feature'] = feature
+        result_dfs.append(selection_result_df)
+
+    # 合并所有的选择结果为一个 DataFrame
+    final_select_df = pd.concat(result_dfs, ignore_index=True)
+    return final_select_df
+
+
+def choose_final_good_df():
+
+    # 读取数据
+    final_df = pd.read_parquet('temp/corr/final_good_df.parquet')
+    new_df = pd.read_parquet('temp_back/final_good_df.parquet_1m_14000_SOL-USDT-SWAP_2025-04-20.csvstatistic_results_final.parquet')
+
+    # 从final_df中选择需要合并的列，并去重确保每个键只有一条记录
+    final_df_unique = final_df[['kai_column', 'pin_column', 'count', 'inst_count']].drop_duplicates()
+
+    # 合并时使用how='left'以保持new_df中的原始行数
+    new_df = new_df.merge(final_df_unique, on=['kai_column', 'pin_column'], how='left')
+    start_time = time.time()
+    # 1. 读取数据并准备筛选条件
+    merged_group_stats_df = pd.read_parquet('temp/corr/merged_group_stats.parquet')
+    # 过滤数据
+    merged_group_stats_df = merged_group_stats_df[merged_group_stats_df['group_count'] > 10]
+    merged_group_stats_df = merged_group_stats_df[merged_group_stats_df['net_profit_rate_new_mean_diff_positive_ratio'] > 0.7]
+    # 只保留net_profit_rate_new_mean_diff 最大的10行
+    merged_group_stats_df = merged_group_stats_df.sort_values(by='net_profit_rate_new_mean_positive_ratio', ascending=False)
+    # merged_group_stats_df = merged_group_stats_df.head(3)
+
+
+    good_feature_df = get_good_file()
+    good_feature_df['feature_bin_seq'] = good_feature_df['feature'].astype(str) + '_' + good_feature_df[
+        'bin_seq'].astype(str)
+    feature_bin_seq_list = good_feature_df['feature_bin_seq'].tolist()
+    # feature_bin_seq_list = []
+
+    base_dir = 'temp/corr'
+    if not os.path.exists(base_dir):
+        print(f"目录不存在：{base_dir}")
+        return
+
+    # 2. 筛选目录中符合条件的文件
+    file_list = [
+        file for file in os.listdir(base_dir)
+        if 'good_corr_agg.parquet' in file
+    ]
+    if feature_bin_seq_list:
+        file_list = [file for file in file_list if any(fbs in file for fbs in feature_bin_seq_list)]
+
+    print(f"找到 {len(file_list)} 个待合并文件。")
+
+
+
+    # 3. 使用多进程处理每个文件
+    with multiprocessing.Pool(processes=10) as pool:
+        # 使用 starmap 将 merged_group_stats_df 作为第二个参数传入每个进程
+        select_df_list = pool.starmap(process_file, [(file, merged_group_stats_df) for file in file_list])
+
+    # 4. 合并所有分进程返回的 DataFrame 得到最终 DataFrame
+    final_good_df = pd.concat(select_df_list, ignore_index=True)
+    print(f"最终筛选出的行数：{len(final_good_df)} ，耗时：{time.time() - start_time:.2f}s")
+
+    # 1. 同时统计每组数量（count）和每组中 inst_id 不重复的个数（inst_count）
+    group_stats = final_good_df.groupby(['kai_column', 'pin_column']).agg(
+        count=('kai_column', 'size'),
+        inst_count=('inst_id', 'nunique')
+    ).reset_index()
+
+    # 2. 将统计结果 merge 回原始数据
+    final_good_df = final_good_df.merge(group_stats, on=['kai_column', 'pin_column'], how='left')
+
+    print(f"最终筛选出的行数：{len(final_good_df)} ，耗时：{time.time() - start_time:.2f}s")
+    final_good_df.to_parquet('temp/corr/final_good_df.parquet', index=False)
+    return final_good_df
+
 
 if __name__ == '__main__':
     debug1()

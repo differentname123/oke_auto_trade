@@ -628,11 +628,13 @@ def validation(market_data_file):
     df = df_local
 
     # 注意：这里只读取需要的列： kai_column 和 pin_column
-    stat_df_file_list = [os.path.join('temp_back', f'{inst_id}_origin_good_op_all_false.parquet')]
+    stat_df_file_list = ['temp/corr/final_good_df.parquet']
     for stat_df_file in stat_df_file_list:
         try:
             # 1. 加载 stat_df 文件（只读取必要的两列）
             stat_df = pd.read_parquet(stat_df_file, columns=["kai_column", "pin_column"])
+            # 去重
+            stat_df = stat_df.drop_duplicates(subset=["kai_column", "pin_column"])
             stat_df_base_name = os.path.basename(stat_df_file)
             if "kai_column" not in stat_df.columns or "pin_column" not in stat_df.columns:
                 print("输入的 stat_df 文件中必须包含 'kai_column' 和 'pin_column' 两列")
@@ -991,13 +993,13 @@ if __name__ == "__main__":
         # "kline_data/origin_data_1m_10000_XRP-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_10000_PEPE-USDT-SWAP.csv",
 
-        # "kline_data/origin_data_1m_140000_BTC-USDT-SWAP_2025-04-10.csv",
-        # "kline_data/origin_data_1m_140000_SOL-USDT-SWAP_2025-04-10.csv",
-        # "kline_data/origin_data_1m_140000_ETH-USDT-SWAP_2025-04-10.csv",
-        # "kline_data/origin_data_1m_140000_TON-USDT-SWAP_2025-04-10.csv",
-        # "kline_data/origin_data_1m_140000_DOGE-USDT-SWAP_2025-04-10.csv",
-        # "kline_data/origin_data_1m_140000_XRP-USDT-SWAP_2025-04-10.csv",
-        "kline_data/origin_data_1m_140000_PEPE-USDT-SWAP_2025-04-10.csv",
+        "kline_data/origin_data_1m_14000_BTC-USDT-SWAP_2025-04-20.csv",
+        "kline_data/origin_data_1m_14000_SOL-USDT-SWAP_2025-04-20.csv",
+        "kline_data/origin_data_1m_14000_ETH-USDT-SWAP_2025-04-20.csv",
+        "kline_data/origin_data_1m_14000_TON-USDT-SWAP_2025-04-20.csv",
+        "kline_data/origin_data_1m_14000_DOGE-USDT-SWAP_2025-04-20.csv",
+        "kline_data/origin_data_1m_14000_XRP-USDT-SWAP_2025-04-20.csv",
+        "kline_data/origin_data_1m_14000_PEPE-USDT-SWAP_2025-04-20.csv",
         # "kline_data/origin_data_1m_10000_ETH-USDT-SWAP_2025-04-07.csv",
         # "kline_data/origin_data_1m_10000_SOL-USDT-SWAP_2025-04-07.csv",
         # "kline_data/origin_data_1m_10000_TON-USDT-SWAP_2025-04-07.csv",
