@@ -240,7 +240,7 @@ def main(n_bins=50, batch_size=10):
       4. 可根据需要调用 process_data_flat、merge_and_compute、auto_reduce_precision 进行后续处理。
     """
     print("【主流程】：开始处理数据")
-    inst_id_list = ['SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = ['BTC','ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     images_dir = "temp_back"
     if not os.path.exists(images_dir):
         os.makedirs(images_dir)
@@ -405,5 +405,143 @@ def main(n_bins=50, batch_size=10):
     print("【主流程】：所有数据处理完成")
 
 
+
+def group_statistics_fast(df: pd.DataFrame,
+                          group_cols: list[str],
+                          target_cols: list[str]) -> pd.DataFrame:
+    """
+    对 df 按 group_cols 分组，对 target_cols 计算 max, min, mean,
+    positive_ratio 和 group_count（分组大小）。
+    """
+    # 1) 计算正例标志列
+    for col in target_cols:
+        df[col + '_pos'] = (df[col] > 0).astype('uint8')
+
+    # 2) 构造 named aggregation dict
+    agg_dict: dict[str, tuple[str, str]] = {}
+    for col in target_cols:
+        agg_dict[f'{col}_max']      = (col, 'max')
+        agg_dict[f'{col}_min']      = (col, 'min')
+        agg_dict[f'{col}_mean']     = (col, 'mean')
+        agg_dict[f'{col}_pos_sum']  = (col + '_pos', 'sum')
+    # group_count 用任意一个分组列的 'size'
+    agg_dict['group_count'] = (group_cols[0], 'size')
+
+    # 3) 一次性 groupby.agg
+    g = df.groupby(group_cols, dropna=False).agg(**agg_dict)
+
+    # 4) 计算正例比例，并一次性删除中间列
+    for col in target_cols:
+        g[f'{col}_positive_ratio'] = g[f'{col}_pos_sum'] / g['group_count']
+    g.drop(columns=[f'{c}_pos_sum' for c in target_cols], inplace=True)
+
+    # 5) 重置索引返回
+    return g.reset_index()
+
+
+def merge_data_optimized(
+    images_dir: str = "temp_back",
+    inst_id_list: list[str] = ('BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE')
+) -> list[pd.DataFrame]:
+    """
+    1) 分别读取每个 inst 的 parquet，只保留 feature/bin_seq 和目标列
+    2) 按 feature 筛出 bin_seq 最大且等于 1000 的 rows
+    3) 按 count 范围再筛一次
+    4) 求各 inst 共有的 (feature, bin_seq) 对
+    5) 合并所有 inst 的数据，并做分组统计
+    6) 输出 parquet 文件，返回各 inst 筛选后的 DataFrame 列表
+    """
+    need_cols = [
+        'feature', 'bin_seq',
+        'min_net_profit', 'avg_net_profit_rate_new',
+        'pos_ratio', 'count'
+    ]
+    positive_ratio_threshold = 0.5
+
+    # 1) 读入并初步筛选
+    dfs: list[pd.DataFrame] = []
+    for inst in inst_id_list:
+        path = os.path.join(images_dir,
+                            f"combined_bin_analysis_{inst}_false.parquet")
+        df = pd.read_parquet(path, columns=need_cols)
+
+        # a) feature 分组取 max bin_seq
+        feat_max = (
+            df.groupby('feature')['bin_seq']
+              .max()
+              .reset_index()
+              .query('bin_seq == 1000')
+              ['feature']
+        )
+        df = df[df['feature'].isin(feat_max)]
+        # b) count 范围筛选
+        df = df.query('10000 < count < 20000')
+        # df = df[df['avg_net_profit_rate_new'] > -30]
+        dfs.append(df)
+
+    # 2) 求所有 inst 共有的 (feature, bin_seq)
+    #    先取第一个，依次 merge 取 inner
+    common = reduce(
+        lambda left, right: pd.merge(
+            left[['feature', 'bin_seq']].drop_duplicates(),
+            right[['feature', 'bin_seq']].drop_duplicates(),
+            on=['feature', 'bin_seq'],
+            how='inner'
+        ),
+        dfs[1:], dfs[0]
+    )
+
+    # 3) 拼接所有 inst 数据，并只保留共有的组
+    all_df = pd.concat(dfs, ignore_index=True)
+    all_df = all_df.merge(common, on=['feature', 'bin_seq'], how='inner')
+
+    # ───────────────────────────────────────────────────────────────
+    # 4) 预先针对 avg_net_profit_rate_new 做一次“分组正例比例”过滤
+    #    这样后续 heavy aggregator 只跑在符合比例 > threshold 的组上
+    # 4a) 生成一列 pos_flag
+    all_df['_avg_pos'] = (all_df['avg_net_profit_rate_new'] > 0).astype('uint8')
+    # 4b) groupby.transform 计算各组 size 和 pos_sum
+    grp_cols = ['feature', 'bin_seq']
+    all_df['_grp_size'] = all_df.groupby(grp_cols)['_avg_pos'].transform('size')
+    all_df['_avg_pos_sum'] = all_df.groupby(grp_cols)['_avg_pos'].transform('sum')
+    # 4c) 只保留 pos_sum/size > threshold 的整组
+    mask = all_df['_avg_pos_sum'] > positive_ratio_threshold * all_df['_grp_size']
+    # 拿出所有满足条件组的 key
+    valid_keys = (
+        all_df.loc[mask, grp_cols]
+              .drop_duplicates()
+    )
+    # 4d) 过滤出这些组的全部行
+    filtered_df = all_df.merge(valid_keys, on=grp_cols, how='inner')
+
+    # 清理临时列
+    filtered_df.drop(columns=['_avg_pos', '_grp_size', '_avg_pos_sum'],
+                     inplace=True)
+    # ───────────────────────────────────────────────────────────────
+
+    # 4) 分组统计
+    result = group_statistics_fast(
+        filtered_df,
+        group_cols=['feature', 'bin_seq'],
+        target_cols=[
+            'min_net_profit',
+            'avg_net_profit_rate_new',
+            'pos_ratio',
+            'count'
+        ]
+    )
+
+    # 5) 写盘
+    os.makedirs('temp', exist_ok=True)
+    result.to_parquet(
+        'temp/all_result_df.parquet',
+        index=False,
+        compression='snappy'
+    )
+
+    return dfs
+
+
 if __name__ == '__main__':
     main(n_bins=1000, batch_size=100)
+    # merge_data_optimized()

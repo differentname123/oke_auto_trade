@@ -1953,7 +1953,7 @@ def download_data():
     now = datetime.datetime.now()
     # 转换为可读性格式
     readable_time = now.strftime("%Y-%m-%d")
-    max_candles_list = [14000]
+    max_candles_list = [15000]
 
     for max_candles in max_candles_list:
         for bar in bar_list:

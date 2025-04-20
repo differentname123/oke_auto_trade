@@ -2197,30 +2197,34 @@ def choose_good_strategy_detail(inst_id='BTC'):
 
     # 载入全部结果数据，并做初步筛选
     good_feature_df = pd.read_parquet('temp/all_result_df.parquet')
-    sort_key = 'avg_net_profit_rate_new_mean'
+    sort_key = 'avg_net_profit_rate_new_positive_ratio'
 
     # 筛选 bin_seq 为 1 或 1000 的行，并进一步筛选 sort_key > 0 与 count_min 大于 10000
     good_feature_df = good_feature_df[
-        good_feature_df['bin_seq'].isin([1, 1000]) &
-        (good_feature_df[sort_key] > 0) &
+        # good_feature_df['bin_seq'].isin([1, 1000]) &
+        (good_feature_df['avg_net_profit_rate_new_min'] > -10) &
+        (good_feature_df[sort_key] > 0.8) &
         (good_feature_df['count_min'] > 10000)
         ]
 
-    # 保留 spearman_pos_ratio_min 与 spearman_pos_ratio_max 同号的数据
-    condition = (
-            ((good_feature_df['spearman_pos_ratio_min'] > 0) & (good_feature_df['spearman_pos_ratio_max'] > 0)) |
-            ((good_feature_df['spearman_pos_ratio_min'] < 0) & (good_feature_df['spearman_pos_ratio_max'] < 0))
-    )
-    good_feature_df = good_feature_df[condition]
+    # # 保留 spearman_pos_ratio_min 与 spearman_pos_ratio_max 同号的数据
+    # condition = (
+    #         ((good_feature_df['spearman_pos_ratio_min'] > 0) & (good_feature_df['spearman_pos_ratio_max'] > 0)) |
+    #         ((good_feature_df['spearman_pos_ratio_min'] < 0) & (good_feature_df['spearman_pos_ratio_max'] < 0))
+    # )
+    # good_feature_df = good_feature_df[condition]
 
     # 按 sort_key 降序排序，并对 feature 去重（保留第一次出现的记录）
     good_feature_df = good_feature_df.sort_values(by=sort_key, ascending=False)
-    good_feature_df = good_feature_df.drop_duplicates(subset=['feature'], keep='first')
+    # good_feature_df = good_feature_df.drop_duplicates(subset=['feature'], keep='first')
     print(f"good_feature_df的行数为：{len(good_feature_df)}")
 
     # 载入详细区间数据及基础数据
     detail_data_df = pd.read_parquet(f'temp_back/combined_bin_analysis_{inst_id}_false.parquet')
     data_df = pd.read_parquet(f'temp/final_good_{inst_id}_false.parquet')
+    data_df = data_df[data_df['hold_time_mean'] < 5000]
+    data_df = data_df[data_df['kai_column'].str.contains('long', na=False)]
+    print(f"【提示】：数据加载完成，数据行数：{data_df.shape[0]}")
 
     total_features = len(good_feature_df)
 
@@ -2249,6 +2253,9 @@ def choose_good_strategy_detail(inst_id='BTC'):
 
         # 筛选符合区间条件的数据
         filter_data_df = data_df[(data_df[feature] >= start_value) & (data_df[feature] < end_value)]
+        if filter_data_df.shape[0] < 10000 or filter_data_df.shape[0] > 20000:
+            print(f"警告：特征 '{feature}' 的筛选数据行数不足或包含 NaN 值，跳过该特征")
+            continue
         print(
             f"针对特征 '{feature}' 初步筛选出的数据行数为：{len(filter_data_df)}，原始 count 为 {detail_row['count'].values[0]}"
         )
@@ -2290,7 +2297,7 @@ def choose_good_strategy_detail(inst_id='BTC'):
 
     # 合并所有已保存的 filter_data_df，并去重后保存
     if all_filtered_dfs:
-        combined_df = pd.concat(all_filtered_dfs).drop_duplicates()
+        combined_df = pd.concat(all_filtered_dfs).drop_duplicates(subset=['kai_column', 'pin_column'], keep='first')
         combined_filepath = f'temp/corr/{inst_id}_all_df.parquet'
         combined_df.to_parquet(combined_filepath, index=False)
         print(f"所有合并后的数据已保存到 {combined_filepath} 长度为：{len(combined_df)}")
@@ -3583,6 +3590,53 @@ def auto_reduce_precision(df, verbose=True, column_list=None):
 
     return df_new
 
+
+def add_column(inst_id):
+    # 定义目录
+    corr_dir = "temp/corr"
+    back_dir = "temp_back"
+
+    # 遍历 temp/corr 目录，找到文件名中包含 inst_id 且包含 "feature" 的文件
+    files = os.listdir(corr_dir)
+    filter_files = [filename for filename in files if inst_id in filename and "feature" in filename]
+    print(f"找到 {inst_id} 的文件个数: {len(filter_files)}")
+
+    # 定义需要使用的列
+    merge_columns = ["kai_column", "pin_column"]
+    target_columns = [
+        "kai_count", "hold_time_mean", "net_profit_rate",
+        "fix_profit", "avg_profit_rate", "same_count",
+        "weekly_net_profit_detail"
+    ]
+    columns_to_read = merge_columns + target_columns
+
+    # 构造读取的新数据文件路径
+    source_filename = f"{inst_id}_all_df.parquet_1m_15000_{inst_id}-USDT-SWAP_2025-04-20.csvstatistic_results_final.parquet"
+    source_filepath = os.path.join(back_dir, source_filename)
+
+    # 读取指定列
+    new_df = pd.read_parquet(source_filepath, columns=columns_to_read)
+
+    # 预先生成新的 DataFrame：复制、重命名 target_columns 字段，并设置索引
+    rename_dict = {col: f"{col}_new20" for col in target_columns}
+    new_df_renamed = new_df.rename(columns=rename_dict).set_index(merge_columns)
+
+    # 遍历每个文件，读取、合并后重新写回
+    for file in filter_files:
+        print(f"正在处理文件: {file}")
+        corr_filepath = os.path.join(corr_dir, file)
+        # 读取文件
+        origin_good_df = pd.read_parquet(corr_filepath)
+        # 删除包含_new20的列
+        columns_to_drop = [col for col in origin_good_df.columns if "_new20" in col]
+        origin_good_df = origin_good_df.drop(columns=columns_to_drop, errors='ignore')
+        # 设置 merge_columns 为索引，加快 join 操作
+        origin_good_df = origin_good_df.set_index(merge_columns)
+        # 左连接合并数据，然后重置索引
+        merged_df = origin_good_df.join(new_df_renamed, how="left").reset_index()
+        # 将合并后的数据写回去，采用 snappy 压缩
+        merged_df.to_parquet(corr_filepath, index=False, compression="snappy")
+
 def debug():
     # good_df = pd.read_csv('temp/final_good.csv')
 
@@ -3636,7 +3690,8 @@ def debug():
         # filtered_df = pd.read_parquet(f'temp/{inst_id}_target.parquet')
         # pairs = list(filtered_df[['kai_column', 'pin_column']].itertuples(index=False, name=None))
 
-        origin_good_df = choose_good_strategy_detail(inst_id)
+        add_column(inst_id)
+        # origin_good_df = choose_good_strategy_detail(inst_id)
         # origin_good_df.to_parquet(f'temp/{inst_id}_target.parquet', index=False, compression='snappy')
         continue
 
