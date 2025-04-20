@@ -2293,7 +2293,7 @@ def choose_good_strategy_detail(inst_id='BTC'):
         combined_df = pd.concat(all_filtered_dfs).drop_duplicates()
         combined_filepath = f'temp/corr/{inst_id}_all_df.parquet'
         combined_df.to_parquet(combined_filepath, index=False)
-        print(f"所有合并后的数据已保存到 {combined_filepath}")
+        print(f"所有合并后的数据已保存到 {combined_filepath} 长度为：{len(combined_df)}")
     else:
         print("没有数据被保存，未生成合并文件。")
 
@@ -3718,7 +3718,7 @@ def debug():
         # 选择需要的列，并重命名以区分
         new_df_selected = new_df.copy()
         new_df_selected = new_df_selected.rename(
-            columns={col: col + "_new" for col in target_columns}
+            columns={col: col + "_new20" for col in target_columns}
         )
 
         # 如果数据量较大，考虑使用索引加速合并操作
@@ -3729,7 +3729,7 @@ def debug():
         # 使用 join 进行合并（左连接），然后重置索引
         origin_good_df = origin_good_df.join(new_df_selected, how="left").reset_index()
         origin_good_df = get_statistic(origin_good_df)
-        origin_good_df.to_parquet(f'temp/final_good_{inst_id}_false.parquet', index=False, compression='snappy')
+        origin_good_df.to_parquet(f'temp/corr/{inst_id}_false_double.parquet', index=False, compression='snappy')
         continue
 
         origin_good_df['score_score'] = origin_good_df['loss_rate'] / origin_good_df['top_profit_ratio']
