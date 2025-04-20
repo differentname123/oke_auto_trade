@@ -240,7 +240,7 @@ def main(n_bins=50, batch_size=10):
       4. 可根据需要调用 process_data_flat、merge_and_compute、auto_reduce_precision 进行后续处理。
     """
     print("【主流程】：开始处理数据")
-    inst_id_list = ['BTC','ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = ['SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     images_dir = "temp_back"
     if not os.path.exists(images_dir):
         os.makedirs(images_dir)
