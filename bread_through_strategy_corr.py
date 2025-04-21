@@ -350,7 +350,7 @@ def process_pair(file_pair):
         idxs = good_df['index'].unique()
         corr_df = corr_df[corr_df['Row1'].isin(idxs) & corr_df['Row2'].isin(idxs)]
 
-        result_df = select_and_aggregate(corr_df, good_df, ['net_profit_rate_new'])
+        result_df = select_and_aggregate(corr_df, good_df, ['net_profit_rate_new','net_profit_rate_new20'])
         result_df['inst_id'] = inst_id
         result_df['feature'] = feature
         result_df.to_parquet(output_path, index=False)
@@ -380,7 +380,7 @@ def debug1():
     print(f"共 {len(pairs)} 对待处理。")
     if not pairs:
         return
-    with Pool(1) as p:
+    with Pool(30) as p:
         res = list(p.imap_unordered(process_pair, pairs))
     succ = sum(1 for _,st in res if st=="success")
     fail = sum(1 for _,st in res if st=="failed")
@@ -702,4 +702,4 @@ def choose_final_good_df():
 
 
 if __name__ == '__main__':
-    merger_data()
+    debug1()
