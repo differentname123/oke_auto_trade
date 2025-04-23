@@ -4,6 +4,7 @@
     <content url="file://$MODULE_DIR$">
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/temp" />
+      <excludeFolder url="file://$MODULE_DIR$/ml/daily_data_exclude_new_can_buy" />
     </content>
     <content url="file://$MODULE_DIR$/../../we_project/ShopFusion/llm_service/text_to_video/models/src">
       <sourceFolder url="file://$MODULE_DIR$/../../we_project/ShopFusion/llm_service/text_to_video/models/src" isTestSource="false" />
