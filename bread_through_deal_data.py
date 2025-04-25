@@ -3691,7 +3691,7 @@ def debug():
         # pairs = list(filtered_df[['kai_column', 'pin_column']].itertuples(index=False, name=None))
 
         add_column(inst_id)
-        # origin_good_df = choose_good_strategy_detail(inst_id)
+        origin_good_df = choose_good_strategy_detail(inst_id)
         # origin_good_df.to_parquet(f'temp/{inst_id}_target.parquet', index=False, compression='snappy')
         continue
 
