@@ -14,6 +14,7 @@
 3. 合并所有分箱结果并保存至 CSV 文件；
 4. 提供辅助函数用于内存占用优化、DataFrame 合并等。
 """
+from typing import List, Dict, Any, Tuple
 
 import math
 import os
@@ -240,7 +241,7 @@ def main(n_bins=50, batch_size=10):
       4. 可根据需要调用 process_data_flat、merge_and_compute、auto_reduce_precision 进行后续处理。
     """
     print("【主流程】：开始处理数据")
-    inst_id_list = ['BTC','ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = ['ETH']
     images_dir = "temp_back"
     if not os.path.exists(images_dir):
         os.makedirs(images_dir)
@@ -248,7 +249,7 @@ def main(n_bins=50, batch_size=10):
     total_inst = len(inst_id_list)
     for inst_index, inst_id in enumerate(inst_id_list):
         print(f"\n【处理数据】：开始处理 {inst_id} ({inst_index+1}/{total_inst})")
-        data_file = f'temp/final_good_{inst_id}_false.parquet'
+        data_file = f'temp/final_good_{inst_id}_false_filter_all.parquet'
         data_df = pd.read_parquet(data_file)
         data_df = data_df[data_df['hold_time_mean'] < 5000]
         data_df = data_df[data_df['kai_column'].str.contains('long', na=False)]
@@ -394,7 +395,7 @@ def main(n_bins=50, batch_size=10):
         # 5. 合并所有分箱结果，并保存为 Parquet 文件
         if all_bin_analyses:
             combined_bin_analysis_df = pd.concat(all_bin_analyses, ignore_index=True)
-            combined_file = os.path.join(images_dir, f"combined_bin_analysis_{inst_id}_false.parquet")
+            combined_file = os.path.join(images_dir, f"combined_bin_analysis_{inst_id}_false_new.parquet")
             combined_bin_analysis_df.to_parquet(combined_file, index=False, compression='snappy')
             print(f"【提示】：合并后的 bin_analysis 已保存为 Parquet 文件：{combined_file}")
         else:
@@ -439,9 +440,96 @@ def group_statistics_fast(df: pd.DataFrame,
     return g.reset_index()
 
 
+def group_statistics_and_inst_details(df: pd.DataFrame,
+                                      group_cols: List[str],
+                                      target_cols: List[str]) -> pd.DataFrame:
+    """
+    对 df 按 group_cols 分组，对 target_cols 计算 max, min, mean,
+    positive_ratio, group_count（分组大小），并收集每个 target_col 的
+    {inst_id: value} 字典。
+
+    Args:
+        df: 输入的 Pandas DataFrame。
+        group_cols: 用于分组的列名列表。
+        target_cols: 需要计算统计信息和收集值的列名列表。
+        inst_id_col: 用于创建详细字典 key 的实例 ID 列名。
+
+    Returns:
+        一个 Pandas DataFrame，包含分组键、统计结果以及每个 target_col 的
+        {inst_id: value} 字典。
+
+    Raises:
+        ValueError: 如果 inst_id_col 不在 df 的列中。
+    """
+    inst_id_col = 'inst_id'
+    if inst_id_col not in df.columns:
+        raise ValueError(f"inst_id_col '{inst_id_col}' not found in DataFrame columns.")
+
+    # 定义一个函数，该函数将应用于每个分组 (sub-DataFrame)
+    def aggregate_group(group_df: pd.DataFrame) -> pd.Series:
+        results = {}
+        group_count = len(group_df)
+        results['group_count'] = group_count
+
+        if group_count == 0:
+            # Handle empty groups if they somehow occur
+            for col in target_cols:
+                results[f'{col}_max'] = pd.NA
+                results[f'{col}_min'] = pd.NA
+                results[f'{col}_mean'] = pd.NA
+                results[f'{col}_positive_ratio'] = pd.NA
+                results[f'{col}_details'] = {}
+            return pd.Series(results)
+
+        # Prepare inst_id list once per group
+        inst_ids = group_df[inst_id_col].tolist()
+
+        for col in target_cols:
+            # --- 计算统计指标 ---
+            col_data = group_df[col]
+            results[f'{col}_max'] = col_data.max()
+            results[f'{col}_min'] = col_data.min()
+            results[f'{col}_mean'] = col_data.mean()
+
+            # --- 计算正例比例 ---
+            try:
+                # Attempt numeric conversion for comparison
+                numeric_col = pd.to_numeric(col_data, errors='coerce')
+                # .sum() on boolean True/False counts True as 1
+                positive_sum = (numeric_col > 0).sum()
+                # Calculate ratio, handle division by zero
+                results[f'{col}_positive_ratio'] = positive_sum / group_count if group_count > 0 else pd.NA
+            except TypeError:
+                 # Handle cases where the column is fundamentally non-numeric
+                 print(f"Warning: Column '{col}' could not be coerced to numeric for positive check. Positive ratio set to NA.")
+                 results[f'{col}_positive_ratio'] = pd.NA
+
+
+            # --- 创建 {inst_id: value} 字典 ---
+            target_values = col_data.tolist()
+            # Ensure lengths match (should always if coming from same group_df)
+            if len(inst_ids) == len(target_values):
+                 results[f'{col}_details'] = dict(zip(inst_ids, target_values))
+            else:
+                 # This case should ideally not happen with groupby().apply()
+                 print(f"Warning: Mismatch length between inst_id and {col} in a group. Details dictionary might be incomplete.")
+                 results[f'{col}_details'] = {} # Assign empty dict on error
+
+        # 返回一个 Series，其索引将成为结果 DataFrame 的列
+        return pd.Series(results)
+
+    # 使用 groupby().apply()
+    # dropna=False 保留分组键中的 NaN
+    grouped = df.groupby(group_cols, dropna=False)
+    # Apply the custom function to each group
+    result_df = grouped.apply(aggregate_group) # include_groups=False since pandas 2.2.0 by default but explicit here
+
+    # 重置索引以将分组键变回列
+    return result_df.reset_index()
+
 def merge_data_optimized(
     images_dir: str = "temp_back",
-    inst_id_list: list[str] = ('BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE')
+    inst_id_list: list[str] = ('BTC', 'ETH', 'LTC', 'XRP', 'BCH', 'EOS', 'TRX', 'ZRX', 'QTUM', 'ETC')
 ) -> list[pd.DataFrame]:
     """
     1) 分别读取每个 inst 的 parquet，只保留 feature/bin_seq 和目标列
@@ -457,13 +545,14 @@ def merge_data_optimized(
         'pos_ratio', 'count'
     ]
     positive_ratio_threshold = 0.5
-
+    inst_id_list = ['BTC', 'ETH']
     # 1) 读入并初步筛选
     dfs: list[pd.DataFrame] = []
     for inst in inst_id_list:
         path = os.path.join(images_dir,
-                            f"combined_bin_analysis_{inst}_false.parquet")
+                            f"combined_bin_analysis_{inst}_false_new.parquet")
         df = pd.read_parquet(path, columns=need_cols)
+        df['inst_id'] = inst
 
         # a) feature 分组取 max bin_seq
         feat_max = (
@@ -475,7 +564,7 @@ def merge_data_optimized(
         )
         df = df[df['feature'].isin(feat_max)]
         # b) count 范围筛选
-        df = df.query('10000 < count < 20000')
+        df = df.query('10 < count < 20000')
         # df = df[df['avg_net_profit_rate_new'] > -30]
         dfs.append(df)
 
@@ -520,7 +609,7 @@ def merge_data_optimized(
     # ───────────────────────────────────────────────────────────────
 
     # 4) 分组统计
-    result = group_statistics_fast(
+    result = group_statistics_and_inst_details(
         filtered_df,
         group_cols=['feature', 'bin_seq'],
         target_cols=[
@@ -534,7 +623,7 @@ def merge_data_optimized(
     # 5) 写盘
     os.makedirs('temp', exist_ok=True)
     result.to_parquet(
-        'temp/all_result_df.parquet',
+        'temp/all_result_df_new.parquet',
         index=False,
         compression='snappy'
     )
@@ -543,5 +632,5 @@ def merge_data_optimized(
 
 
 if __name__ == '__main__':
-    main(n_bins=1000, batch_size=100)
-    # merge_data_optimized()
+    # main(n_bins=1000, batch_size=100)
+    merge_data_optimized()

@@ -39,7 +39,7 @@ def calculate_row_correlation(row1, row2):
     根据字段 'monthly_net_profit_detail' 计算两行数据的相关性，
     最终返回相关系数乘以 100 后取整的结果。
     """
-    target_field = "monthly_net_profit_detail"
+    target_field = "weekly_net_profit_detail"
     detail1 = row1.get(target_field, np.array([]))
     detail2 = row2.get(target_field, np.array([]))
     if not isinstance(detail1, np.ndarray):
@@ -80,6 +80,7 @@ def process_group(group_df, sort_key, group_threshold):
     对一个分组的数据先按 sort_key 降序排序，然后遍历比较每一行与已保留行的相关性，
     若相关性大于 group_threshold 则舍弃当前行，最终返回过滤后的 DataFrame。
     """
+    start_time = time.time()
     group_sorted = group_df.sort_values(by=sort_key, ascending=False)
     keep_rows = []
     for _, row in group_sorted.iterrows():
@@ -91,6 +92,7 @@ def process_group(group_df, sort_key, group_threshold):
         if not drop_flag:
             keep_rows.append(row)
     if keep_rows:
+        print(f"组内过滤耗时：{time.time() - start_time:.2f} 秒，原始数量为{len(group_df)}保留行数：{len(keep_rows)}")
         return pd.DataFrame(keep_rows)
     else:
         return pd.DataFrame(columns=group_df.columns)
@@ -510,10 +512,44 @@ def final_compute_corr():
         redundant_pairs_df.to_parquet(corr_path, index=False)
         filtered_origin_good_df.to_parquet(origin_good_path, index=False)
 
+def filter_similar_strategy():
+    """
+    过滤掉太过于相似的策略。
+    :return:
+    """
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    required_columns = ['kai_count', 'net_profit_rate', 'weekly_net_profit_detail', 'max_hold_time', 'kai_column', 'pin_column']
+    all_data_dfs = []  # 用于存储每个文件的 DataFrame
+
+    for inst_id in inst_id_list:
+        data_file = f'temp/final_good_{inst_id}_false.parquet'
+
+        output_path = f'temp/final_good_{inst_id}_false_filter.parquet'
+        if os.path.exists(output_path):
+            # filtered_df = pd.read_parquet(output_path,columns=['kai_column', 'pin_column'])
+            # data_df = pd.read_parquet(data_file)
+            # merged_df = pd.merge(data_df, filtered_df, on=['kai_column', 'pin_column'], how='inner')
+            # merged_df.to_parquet(f'temp/final_good_{inst_id}_false_filter_all.parquet', index=False)
+            print(f'文件已存在，跳过处理：{output_path}')
+            continue
+        data_df = pd.read_parquet(data_file, columns=required_columns)
+        data_df = data_df[data_df['max_hold_time'] < 5000]
+        data_df = data_df[data_df['kai_count'] > 50]
+        data_df = data_df[data_df['kai_column'].str.contains('long', na=False)]
+        # data_df = data_df.head(10000)
+        print(f'处理 {inst_id} 的数据，数据量：{len(data_df)}')
+        filtered_df = filtering(data_df, grouping_column='kai_count', sort_key='net_profit_rate', _unused_threshold=None)
+        filtered_df.to_parquet(output_path, index=False)
+        data_df = pd.read_parquet(data_file)
+        merged_df = pd.merge(data_df, filtered_df, on=['kai_column', 'pin_column'], how='inner')
+        merged_df.to_parquet(f'temp/final_good_{inst_id}_false_filter_all.parquet', index=False)
+        print(f'保存过滤后的数据：{output_path} 长度：{len(filtered_df)}')
+
 
 def example():
+    filter_similar_strategy()
     # debug()
-    final_compute_corr()
+    # final_compute_corr()
 
 
 
