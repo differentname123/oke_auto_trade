@@ -35,6 +35,8 @@ from numba import njit
 import multiprocessing
 import mmh3  # 请确保安装 mmh3: pip install mmh3
 
+IS_REVERSE = False  # 是否反向操作
+
 
 ##############################################
 # 布隆过滤器实现，用于替代保存全局已生成个体的 set
@@ -338,7 +340,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         kai_idx, kai_prices = op_signal(df, kai_column)
         pin_idx, pin_prices = op_signal(df, pin_column)
 
-    if (kai_idx is None or pin_idx is None or kai_idx.size < 100 or pin_idx.size < 100):
+    if (kai_idx is None or pin_idx is None or kai_idx.size < 200 or pin_idx.size < 200):
         return None, None
 
     kai_data_df = df.iloc[kai_idx].copy()
@@ -369,6 +371,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
 
     trade_count = len(kai_data_df)
 
+    # 使用 pin_time 的价格映射 kai_price
     pin_price_map = kai_data_df.set_index("pin_time")["pin_price"]
     mapped_prices = kai_data_df["timestamp"].map(pin_price_map)
     if mapped_prices.notna().sum() > 0:
@@ -376,11 +379,11 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     modification_rate = (100 * mapped_prices.notna().sum() / trade_count) if trade_count else 0
 
     if is_long:
-        profit_series = ((kai_data_df["pin_price"] - kai_data_df["kai_price"]) / kai_data_df["kai_price"] * 100).round(
-            4)
+        profit_series = ((kai_data_df["pin_price"] - kai_data_df["kai_price"]) /
+                         kai_data_df["kai_price"] * 100).round(4)
     else:
-        profit_series = ((kai_data_df["kai_price"] - kai_data_df["pin_price"]) / kai_data_df["kai_price"] * 100).round(
-            4)
+        profit_series = ((kai_data_df["kai_price"] - kai_data_df["pin_price"]) /
+                         kai_data_df["kai_price"] * 100).round(4)
     kai_data_df["profit"] = profit_series
     kai_data_df["true_profit"] = profit_series - 0.07  # 扣除交易成本
     profit_sum = profit_series.sum()
@@ -394,18 +397,22 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
 
     profits_arr = kai_data_df["true_profit"].values
     max_loss, max_loss_start_idx, max_loss_end_idx, loss_trade_count = calculate_max_sequence_numba(profits_arr)
-    if net_profit_rate < 25:
+    if net_profit_rate < 50 or trade_count < 50 or max_loss < -30:
         return None, None
 
     if max_loss_start_idx < len(kai_data_df) and max_loss_end_idx < len(kai_data_df):
         max_loss_hold_time = kai_data_df.index[max_loss_end_idx] - kai_data_df.index[max_loss_start_idx]
+    else:
+        max_loss_hold_time = None
 
     if max_loss_start_idx < len(kai_data_df) and max_loss_end_idx < len(kai_data_df):
         max_profit, max_profit_start_idx, max_profit_end_idx, profit_trade_count = calculate_max_profit_numba(
             profits_arr)
         max_profit_hold_time = kai_data_df.index[max_profit_end_idx] - kai_data_df.index[max_profit_start_idx]
     else:
-        max_profit, max_profit_start_time, max_profit_end_time, max_profit_hold_time = None, None, None, None
+        max_profit, max_profit_start_idx, max_profit_end_idx, profit_trade_count = None, None, None, None
+        max_profit_hold_time = None
+
 
     profit_df = kai_data_df[kai_data_df["true_profit"] > 0]
     loss_df = kai_data_df[kai_data_df["true_profit"] < 0]
@@ -421,7 +428,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     hold_time_mean = kai_data_df["hold_time"].mean() if trade_count else 0
     max_hold_time = kai_data_df["hold_time"].max() if trade_count else 0
 
-    # Monthly statistics
+    # 月度统计
     monthly_groups = kai_data_df["timestamp"].dt.to_period("M")
     monthly_agg = kai_data_df.groupby(monthly_groups)["true_profit"].agg(["sum", "mean", "count"])
     monthly_trade_std = monthly_agg["count"].std() if "count" in monthly_agg else 0
@@ -434,24 +441,46 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     monthly_net_profit_max = monthly_agg["sum"].max() if "sum" in monthly_agg else 0
     monthly_loss_rate = ((monthly_agg["sum"] < 0).sum() / active_months) if active_months else 0
 
-    monthly_net_profit_detail = {str(month): round(val, 4) for month, val in monthly_agg["sum"].to_dict().items()}
+    # 补全完整月序列，保证顺序（缺失月份填 0）
+    start_month = kai_data_df["timestamp"].min().to_period("M")
+    end_month = kai_data_df["timestamp"].max().to_period("M")
+    all_months = pd.period_range(start=start_month, end=end_month, freq="M")
+    monthly_count_series = monthly_agg["count"].reindex(all_months, fill_value=0)
+    monthly_kai_count_detail = monthly_count_series.values  # np.array
+    monthly_kai_count_std = monthly_count_series.std()
+    # 将月度净盈亏补全为完整序列（缺失月份填 0），并转换为 np.array，四舍五入保留四位小数
+    monthly_net_profit_series = monthly_agg["sum"].reindex(all_months, fill_value=0)
+    monthly_net_profit_detail = monthly_net_profit_series.round(4).values
 
-    # Weekly statistics
+    # 周度统计
     weekly_groups = kai_data_df["timestamp"].dt.to_period("W")
     weekly_agg = kai_data_df.groupby(weekly_groups)["true_profit"].agg(["sum", "mean", "count"])
     weekly_trade_std = weekly_agg["count"].std() if "count" in weekly_agg else 0
     active_weeks = weekly_agg.shape[0]
-    total_weeks = len(
-        pd.period_range(start=kai_data_df["timestamp"].min(), end=kai_data_df["timestamp"].max(), freq='W'))
+    total_weeks = len(pd.period_range(start=kai_data_df["timestamp"].min(),
+                                      end=kai_data_df["timestamp"].max(), freq='W'))
     active_week_ratio = active_weeks / total_weeks if total_weeks else 0
     weekly_net_profit_std = weekly_agg["sum"].std() if "sum" in weekly_agg else 0
     weekly_avg_profit_std = weekly_agg["mean"].std() if "mean" in weekly_agg else 0
     weekly_net_profit_min = weekly_agg["sum"].min() if "sum" in weekly_agg else 0
     weekly_net_profit_max = weekly_agg["sum"].max() if "sum" in weekly_agg else 0
     weekly_loss_rate = ((weekly_agg["sum"] < 0).sum() / active_weeks) if active_weeks else 0
-    weekly_net_profit_detail = {str(week): round(val, 4) for week, val in weekly_agg["sum"].to_dict().items()}
+
+    # 补全完整周序列（缺失周填 0），保证顺序
+    start_week = kai_data_df["timestamp"].min().to_period("W")
+    end_week = kai_data_df["timestamp"].max().to_period("W")
+    all_weeks = pd.period_range(start=start_week, end=end_week, freq="W")
+    weekly_count_series = weekly_agg["count"].reindex(all_weeks, fill_value=0)
+    weekly_kai_count_detail = weekly_count_series.values  # np.array
+    weekly_kai_count_std = weekly_count_series.std()
+    # 周度净盈亏补全为完整序列，转换为 np.array，四舍五入保留四位小数
+    weekly_net_profit_series = weekly_agg["sum"].reindex(all_weeks, fill_value=0)
+    weekly_net_profit_detail = weekly_net_profit_series.round(4).values
 
     hold_time_std = kai_data_df["hold_time"].std()
+
+    if active_week_ratio < 0.5 or active_month_ratio < 0.5:
+        return None, None
 
     if not profit_df.empty:
         top_profit_count = max(1, int(np.ceil(len(profit_df) * 0.1)))
@@ -512,9 +541,8 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         "monthly_net_profit_max": safe_round(monthly_net_profit_max, 4),
         "monthly_net_profit_std": safe_round(monthly_net_profit_std, 4),
         "monthly_avg_profit_std": safe_round(monthly_avg_profit_std, 4),
-        "top_profit_ratio": safe_round(top_profit_ratio, 4),
-        "top_loss_ratio": safe_round(top_loss_ratio, 4),
-        "is_reverse": is_reverse,
+        "monthly_kai_count_detail": monthly_kai_count_detail,
+        "monthly_kai_count_std": safe_round(monthly_kai_count_std, 4),
         "monthly_net_profit_detail": monthly_net_profit_detail,
         "weekly_trade_std": safe_round(weekly_trade_std, 4),
         "active_week_ratio": safe_round(active_week_ratio, 4),
@@ -524,6 +552,11 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         "weekly_net_profit_std": safe_round(weekly_net_profit_std, 4),
         "weekly_avg_profit_std": safe_round(weekly_avg_profit_std, 4),
         "weekly_net_profit_detail": weekly_net_profit_detail,
+        "weekly_kai_count_detail": weekly_kai_count_detail,
+        "weekly_kai_count_std": weekly_kai_count_std,
+        "top_profit_ratio": safe_round(top_profit_ratio, 4),
+        "top_loss_ratio": safe_round(top_loss_ratio, 4),
+        "is_reverse": is_reverse,
     }
     kai_data_df = kai_data_df[["hold_time", "true_profit"]]
     return kai_data_df, statistic_dict
@@ -767,12 +800,21 @@ def get_fitness(stat, key, invert=False):
         return -10000
     max_loss = stat.get("max_consecutive_loss", -10000)
     net_profit_rate = stat.get("net_profit_rate", -10000)
-    trade_count = stat.get("kai_count", 0)
-    if max_loss < -10 or net_profit_rate < 50 or trade_count < 50:
+    trade_count = stat.get("kai_count", -10000)
+    active_month_ratio = stat.get("active_month_ratio", -10000)
+    if max_loss < -20 or net_profit_rate < 100 or trade_count < 100 or active_month_ratio < 0.8:
         return -10000
-    hold_time_mean = stat.get("hold_time_mean", 0)
-    true_profit_mean = stat.get("avg_profit_rate", 0)
-    if hold_time_mean > 3000 or true_profit_mean < 10:
+
+    weekly_loss_rate = stat.get("weekly_loss_rate", 10000)
+    monthly_loss_rate = stat.get("monthly_loss_rate", 10000)
+    top_profit_ratio = stat.get("top_profit_ratio", 10000)
+    if weekly_loss_rate > 0.2 or monthly_loss_rate > 0.2 or top_profit_ratio > 0.5:
+        return -10000
+
+    hold_time_mean = stat.get("hold_time_mean", 100000)
+    max_hold_time = stat.get("max_hold_time", 100000)
+    true_profit_mean = stat.get("avg_profit_rate", -10000)
+    if hold_time_mean > 3000 or true_profit_mean < 10 or max_hold_time > 10000:
         return -10000
 
     value = stat.get(key, -10000)
@@ -780,25 +822,16 @@ def get_fitness(stat, key, invert=False):
 
 
 # 声明两组 key:
-normal_keys = ['monthly_net_profit_min', 'fu_profit_sum', 'max_consecutive_loss', 'weekly_net_profit_min', 'min_profit']
+normal_keys = ['max_consecutive_loss', 'monthly_net_profit_min', 'weekly_net_profit_min', 'net_profit_rate',
+               'min_profit', 'fu_profit_mean', 'avg_profit_rate']
 
-
-inverted_keys = ['hold_time_mean','loss_time_rate', 'zhen_profit_sum', 'weekly_loss_rate', 'top_profit_ratio']
-
-
+inverted_keys = ['monthly_net_profit_std', 'monthly_loss_rate', 'weekly_loss_rate', 'true_profit_std',
+                 'weekly_net_profit_std', 'loss_rate', 'top_loss_ratio']
 
 combined_keys = [
-    "monthly_net_profit_min",  # 累计净收益率：总体收益水平（高收益不一定稳定，但也是评估的重要指标）
-    "hold_time_mean",  # 交易次数：足够的样本数量更具说服力
-    "loss_time_rate",  # 单笔最差收益：反映个别极端亏损
-
-    "fu_profit_sum",  # 单笔真实收益波动：最直观的波动性指标
-    "max_consecutive_loss",  # 月度净收益波动：反映月内稳定性
-    "weekly_net_profit_min",  # 周度净收益波动：反映短期稳定性
-    "min_profit",  # 亏损率：亏损交易比例越低，策略越稳健
-    "zhen_profit_sum",  # 月度净收益波动：反映月内稳定性
-    "weekly_loss_rate",  # 周度净收益波动：反映短期稳定性
-    "top_profit_ratio",  # 亏损率：亏损交易比例越低，策略越稳健
+    'max_consecutive_loss', 'monthly_net_profit_min', 'weekly_net_profit_min', 'net_profit_rate', 'min_profit',
+    'fu_profit_mean', 'avg_profit_rate', 'monthly_net_profit_std', 'monthly_loss_rate', 'weekly_loss_rate',
+    'true_profit_std', 'weekly_net_profit_std', 'loss_rate', 'top_loss_ratio'
 
 ]
 
@@ -822,7 +855,7 @@ def evaluate_candidate_batch(candidates, fitness_func=get_fitness_net):
     batch_results = []
     for candidate in candidates:
         long_sig, short_sig = candidate
-        _, stat = get_detail_backtest_result_op(df, long_sig, short_sig, is_filter=True, is_reverse=False)
+        _, stat = get_detail_backtest_result_op(df, long_sig, short_sig, is_filter=True, is_reverse=IS_REVERSE)
         fitness = fitness_func(stat)
         batch_results.append((fitness, candidate, stat))
     return batch_results
@@ -899,6 +932,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
         def _save():
             with open(checkpoint_file, "wb") as f:
                 pickle.dump(data, f)
+
         t = threading.Thread(target=_save)
         t.daemon = True
         t.start()
@@ -906,6 +940,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     def save_stats_async(df_stats, file_name):
         def _save():
             df_stats.to_parquet(file_name, index=False, compression='snappy')
+
         t = threading.Thread(target=_save)
         t.daemon = True
         t.start()
@@ -998,7 +1033,9 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     fitness_index = 0
     pre_fitness_index = 0
     partial_eval = partial(evaluate_candidate_batch, fitness_func=get_fitness_list[fitness_index])
-    print(f"开始搜索，总代数: {generations}，每代种群大小: {population_size}，岛屿数量: {islands_count}，适应度函数个数: {len(get_fitness_list)}。")
+    IS_REVERSE = False
+    print(
+        f"开始搜索，总代数: {generations}，每代种群大小: {population_size}，岛屿数量: {islands_count}，适应度函数个数: {len(get_fitness_list)}。 是否反向评估: {IS_REVERSE}。")
 
     with multiprocessing.Pool(processes=pool_processes, initializer=init_worker_ga,
                               initargs=(GLOBAL_SIGNALS, df)) as pool:
@@ -1133,7 +1170,8 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                         sorted_fit1 = islands[i]["sorted_fitness"]
                         sorted_fit2 = islands[j]["sorted_fitness"]
                         n = len(sorted_fit1) // 2
-                        sim = sum(abs(a - b) for a, b in zip(sorted_fit1[:n], sorted_fit2[:n])) / n if n > 0 else float('inf')
+                        sim = sum(abs(a - b) for a, b in zip(sorted_fit1[:n], sorted_fit2[:n])) / n if n > 0 else float(
+                            'inf')
                         print(f"[GEN {gen}] 岛 {i} 与岛 {j} 前50%个体相似度: {sim:.4f}")
                         if sim < restart_similarity_threshold:
                             restart_idx = i if islands[i]["best_fitness"] < islands[j]["best_fitness"] else j
@@ -1165,7 +1203,8 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                 global_no_improve_count = 0
             prev_overall_best = overall_best
             log_if_slow("全代总耗时", gen_elapsed_time, gen)
-            print(f"[GEN {gen}] 全局最优: {overall_best}，适应度: {overall_best_fitness}，连续无改进: {global_no_improve_count}")
+            print(
+                f"[GEN {gen}] 全局最优: {overall_best}，适应度: {overall_best_fitness}，连续无改进: {global_no_improve_count}")
 
             # -- 判断是否需要切换适应度函数或执行全局重启 --
             need_restart = False
@@ -1225,7 +1264,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
             if island_stats_list:
                 stats_save_start = time.time()
                 df_stats = pd.DataFrame(island_stats_list).drop_duplicates(subset=["kai_column", "pin_column"])
-                stats_file_name = os.path.join(checkpoint_dir, f"{key_name}_{gen}_stats.parquet")
+                stats_file_name = os.path.join(checkpoint_dir, f"{key_name}_{gen}_{IS_REVERSE}_stats.parquet")
                 save_stats_async(df_stats, stats_file_name)
                 stats_save_end = time.time()
                 log_if_slow("保存统计信息异步发起", stats_save_end - stats_save_start, gen)
@@ -1239,7 +1278,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
             if (gen + 1) % 50 == 0:
                 try:
                     data_to_save = (gen + 1, islands, overall_best, overall_best_fitness, all_history,
-                                     global_generated_individuals)
+                                    global_generated_individuals)
                     save_checkpoint_async(data_to_save, checkpoint_file)
                     print(f"[GEN {gen}] 第 {gen} 代 checkpoint 异步保存发起。")
                 except Exception as e:
@@ -1283,7 +1322,7 @@ def ga_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
     print(f"种群规模: {population_size}，信号总数: {len(all_signals)}")
     best_candidate, best_fitness, history = genetic_algorithm_optimization(
         df_local, all_signals, all_signals,
-        population_size=population_size, generations=500,
+        population_size=population_size, generations=700,
         crossover_rate=0.9, mutation_rate=0.2,
         key_name=f'{base_name}_{key_name}',
         islands_count=4, migration_interval=10, migration_rate=0.05
@@ -1297,11 +1336,11 @@ def example():
     """
     start_time = time.time()
     data_path_list = [
-        # "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_10000000_DOGE-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_DOGE-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_XRP-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_PEPE-USDT-SWAP.csv"
     ]
