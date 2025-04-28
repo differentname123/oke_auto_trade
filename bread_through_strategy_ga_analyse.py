@@ -241,7 +241,7 @@ def main(n_bins=50, batch_size=10):
       4. 可根据需要调用 process_data_flat、merge_and_compute、auto_reduce_precision 进行后续处理。
     """
     print("【主流程】：开始处理数据")
-    inst_id_list = ['ETH']
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     images_dir = "temp_back"
     if not os.path.exists(images_dir):
         os.makedirs(images_dir)
@@ -395,7 +395,7 @@ def main(n_bins=50, batch_size=10):
         # 5. 合并所有分箱结果，并保存为 Parquet 文件
         if all_bin_analyses:
             combined_bin_analysis_df = pd.concat(all_bin_analyses, ignore_index=True)
-            combined_file = os.path.join(images_dir, f"combined_bin_analysis_{inst_id}_false_new.parquet")
+            combined_file = os.path.join(images_dir, f"combined_bin_analysis_{inst_id}_false_new_1000.parquet")
             combined_bin_analysis_df.to_parquet(combined_file, index=False, compression='snappy')
             print(f"【提示】：合并后的 bin_analysis 已保存为 Parquet 文件：{combined_file}")
         else:
@@ -545,12 +545,12 @@ def merge_data_optimized(
         'pos_ratio', 'count'
     ]
     positive_ratio_threshold = 0.5
-    inst_id_list = ['BTC', 'ETH']
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     # 1) 读入并初步筛选
     dfs: list[pd.DataFrame] = []
     for inst in inst_id_list:
         path = os.path.join(images_dir,
-                            f"combined_bin_analysis_{inst}_false_new.parquet")
+                            f"combined_bin_analysis_{inst}_false_new_1000.parquet")
         df = pd.read_parquet(path, columns=need_cols)
         df['inst_id'] = inst
 
@@ -623,7 +623,7 @@ def merge_data_optimized(
     # 5) 写盘
     os.makedirs('temp', exist_ok=True)
     result.to_parquet(
-        'temp/all_result_df_new.parquet',
+        'temp/all_result_df_new_1000.parquet',
         index=False,
         compression='snappy'
     )
@@ -632,5 +632,5 @@ def merge_data_optimized(
 
 
 if __name__ == '__main__':
-    # main(n_bins=1000, batch_size=100)
-    merge_data_optimized()
+    main(n_bins=1000, batch_size=12000)
+    # merge_data_optimized()

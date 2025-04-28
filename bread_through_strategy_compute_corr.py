@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 from concurrent.futures import ProcessPoolExecutor
 from scipy.stats import spearmanr
+import json
 
 # 全局变量，用于在多进程中保存解析后的行数据
 GLOBAL_PARSED_ROWS = None
@@ -92,7 +93,7 @@ def process_group(group_df, sort_key, group_threshold):
         if not drop_flag:
             keep_rows.append(row)
     if keep_rows:
-        print(f"组内过滤耗时：{time.time() - start_time:.2f} 秒，原始数量为{len(group_df)}保留行数：{len(keep_rows)}")
+        # print(f"组内过滤耗时：{time.time() - start_time:.2f} 秒，原始数量为{len(group_df)}保留行数：{len(keep_rows)}")
         return pd.DataFrame(keep_rows)
     else:
         return pd.DataFrame(columns=group_df.columns)
@@ -121,7 +122,7 @@ def filtering(origin_good_df, grouping_column, sort_key, _unused_threshold):
     if start < n:
         groups.append(df_sorted.iloc[start:n])
     # 根据组的数量动态计算组内相关性过滤阈值
-    group_threshold = max(10, 95 - int(0.01 * len(groups)))
+    group_threshold = max(10, 95 - int(0.1 * len(groups)))
     print(f"总分组数量：{len(groups)} ，组内相关性阈值：{group_threshold}")
 
     filtered_dfs = []
@@ -192,7 +193,7 @@ def find_all_valid_groups(file_path):
     调用 gen_statistic_data 计算统计数据，
     并将结果保存到 temp/corr 目录下，同时打印处理日志。
     """
-    correlation_field = 'monthly_net_profit_detail'
+    correlation_field = 'weekly_net_profit_detail'
     base_name = os.path.basename(file_path)
     output_path = f'temp/corr/{base_name}_origin_good_{correlation_field}.parquet'
     if os.path.exists(output_path):
@@ -491,6 +492,98 @@ def select_strategies_optimized(
     return selected_strategies_df, selected_correlation_df
 
 
+def extract_nested_key(df, target_key):
+    """
+    从 DataFrame 中所有以 '_detail' 结尾的列（包含字典或JSON字符串）提取指定 target_key 的值，
+    并将提取的值放入新的列中。
+
+    Args:
+        df (pd.DataFrame): 输入的 Pandas DataFrame。
+        target_key (str): 需要从字典中提取的键名。
+
+    Returns:
+        pd.DataFrame: 包含新增列的 DataFrame 副本。
+                      新列的命名规则是：原始列名去除 '_detail' 后缀，加上 '_<target_key>'。
+    """
+    df_result = df.copy() # 创建副本，避免修改原始 DataFrame
+    detail_columns = [col for col in df.columns if col.endswith('_details')]
+
+    for col_name in detail_columns:
+        # 构建新列的名称
+        base_name = col_name.rsplit('_details', 1)[0] # 去掉末尾的 _detail
+        new_col_name = f"{base_name}_{target_key}"
+
+        # 定义用于提取值的函数
+        def get_value_from_cell(cell_data):
+            if pd.isna(cell_data): # 处理 NaN 或 None 值
+                return None
+
+            data_dict = None
+            # 检查是否已经是字典
+            if isinstance(cell_data, dict):
+                data_dict = cell_data
+            # 检查是否是字符串，尝试解析为 JSON
+            elif isinstance(cell_data, str):
+                try:
+                    parsed_data = json.loads(cell_data.replace("'", "\"")) # 尝试替换单引号以处理非标准JSON
+                    if isinstance(parsed_data, dict):
+                       data_dict = parsed_data
+                    else:
+                        # 解析结果不是字典（可能是列表、字符串、数字等）
+                        return None
+                except json.JSONDecodeError:
+                    # 如果字符串不是有效的 JSON 格式，则认为无法提取
+                    # 可以选择性地添加日志记录或警告
+                    # print(f"Warning: Could not decode JSON in column {col_name}: {cell_data}")
+                    return None
+                except Exception as e:
+                    # 处理其他可能的解析错误
+                    # print(f"Warning: Error processing cell in column {col_name}: {e}")
+                    return None
+
+            # 如果成功获取了字典，则尝试提取 target_key 的值
+            if data_dict is not None:
+                return data_dict.get(target_key) # 使用 .get() 避免 KeyError，如果键不存在则返回 None
+
+            # 如果不是字典也不是可解析的 JSON 字符串，则返回 None
+            return None
+
+        # 应用函数到列，并将结果存入新列
+        df_result[new_col_name] = df_result[col_name].apply(get_value_from_cell)
+
+    return df_result
+
+def filter_good_df(inst_id):
+
+    sort_key = 'avg_net_profit_rate_new_positive_ratio'
+
+    good_feature_df = pd.read_parquet('temp/all_result_df_new_1000.parquet')
+    new_df = extract_nested_key(good_feature_df, inst_id)
+    new_df = new_df[(new_df[f'pos_ratio_{inst_id}'] > 0.5) &
+                    (new_df[f'avg_net_profit_rate_new_{inst_id}'] > 5) &
+                    (new_df['avg_net_profit_rate_new_min'] > -10) &
+                    (new_df[sort_key] > 0.8) &
+                    ((new_df['bin_seq'] > 990) | (new_df['bin_seq'] < 10)) &
+                    (new_df[f'min_net_profit_{inst_id}'] > -20)
+                    ]
+    new_df['count'] = new_df.groupby(['feature'])['bin_seq'].transform('count')
+    new_df = new_df[new_df['count'] > 1]
+    new_df['feature_bin_seq'] = new_df['feature'].astype(str) + '_' + new_df['bin_seq'].astype(str)
+    feature_bin_seq_list = new_df['feature_bin_seq'].tolist()
+    final_df = pd.read_parquet('temp/corr/final_good_df.parquet')
+    # 如果final_df包含value列，则删除
+    if 'index' in final_df.columns:
+        final_df = final_df.drop(columns=['index'])
+    filter_df = final_df[final_df['inst_id'] == inst_id]
+    filter_df = filter_df[filter_df['feature'].isin(feature_bin_seq_list)]
+    # 将filter_df按照kai_column和pin_column分组然后统计相应的数量作为新的一列，叫做count
+    filter_df['count'] = filter_df.groupby(['kai_column', 'pin_column'])['feature'].transform('count')
+    filter_df = filter_df.drop_duplicates(subset=['kai_column', 'pin_column'])
+    origin_good_path = f'temp/corr/{inst_id}_origin_good.parquet'
+    strategy_df = pd.read_parquet(origin_good_path,columns=['kai_column', 'pin_column', 'index'])
+    filter_df = pd.merge(filter_df, strategy_df, on=['kai_column', 'pin_column'], how='inner')
+    return filter_df
+
 def final_compute_corr():
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     final_df = pd.read_parquet('temp/corr/final_good_df.parquet')
@@ -499,9 +592,14 @@ def final_compute_corr():
         corr_path = f'temp/corr/{inst_id}_corr.parquet'
         origin_good_path = f'temp/corr/{inst_id}_origin_good.parquet'
         # strategy_df = pd.read_parquet(origin_good_path)
-        # correlation_df = pd.read_parquet(corr_path)
-        # selected_strategies, selected_correlation_df = select_strategies_optimized(strategy_df, correlation_df, k=5,
-        #                             penalty_scaler=1.0, use_absolute_correlation=True)
+        # 计算score，逻辑为对kai_count取对数，然后除以max_consecutive_loss
+        # strategy_df['score666'] = strategy_df['kai_count'].apply(lambda x: np.log(x) if x > 0 else 0) / strategy_df['max_consecutive_loss']
+
+        strategy_df = filter_good_df(inst_id)
+
+        correlation_df = pd.read_parquet(corr_path)
+        selected_strategies, selected_correlation_df = select_strategies_optimized(strategy_df, correlation_df, k=5,
+                                    penalty_scaler=1.0, use_absolute_correlation=True)
 
 
         filter_df = final_df[final_df['inst_id'] == inst_id]
@@ -517,7 +615,7 @@ def filter_similar_strategy():
     过滤掉太过于相似的策略。
     :return:
     """
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list =  ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     required_columns = ['kai_count', 'net_profit_rate', 'weekly_net_profit_detail', 'max_hold_time', 'kai_column', 'pin_column']
     all_data_dfs = []  # 用于存储每个文件的 DataFrame
 
@@ -526,10 +624,10 @@ def filter_similar_strategy():
 
         output_path = f'temp/final_good_{inst_id}_false_filter.parquet'
         if os.path.exists(output_path):
-            # filtered_df = pd.read_parquet(output_path,columns=['kai_column', 'pin_column'])
-            # data_df = pd.read_parquet(data_file)
-            # merged_df = pd.merge(data_df, filtered_df, on=['kai_column', 'pin_column'], how='inner')
-            # merged_df.to_parquet(f'temp/final_good_{inst_id}_false_filter_all.parquet', index=False)
+            filtered_df = pd.read_parquet(output_path,columns=['kai_column', 'pin_column'])
+            data_df = pd.read_parquet(data_file)
+            merged_df = pd.merge(data_df, filtered_df, on=['kai_column', 'pin_column'], how='inner')
+            merged_df.to_parquet(f'temp/final_good_{inst_id}_false_filter_all.parquet', index=False)
             print(f'文件已存在，跳过处理：{output_path}')
             continue
         data_df = pd.read_parquet(data_file, columns=required_columns)
@@ -540,6 +638,7 @@ def filter_similar_strategy():
         print(f'处理 {inst_id} 的数据，数据量：{len(data_df)}')
         filtered_df = filtering(data_df, grouping_column='kai_count', sort_key='net_profit_rate', _unused_threshold=None)
         filtered_df.to_parquet(output_path, index=False)
+        filtered_df = pd.read_parquet(output_path,columns=['kai_column', 'pin_column'])
         data_df = pd.read_parquet(data_file)
         merged_df = pd.merge(data_df, filtered_df, on=['kai_column', 'pin_column'], how='inner')
         merged_df.to_parquet(f'temp/final_good_{inst_id}_false_filter_all.parquet', index=False)
@@ -547,9 +646,10 @@ def filter_similar_strategy():
 
 
 def example():
-    filter_similar_strategy()
+    # filter_similar_strategy()
+    final_compute_corr()
     # debug()
-    # final_compute_corr()
+
 
 
 

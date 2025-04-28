@@ -2196,15 +2196,15 @@ def choose_good_strategy_detail(inst_id='BTC'):
     skipped_count = 0
 
     # 载入全部结果数据，并做初步筛选
-    good_feature_df = pd.read_parquet('temp/all_result_df.parquet')
+    good_feature_df = pd.read_parquet('temp/all_result_df_new.parquet')
     sort_key = 'avg_net_profit_rate_new_positive_ratio'
 
     # 筛选 bin_seq 为 1 或 1000 的行，并进一步筛选 sort_key > 0 与 count_min 大于 10000
     good_feature_df = good_feature_df[
         # good_feature_df['bin_seq'].isin([1, 1000]) &
         (good_feature_df['avg_net_profit_rate_new_min'] > -10) &
-        (good_feature_df[sort_key] > 0.8) &
-        (good_feature_df['count_min'] > 10000)
+        (good_feature_df[sort_key] > 0.8)
+        # (good_feature_df['count_min'] > 10000)
         ]
 
     # # 保留 spearman_pos_ratio_min 与 spearman_pos_ratio_max 同号的数据
@@ -2220,8 +2220,8 @@ def choose_good_strategy_detail(inst_id='BTC'):
     print(f"good_feature_df的行数为：{len(good_feature_df)}")
 
     # 载入详细区间数据及基础数据
-    detail_data_df = pd.read_parquet(f'temp_back/combined_bin_analysis_{inst_id}_false.parquet')
-    data_df = pd.read_parquet(f'temp/final_good_{inst_id}_false.parquet')
+    detail_data_df = pd.read_parquet(f'temp_back/combined_bin_analysis_{inst_id}_false_new.parquet')
+    data_df = pd.read_parquet(f'temp/final_good_{inst_id}_false_filter_all.parquet')
     data_df = data_df[data_df['hold_time_mean'] < 5000]
     data_df = data_df[data_df['kai_column'].str.contains('long', na=False)]
     print(f"【提示】：数据加载完成，数据行数：{data_df.shape[0]}")
@@ -2253,7 +2253,7 @@ def choose_good_strategy_detail(inst_id='BTC'):
 
         # 筛选符合区间条件的数据
         filter_data_df = data_df[(data_df[feature] >= start_value) & (data_df[feature] < end_value)]
-        if filter_data_df.shape[0] < 10000 or filter_data_df.shape[0] > 20000:
+        if filter_data_df.shape[0] < 10 or filter_data_df.shape[0] > 10000:
             print(f"警告：特征 '{feature}' 的筛选数据行数不足或包含 NaN 值，跳过该特征")
             continue
         print(
@@ -3611,9 +3611,8 @@ def add_column(inst_id):
     columns_to_read = merge_columns + target_columns
 
     # 构造读取的新数据文件路径
-    source_filename = f"{inst_id}_all_df.parquet_1m_15000_{inst_id}-USDT-SWAP_2025-04-20.csvstatistic_results_final.parquet"
+    source_filename = f'final_good_{inst_id}_false_filter.parquet_1m_15000_{inst_id}-USDT-SWAP_2025-04-20.csvstatistic_results_final.parquet'
     source_filepath = os.path.join(back_dir, source_filename)
-
     # 读取指定列
     new_df = pd.read_parquet(source_filepath, columns=columns_to_read)
 
