@@ -343,11 +343,13 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     if (kai_idx is None or pin_idx is None or kai_idx.size < 200 or pin_idx.size < 200):
         return None, None
 
+    # 根据信号索引提取子数据集
     kai_data_df = df.iloc[kai_idx].copy()
     pin_data_df = df.iloc[pin_idx].copy()
     kai_data_df["kai_price"] = kai_prices
     pin_data_df["pin_price"] = pin_prices
 
+    # 信号匹配：使用 np.searchsorted 找到 pin 的匹配位置
     kai_idx_arr = np.asarray(kai_data_df.index)
     pin_idx_arr = np.asarray(pin_data_df.index)
     pin_match_indices = np.searchsorted(pin_idx_arr, kai_idx_arr, side="right")
@@ -355,29 +357,34 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     if valid_mask.sum() == 0:
         return None, None
 
+    # 只保留有匹配的交易
     kai_data_df = kai_data_df.iloc[valid_mask].copy()
     kai_idx_valid = kai_idx_arr[valid_mask]
     pin_match_indices_valid = pin_match_indices[valid_mask]
     matched_pin = pin_data_df.iloc[pin_match_indices_valid].copy()
 
+    # 增加匹配的 pin 数据
     kai_data_df["pin_price"] = matched_pin["pin_price"].values
     kai_data_df["pin_time"] = matched_pin["timestamp"].values
     kai_data_df["hold_time"] = matched_pin.index.values - kai_idx_valid
 
+    # 根据传入的参数判断做多或做空策略
     is_long = (("long" in kai_column.lower()) if not is_reverse else ("short" in kai_column.lower()))
 
     if is_filter:
+        # 排序并去除重复的pin_time记录
         kai_data_df = kai_data_df.sort_values("timestamp").drop_duplicates("pin_time", keep="first")
 
     trade_count = len(kai_data_df)
 
-    # 使用 pin_time 的价格映射 kai_price
+    # 使用 pin_time 的价格映射 kai_price，如果存在更新价格
     pin_price_map = kai_data_df.set_index("pin_time")["pin_price"]
     mapped_prices = kai_data_df["timestamp"].map(pin_price_map)
     if mapped_prices.notna().sum() > 0:
         kai_data_df["kai_price"] = mapped_prices.combine_first(kai_data_df["kai_price"])
     modification_rate = (100 * mapped_prices.notna().sum() / trade_count) if trade_count else 0
 
+    # 计算盈亏比例（百分比）并扣除交易成本
     if is_long:
         profit_series = ((kai_data_df["pin_price"] - kai_data_df["kai_price"]) /
                          kai_data_df["kai_price"] * 100).round(4)
@@ -395,6 +402,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     fix_profit = safe_round(kai_data_df[mapped_prices.notna()]["true_profit"].sum(), ndigits=4)
     net_profit_rate = kai_data_df["true_profit"].sum() - fix_profit
 
+    # 计算连续盈利金额或者亏损的序列，函数 calculate_max_sequence_numba 和 calculate_max_profit_numba 假设已定义
     profits_arr = kai_data_df["true_profit"].values
     max_loss, max_loss_start_idx, max_loss_end_idx, loss_trade_count = calculate_max_sequence_numba(profits_arr)
     if net_profit_rate < 50 or trade_count < 50 or max_loss < -30:
@@ -406,13 +414,11 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         max_loss_hold_time = None
 
     if max_loss_start_idx < len(kai_data_df) and max_loss_end_idx < len(kai_data_df):
-        max_profit, max_profit_start_idx, max_profit_end_idx, profit_trade_count = calculate_max_profit_numba(
-            profits_arr)
+        max_profit, max_profit_start_idx, max_profit_end_idx, profit_trade_count = calculate_max_profit_numba(profits_arr)
         max_profit_hold_time = kai_data_df.index[max_profit_end_idx] - kai_data_df.index[max_profit_start_idx]
     else:
         max_profit, max_profit_start_idx, max_profit_end_idx, profit_trade_count = None, None, None, None
         max_profit_hold_time = None
-
 
     profit_df = kai_data_df[kai_data_df["true_profit"] > 0]
     loss_df = kai_data_df[kai_data_df["true_profit"] < 0]
@@ -428,60 +434,67 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     hold_time_mean = kai_data_df["hold_time"].mean() if trade_count else 0
     max_hold_time = kai_data_df["hold_time"].max() if trade_count else 0
 
-    # 月度统计
+    # 使用整个原始 df 的最早和最晚时间作为统计范围，确保不同信号使用统一范围
+    full_start_time = df["timestamp"].min()
+    full_end_time = df["timestamp"].max()
+
+    # --------------------- 月度统计 ---------------------
     monthly_groups = kai_data_df["timestamp"].dt.to_period("M")
     monthly_agg = kai_data_df.groupby(monthly_groups)["true_profit"].agg(["sum", "mean", "count"])
     monthly_trade_std = monthly_agg["count"].std() if "count" in monthly_agg else 0
     active_months = monthly_agg.shape[0]
-    total_months = 22
+
+    start_month_all = full_start_time.to_period("M")
+    end_month_all = full_end_time.to_period("M")
+    all_months = pd.period_range(start=start_month_all, end=end_month_all, freq="M")
+    total_months = len(all_months)
     active_month_ratio = active_months / total_months if total_months else 0
+
     monthly_net_profit_std = monthly_agg["sum"].std() if "sum" in monthly_agg else 0
     monthly_avg_profit_std = monthly_agg["mean"].std() if "mean" in monthly_agg else 0
     monthly_net_profit_min = monthly_agg["sum"].min() if "sum" in monthly_agg else 0
     monthly_net_profit_max = monthly_agg["sum"].max() if "sum" in monthly_agg else 0
     monthly_loss_rate = ((monthly_agg["sum"] < 0).sum() / active_months) if active_months else 0
 
-    # 补全完整月序列，保证顺序（缺失月份填 0）
-    start_month = kai_data_df["timestamp"].min().to_period("M")
-    end_month = kai_data_df["timestamp"].max().to_period("M")
-    all_months = pd.period_range(start=start_month, end=end_month, freq="M")
     monthly_count_series = monthly_agg["count"].reindex(all_months, fill_value=0)
-    monthly_kai_count_detail = monthly_count_series.values  # np.array
+    monthly_kai_count_detail = monthly_count_series.values
     monthly_kai_count_std = monthly_count_series.std()
-    # 将月度净盈亏补全为完整序列（缺失月份填 0），并转换为 np.array，四舍五入保留四位小数
+
     monthly_net_profit_series = monthly_agg["sum"].reindex(all_months, fill_value=0)
     monthly_net_profit_detail = monthly_net_profit_series.round(4).values
 
-    # 周度统计
+    # --------------------- 周度统计 ---------------------
     weekly_groups = kai_data_df["timestamp"].dt.to_period("W")
     weekly_agg = kai_data_df.groupby(weekly_groups)["true_profit"].agg(["sum", "mean", "count"])
     weekly_trade_std = weekly_agg["count"].std() if "count" in weekly_agg else 0
     active_weeks = weekly_agg.shape[0]
-    total_weeks = len(pd.period_range(start=kai_data_df["timestamp"].min(),
-                                      end=kai_data_df["timestamp"].max(), freq='W'))
+
+    start_week_all = full_start_time.to_period("W")
+    end_week_all = full_end_time.to_period("W")
+    all_weeks = pd.period_range(start=start_week_all, end=end_week_all, freq="W")
+    total_weeks = len(all_weeks)
     active_week_ratio = active_weeks / total_weeks if total_weeks else 0
+
     weekly_net_profit_std = weekly_agg["sum"].std() if "sum" in weekly_agg else 0
     weekly_avg_profit_std = weekly_agg["mean"].std() if "mean" in weekly_agg else 0
     weekly_net_profit_min = weekly_agg["sum"].min() if "sum" in weekly_agg else 0
     weekly_net_profit_max = weekly_agg["sum"].max() if "sum" in weekly_agg else 0
     weekly_loss_rate = ((weekly_agg["sum"] < 0).sum() / active_weeks) if active_weeks else 0
 
-    # 补全完整周序列（缺失周填 0），保证顺序
-    start_week = kai_data_df["timestamp"].min().to_period("W")
-    end_week = kai_data_df["timestamp"].max().to_period("W")
-    all_weeks = pd.period_range(start=start_week, end=end_week, freq="W")
     weekly_count_series = weekly_agg["count"].reindex(all_weeks, fill_value=0)
-    weekly_kai_count_detail = weekly_count_series.values  # np.array
+    weekly_kai_count_detail = weekly_count_series.values
     weekly_kai_count_std = weekly_count_series.std()
-    # 周度净盈亏补全为完整序列，转换为 np.array，四舍五入保留四位小数
+
     weekly_net_profit_series = weekly_agg["sum"].reindex(all_weeks, fill_value=0)
     weekly_net_profit_detail = weekly_net_profit_series.round(4).values
 
     hold_time_std = kai_data_df["hold_time"].std()
 
+    # 当统计时间范围中活跃的月份或周不足时，则返回 None
     if active_week_ratio < 0.5 or active_month_ratio < 0.5:
         return None, None
 
+    # 统计 top 10% 盈利和亏损的比率
     if not profit_df.empty:
         top_profit_count = max(1, int(np.ceil(len(profit_df) * 0.1)))
         profit_sorted = profit_df.sort_values("true_profit", ascending=False)
@@ -558,6 +571,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         "top_loss_ratio": safe_round(top_loss_ratio, 4),
         "is_reverse": is_reverse,
     }
+    # 返回的 kai_data_df 仅保留持有时间和真实盈亏两列
     kai_data_df = kai_data_df[["hold_time", "true_profit"]]
     return kai_data_df, statistic_dict
 
