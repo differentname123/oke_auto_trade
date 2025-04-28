@@ -821,6 +821,91 @@ def get_fitness(stat, key, invert=False):
     return -value if invert else value
 
 
+def get_fitness_op(stat, key, invert=False):
+    """
+    根据统计结果 stat 和目标指标 key 计算适应度。
+
+    所有不满足限定条件的指标均采用二次惩罚：
+      - 对于要求“至少达到某个下限”的指标（如 max_consecutive_loss、net_profit_rate、kai_count、active_month_ratio 和 avg_profit_rate），
+        当数值低于下限时，计算 diff = (下限 - 指标值)，惩罚为 diff**2 * 系数。
+      - 对于要求“至多不超过某个上限”的指标（如 weekly_loss_rate、monthly_loss_rate、top_profit_ratio、hold_time_mean 和 max_hold_time），
+        当数值超过上限时，计算 diff = (指标值 - 上限)，惩罚为 diff**2 * 系数。
+
+    如果 stat 为 None 或目标指标 key 不存在，则基础值 base 设为 0。
+    最终适应度为基础值减去所有累加的惩罚项。
+    """
+    if stat is None:
+        return -10000
+
+    # 取目标指标的基础值，若不存在，则设为 0
+    base = stat.get(key, 0)
+    penalty = 0.0
+
+    # 1. 最大连续亏损（max_consecutive_loss）：要求 >= -20
+    max_loss = stat.get("max_consecutive_loss", -10000)
+    if max_loss < -20:
+        diff = -20 - max_loss  # 正数
+        penalty += (diff ** 2) * 10
+
+    # 2. 净利润率（net_profit_rate）：要求 >= 100
+    net_profit_rate = stat.get("net_profit_rate", -10000)
+    if net_profit_rate < 100:
+        diff = 100 - net_profit_rate
+        penalty += (diff ** 2) * 10
+
+    # 3. 交易次数（kai_count）：要求 >= 100
+    trade_count = stat.get("kai_count", -10000)
+    if trade_count < 100:
+        diff = 100 - trade_count
+        penalty += (diff ** 2) * 10
+
+    # 4. 活跃月份比例（active_month_ratio）：要求 >= 0.8
+    active_month_ratio = stat.get("active_month_ratio", -10000)
+    if active_month_ratio < 0.8:
+        diff = 0.8 - active_month_ratio
+        # 由于 diff 通常为小数，为了使惩罚较为明显，这里的系数调大到 10000
+        penalty += (diff ** 2) * 10000
+
+    # 5. 每周亏损率（weekly_loss_rate）：要求 <= 0.2
+    weekly_loss_rate = stat.get("weekly_loss_rate", 10000)
+    if weekly_loss_rate > 0.2:
+        diff = weekly_loss_rate - 0.2
+        penalty += (diff ** 2) * 1000
+
+    # 6. 每月亏损率（monthly_loss_rate）：要求 <= 0.2
+    monthly_loss_rate = stat.get("monthly_loss_rate", 10000)
+    if monthly_loss_rate > 0.2:
+        diff = monthly_loss_rate - 0.2
+        penalty += (diff ** 2) * 1000
+
+    # 7. 盈利集中度（top_profit_ratio）：要求 <= 0.5
+    top_profit_ratio = stat.get("top_profit_ratio", 10000)
+    if top_profit_ratio > 0.5:
+        diff = top_profit_ratio - 0.5
+        penalty += (diff ** 2) * 1000
+
+    # 8. 持仓时间均值（hold_time_mean）：要求 <= 3000
+    hold_time_mean = stat.get("hold_time_mean", 100000)
+    if hold_time_mean > 3000:
+        diff = hold_time_mean - 3000
+        # 系数这里采用除以 10000，可根据实际量级调整
+        penalty += (diff ** 2) / 10000.0
+
+    # 9. 最大持仓时间（max_hold_time）：要求 <= 10000
+    max_hold_time = stat.get("max_hold_time", 100000)
+    if max_hold_time > 10000:
+        diff = max_hold_time - 10000
+        penalty += (diff ** 2) / 10000.0
+
+    # 10. 平均盈利率（avg_profit_rate）：要求 >= 10
+    true_profit_mean = stat.get("avg_profit_rate", -10000)
+    if true_profit_mean < 10:
+        diff = 10 - true_profit_mean
+        penalty += (diff ** 2) * 1
+
+    fitness = base - penalty
+    return -fitness if invert else fitness
+
 # 声明两组 key:
 normal_keys = ['max_consecutive_loss', 'monthly_net_profit_min', 'weekly_net_profit_min', 'net_profit_rate',
                'min_profit', 'fu_profit_mean', 'avg_profit_rate']
@@ -839,10 +924,10 @@ combined_keys = [
 fitness_getters = {}
 
 for key in normal_keys:
-    fitness_getters[key] = partial(get_fitness, key=key, invert=False)
+    fitness_getters[key] = partial(get_fitness_op, key=key, invert=False)
 
 for key in inverted_keys:
-    fitness_getters[key] = partial(get_fitness, key=key, invert=True)
+    fitness_getters[key] = partial(get_fitness_op, key=key, invert=True)
 order_key = []
 # 如果需要以特定顺序生成一个列表，包含所有适应度提取函数
 get_fitness_list = [fitness_getters[key] for key in combined_keys]
@@ -1033,9 +1118,10 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     fitness_index = 0
     pre_fitness_index = 0
     partial_eval = partial(evaluate_candidate_batch, fitness_func=get_fitness_list[fitness_index])
+
     IS_REVERSE = False
     print(
-        f"开始搜索，总代数: {generations}，每代种群大小: {population_size}，岛屿数量: {islands_count}，适应度函数个数: {len(get_fitness_list)}。 是否反向评估: {IS_REVERSE}。")
+        f"开始搜索，总代数: {generations}，每代种群大小: {population_size}，岛屿数量: {islands_count}，适应度函数个数: {len(get_fitness_list)}。 是否反向评估: {IS_REVERSE}。适应度函数为{combined_keys[fitness_index]}")
 
     with multiprocessing.Pool(processes=pool_processes, initializer=init_worker_ga,
                               initargs=(GLOBAL_SIGNALS, df)) as pool:
@@ -1210,6 +1296,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
             need_restart = False
             fitness_index = gen // single_generations_count
             if fitness_index != pre_fitness_index:
+                print(f"[GEN {gen}] 切换适应度函数: {combined_keys[fitness_index]}，当前代数: {gen}。")
                 partial_eval = partial(evaluate_candidate_batch, fitness_func=get_fitness_list[fitness_index])
                 pre_fitness_index = fitness_index
                 need_restart = True
