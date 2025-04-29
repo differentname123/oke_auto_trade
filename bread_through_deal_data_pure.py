@@ -97,7 +97,7 @@ def load_and_merger_data(inst_id):
     file_list = [os.path.join('temp', file) for file in file_list]
 
     # 使用多进程池并行处理文件
-    with mp.Pool(processes=1) as pool:
+    with mp.Pool(processes=20) as pool:
         df_list = pool.map(process_load_filter_data, file_list)
 
     # 过滤掉 None 值
@@ -115,7 +115,9 @@ def load_and_merger_data(inst_id):
 def example():
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     for inst_id in inst_id_list:
-        load_and_merger_data(inst_id)
+        output_path = f'temp_back/{inst_id}_pure_data.parquet'
+        result_df = load_and_merger_data(inst_id)
+        result_df.to_parquet(output_path, index=False)
 
 
 if __name__ == '__main__':

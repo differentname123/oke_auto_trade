@@ -571,9 +571,9 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         "top_loss_ratio": safe_round(top_loss_ratio, 4),
         "is_reverse": is_reverse,
     }
-    # 返回的 kai_data_df 仅保留持有时间和真实盈亏两列
-    kai_data_df = kai_data_df[["hold_time", "true_profit"]]
-    return kai_data_df, statistic_dict
+    # # 返回的 kai_data_df 仅保留持有时间和真实盈亏两列
+    # kai_data_df = kai_data_df[["hold_time", "true_profit"]]
+    return None, statistic_dict
 
 
 def generate_numbers(start, end, number, even=True):
@@ -918,6 +918,9 @@ def get_fitness_op(stat, key, invert=False):
         penalty += (diff ** 2) * 1
 
     fitness = base - penalty
+    if invert:
+        # 对于需要反转的指标，适应度值为基础值加上惩罚项
+        fitness = base + penalty
     return -fitness if invert else fitness
 
 # 声明两组 key:
