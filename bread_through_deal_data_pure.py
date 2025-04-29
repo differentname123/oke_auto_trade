@@ -50,11 +50,13 @@ def check_array_len(df: pd.DataFrame, column_list: list) -> None:
         else:
             print(f"列 '{col}' 的不同长度值有: {set(unique_lengths)}")
 
+
 def process_load_filter_data(file):
     """处理单个文件的函数，并根据条件过滤数据"""
     try:
         df = pd.read_parquet(file)
-        check_array_len(df, ['monthly_kai_count_detail', 'monthly_net_profit_detail', 'weekly_kai_count_detail', 'weekly_net_profit_detail'])
+        check_array_len(df, ['monthly_kai_count_detail', 'monthly_net_profit_detail', 'weekly_kai_count_detail',
+                             'weekly_net_profit_detail'])
 
         # 预计算 net_profit_rate 的平方，简化 profit_risk_score 的计算
         npr = df['net_profit_rate']
@@ -62,19 +64,22 @@ def process_load_filter_data(file):
         df['profit_risk_score'] = -(npr * npr) / df['fu_profit_sum']
         df['profit_risk_score_pure'] = -npr / df['fu_profit_sum']
 
-        # 根据筛选条件过滤数据
-        df = df[
-            (df['max_consecutive_loss'] >= -20) &     # 最大连续亏损必须大于等于 -20
-            (df['net_profit_rate'] >= 100) &           # 净盈利率至少为 100
-            (df['kai_count'] >= 100) &                # 交易次数（kai_count）不少于 100
-            (df['active_month_ratio'] >= 0.8) &         # 活跃月份比率至少为 0.8
-            (df['weekly_loss_rate'] <= 0.2) &           # 每周亏损率不超过 0.2
-            (df['monthly_loss_rate'] <= 0.2) &          # 每月亏损率不超过 0.2
-            (df['top_profit_ratio'] <= 0.5) &           # 盈利峰值比率不超过 0.5
-            (df['hold_time_mean'] <= 3000) &            # 平均持仓时间不超过 3000
-            (df['avg_profit_rate'] >= 10) &             # 平均盈利率至少为 10
-            (df['max_hold_time'] <= 10000)              # 最大持仓时间不超过 10000
-        ]
+        df = compute_rewarded_penalty_from_flat_df(df)
+        df = df[df['score_final'] > -10]
+
+        # # 根据筛选条件过滤数据
+        # df = df[
+        #     (df['max_consecutive_loss'] >= -20) &  # 最大连续亏损必须大于等于 -20
+        #     (df['net_profit_rate'] >= 100) &  # 净盈利率至少为 100
+        #     (df['kai_count'] >= 100) &  # 交易次数（kai_count）不少于 100
+        #     (df['active_month_ratio'] >= 0.8) &  # 活跃月份比率至少为 0.8
+        #     (df['weekly_loss_rate'] <= 0.2) &  # 每周亏损率不超过 0.2
+        #     (df['monthly_loss_rate'] <= 0.2) &  # 每月亏损率不超过 0.2
+        #     (df['top_profit_ratio'] <= 0.5) &  # 盈利峰值比率不超过 0.5
+        #     (df['hold_time_mean'] <= 3000) &  # 平均持仓时间不超过 3000
+        #     (df['avg_profit_rate'] >= 10) &  # 平均盈利率至少为 10
+        #     (df['max_hold_time'] <= 10000)  # 最大持仓时间不超过 10000
+        #     ]
 
         return df
     except Exception as e:
@@ -115,73 +120,147 @@ def load_and_merger_data(inst_id):
     print(f"{inst_id} 合并后的数据行数: {len(result_df)} 耗时: {time.time() - start_time:.2f}秒")
     result_df = calculate_downside_metrics(result_df, ['weekly_net_profit_detail', 'monthly_net_profit_detail'],
                                            threshold=1)
+    # result_df = compute_rewarded_penalty_from_flat_df(result_df)
 
     return result_df
 
+
 def _single_downside_metrics(data_array, threshold=0):
     """
-    Calculates downside standard deviation and count for a single array/list.
-    Returns a dictionary { 'DownsideStdDev': float, 'DownsideCount': int }.
+    备用的单条数据计算函数，供 fallback 用
     """
-    downside_std = 0.0
-    downside_count = 0
-
-    if data_array is None or len(data_array) == 0:
-        return {'DownsideStdDev': downside_std, 'DownsideCount': downside_count}
-
     try:
-        arr = np.asarray(data_array)
+        arr = np.asarray(data_array, dtype=float)
     except Exception:
-        return {'DownsideStdDev': downside_std, 'DownsideCount': downside_count}
-
-    downside_data = arr[arr < threshold]
-    downside_count = len(downside_data)
-
-    if downside_count >= 2:
-        # Calculate sample standard deviation
-        downside_std = np.std(downside_data, ddof=1)
-
-    return {'DownsideStdDev': downside_std, 'DownsideCount': downside_count}
+        return 0.0, 0
+    mask = arr < threshold
+    cnt = int(mask.sum())
+    if cnt >= 2:
+        std = float(np.std(arr[mask], ddof=1))
+    else:
+        std = 0.0
+    return std, cnt
 
 
-def calculate_downside_metrics(df, column_list, threshold=0):
+def calculate_downside_metrics(df: pd.DataFrame,
+                               column_list: list,
+                               threshold: float = 0.0) -> pd.DataFrame:
     """
-    Calculates downside standard deviation and count for specified columns in a DataFrame.
-    Each cell in the column should contain a list or numpy array.
-    Adds new columns like 'OriginalColumn_DownsideStdDev' and 'OriginalColumn_DownsideCount'.
+    对 df 中指定的列（每个单元格是数值 list/ndarray），
+    一次性向量化计算 DownsideStdDev 与 DownsideCount。
     """
     if not isinstance(df, pd.DataFrame):
         print("Warning: Input 'df' is not a pandas DataFrame. Returning original input.")
         return df
     if not isinstance(column_list, list):
-         print("Warning: Input 'column_list' is not a list. Returning original DataFrame.")
-         return df
+        print("Warning: 'column_list' is not a list. Returning original DataFrame.")
+        return df
 
     df_result = df.copy()
+    n = len(df)
 
-    for col_name in column_list:
-        if col_name not in df.columns:
-            print(f"Warning: Column '{col_name}' not found. Skipping.")
+    for col in column_list:
+        if col not in df.columns:
+            print(f"Warning: Column '{col}' not found. Skipping.")
             continue
 
-        # Apply the helper function, which returns a Series of dictionaries
-        metrics_series = df[col_name].apply(
-            lambda x: _single_downside_metrics(x, threshold=threshold)
-        )
+        series = df[col]
+        # 判定哪些行是“统一长度、可向量化”的
+        good_idx = series.map(lambda x: isinstance(x, (list, np.ndarray)))
+        if good_idx.any():
+            # 取所有有效的、且长度相同的
+            arrs = [np.asarray(x, dtype=float) for x in series[good_idx]]
+            lengths = [a.shape[0] for a in arrs]
+            if len(set(lengths)) == 1:
+                # 全部同长度，走向量化
+                arr2d = np.stack(arrs, axis=0)  # shape = (n_good, L)
+                mask = arr2d < threshold  # shape = (n_good, L)
+                counts = mask.sum(axis=1)  # shape = (n_good,)
+                # 在不满足阈值的位置置 NaN，再做 nanstd
+                tmp = np.where(mask, arr2d, np.nan)
+                stds = np.nanstd(tmp, axis=1, ddof=1)
+                # 少于 2 个样本时 np.nanstd 会给 nan，我们把它置 0
+                stds = np.where(counts >= 2, stds, 0.0)
 
-        # Convert the Series of dictionaries into a DataFrame with columns 'DownsideStdDev' and 'DownsideCount'
-        metrics_df = metrics_series.apply(pd.Series)
+                # 准备好两个全零/零数组，然后填入向量化结果
+                down_count = np.zeros(n, dtype=int)
+                down_std = np.zeros(n, dtype=float)
+                idx_good = np.flatnonzero(good_idx.values)
+                down_count[idx_good] = counts
+                down_std[idx_good] = stds
+            else:
+                # 长度不一，退回到单条计算
+                down_std = np.zeros(n, dtype=float)
+                down_count = np.zeros(n, dtype=int)
+                for i, x in enumerate(series):
+                    s, c = _single_downside_metrics(x, threshold)
+                    down_std[i] = s
+                    down_count[i] = c
+        else:
+            # 全部非 list/ndarray，全部退回
+            down_std = np.zeros(n, dtype=float)
+            down_count = np.zeros(n, dtype=int)
+            for i, x in enumerate(series):
+                s, c = _single_downside_metrics(x, threshold)
+                down_std[i] = s
+                down_count[i] = c
 
-        # Rename the columns to be specific to the original column
-        metrics_df = metrics_df.rename(columns={
-            'DownsideStdDev': f'{col_name}_DownsideStdDev',
-            'DownsideCount': f'{col_name}_DownsideCount'
-        })
-
-        # Concatenate the new metrics DataFrame with the original result DataFrame
-        df_result = pd.concat([df_result, metrics_df], axis=1)
+        # 直接赋两列
+        df_result[f'{col}_DownsideStdDev'] = down_std
+        df_result[f'{col}_DownsideCount'] = down_count
 
     return df_result
+
+
+def compute_rewarded_penalty_from_flat_df(df: pd.DataFrame) -> pd.Series:
+    """
+    向量化地计算每行的(奖励 - 惩罚*100)得分，返回一个 pd.Series，可直接赋值给 df["score"]。
+    """
+    # 1. 初始化 penalty 和 reward
+    idx = df.index
+    penalty = pd.Series(0.0, index=idx)
+    reward = pd.Series(0.0, index=idx)
+
+    # 2. 每个特征的参数：
+    #    thr   : 阈值
+    #    sign  : 1 表示希望 val >= thr，超下限会罚，超上限给奖
+    #            -1 表示希望 val <= thr，超上限会罚，低于阈值给奖
+    #    pf    : penalty_factor
+    #    power : 惩罚项是 diff**power
+    #    rf    : reward_factor
+    #    na    : 缺失时填充的默认值
+    features = [
+        dict(col='max_consecutive_loss', thr=-20, sign=1, pf=10, power=2, rf=1, na=-10000),
+        dict(col='net_profit_rate', thr=100, sign=1, pf=10, power=2, rf=1 / 100, na=-10000),
+        dict(col='kai_count', thr=100, sign=1, pf=10, power=2, rf=1 / 100, na=-10000),
+        dict(col='active_month_ratio', thr=0.8, sign=1, pf=10000, power=2, rf=2, na=-10000),
+        dict(col='weekly_loss_rate', thr=0.2, sign=-1, pf=1000, power=2, rf=5, na=10000),
+        dict(col='monthly_loss_rate', thr=0.2, sign=-1, pf=1000, power=2, rf=5, na=10000),
+        dict(col='top_profit_ratio', thr=0.5, sign=-1, pf=1000, power=2, rf=2, na=10000),
+        dict(col='hold_time_mean', thr=3000, sign=-1, pf=1 / 10000, power=2, rf=1 / 3000, na=100000),
+        dict(col='max_hold_time', thr=10000, sign=-1, pf=1 / 10000, power=2, rf=1 / 10000, na=100000),
+        dict(col='avg_profit_rate', thr=10, sign=1, pf=1, power=2, rf=1, na=-10000),
+    ]
+
+    # 3. 逐特征向量化累加
+    for f in features:
+        # 批量取值、填缺失、转浮点
+        vals = df[f['col']].fillna(f['na']).astype(float)
+
+        if f['sign'] == 1:
+            diff_pen = (f['thr'] - vals).clip(lower=0)
+            diff_rev = (vals - f['thr']).clip(lower=0)
+        else:
+            diff_pen = (vals - f['thr']).clip(lower=0)
+            diff_rev = (f['thr'] - vals).clip(lower=0)
+
+        penalty += diff_pen.pow(f['power']) * f['pf']
+        reward += diff_rev * f['rf']
+
+    # 4. 合成最终得分
+    score = reward - penalty * 100
+    df['score_final'] = score
+    return df
 
 
 def example():
