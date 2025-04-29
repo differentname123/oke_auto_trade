@@ -734,7 +734,7 @@ def process_signal(sig):
         if p_np.dtype == np.float64:
             p_np = p_np.astype(np.float32)
         indices = np.nonzero(s_np)[0]
-        if indices.size < 100:
+        if indices.size < 200:
             return None
         return (sig, (indices.astype(np.int32), p_np[indices]))
     except Exception as e:
@@ -742,18 +742,22 @@ def process_signal(sig):
         return None
 
 
-def precompute_signals(df, signals):
+def precompute_signals(df, signals, chunk_size=100):
     """
-    使用多进程预计算所有候选信号数据，返回 dict 格式：{signal_name: (indices, prices)}。
+    使用多进程预计算所有候选信号数据，每个进程一次处理 chunk_size 个任务。
+    返回 dict 格式：{signal_name: (indices, prices)}。
     """
     num_workers = multiprocessing.cpu_count()
+
     with multiprocessing.Pool(processes=num_workers, initializer=init_worker1, initargs=(df,)) as pool:
-        results = pool.map(process_signal, signals)
-    precomputed = {}
-    for res in results:
-        if res is not None:
-            sig, data = res
-            precomputed[sig] = data
+        results = pool.imap(process_signal, signals, chunksize=chunk_size)
+
+        precomputed = {}
+        for res in results:
+            if res is not None:
+                sig, data = res
+                precomputed[sig] = data
+
     return precomputed
 
 
@@ -916,7 +920,7 @@ def get_fitness_op(stat, key, invert=False):
     if true_profit_mean < 10:
         diff = 10 - true_profit_mean
         penalty += (diff ** 2) * 1
-
+    penalty = penalty * 100
     fitness = base - penalty
     if invert:
         # 对于需要反转的指标，适应度值为基础值加上惩罚项

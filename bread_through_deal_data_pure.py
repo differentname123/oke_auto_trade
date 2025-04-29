@@ -87,6 +87,7 @@ def load_and_merger_data(inst_id):
     加载并合并ga算法回测得到的数据，需要过滤部分数据
     :return:
     """
+    start_time = time.time()
     file_list = os.listdir('temp')
     file_list = [file for file in file_list if inst_id in file and
                  'donchian_1_20_1_relate_400_1000_100_1_40_6_cci_1_2000_1000_1_2_1_atr_1_3000_3000_boll_1_3000_100_1_50_2_rsi_1_1000_500_abs_1_100_100_40_100_1_macd_300_1000_50_macross_1_3000_100_1_3000_100_' in file and
@@ -97,7 +98,7 @@ def load_and_merger_data(inst_id):
     file_list = [os.path.join('temp', file) for file in file_list]
 
     # 使用多进程池并行处理文件
-    with mp.Pool(processes=20) as pool:
+    with mp.Pool(processes=1) as pool:
         df_list = pool.map(process_load_filter_data, file_list)
 
     # 过滤掉 None 值
@@ -106,16 +107,88 @@ def load_and_merger_data(inst_id):
     if df_list:
         result_df = pd.concat(df_list, ignore_index=True)
         result_df = result_df.drop_duplicates(subset=['kai_column', 'pin_column'])
-        return result_df
+
     else:
         print("没有符合条件的数据")
-        return pd.DataFrame()
+        result_df = pd.DataFrame()
+
+    print(f"{inst_id} 合并后的数据行数: {len(result_df)} 耗时: {time.time() - start_time:.2f}秒")
+    result_df = calculate_downside_metrics(result_df, ['weekly_net_profit_detail', 'monthly_net_profit_detail'],
+                                           threshold=1)
+
+    return result_df
+
+def _single_downside_metrics(data_array, threshold=0):
+    """
+    Calculates downside standard deviation and count for a single array/list.
+    Returns a dictionary { 'DownsideStdDev': float, 'DownsideCount': int }.
+    """
+    downside_std = 0.0
+    downside_count = 0
+
+    if data_array is None or len(data_array) == 0:
+        return {'DownsideStdDev': downside_std, 'DownsideCount': downside_count}
+
+    try:
+        arr = np.asarray(data_array)
+    except Exception:
+        return {'DownsideStdDev': downside_std, 'DownsideCount': downside_count}
+
+    downside_data = arr[arr < threshold]
+    downside_count = len(downside_data)
+
+    if downside_count >= 2:
+        # Calculate sample standard deviation
+        downside_std = np.std(downside_data, ddof=1)
+
+    return {'DownsideStdDev': downside_std, 'DownsideCount': downside_count}
+
+
+def calculate_downside_metrics(df, column_list, threshold=0):
+    """
+    Calculates downside standard deviation and count for specified columns in a DataFrame.
+    Each cell in the column should contain a list or numpy array.
+    Adds new columns like 'OriginalColumn_DownsideStdDev' and 'OriginalColumn_DownsideCount'.
+    """
+    if not isinstance(df, pd.DataFrame):
+        print("Warning: Input 'df' is not a pandas DataFrame. Returning original input.")
+        return df
+    if not isinstance(column_list, list):
+         print("Warning: Input 'column_list' is not a list. Returning original DataFrame.")
+         return df
+
+    df_result = df.copy()
+
+    for col_name in column_list:
+        if col_name not in df.columns:
+            print(f"Warning: Column '{col_name}' not found. Skipping.")
+            continue
+
+        # Apply the helper function, which returns a Series of dictionaries
+        metrics_series = df[col_name].apply(
+            lambda x: _single_downside_metrics(x, threshold=threshold)
+        )
+
+        # Convert the Series of dictionaries into a DataFrame with columns 'DownsideStdDev' and 'DownsideCount'
+        metrics_df = metrics_series.apply(pd.Series)
+
+        # Rename the columns to be specific to the original column
+        metrics_df = metrics_df.rename(columns={
+            'DownsideStdDev': f'{col_name}_DownsideStdDev',
+            'DownsideCount': f'{col_name}_DownsideCount'
+        })
+
+        # Concatenate the new metrics DataFrame with the original result DataFrame
+        df_result = pd.concat([df_result, metrics_df], axis=1)
+
+    return df_result
 
 
 def example():
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = ['BTC']
     for inst_id in inst_id_list:
         output_path = f'temp_back/{inst_id}_pure_data.parquet'
+        result_df = pd.read_parquet(output_path)
         result_df = load_and_merger_data(inst_id)
         result_df.to_parquet(output_path, index=False)
 
