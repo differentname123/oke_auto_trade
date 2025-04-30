@@ -55,6 +55,7 @@ def process_load_filter_data(file):
     """处理单个文件的函数，并根据条件过滤数据"""
     try:
         df = pd.read_parquet(file)
+        origin_len = len(df)
         check_array_len(df, ['monthly_kai_count_detail', 'monthly_net_profit_detail', 'weekly_kai_count_detail',
                              'weekly_net_profit_detail'])
 
@@ -64,8 +65,11 @@ def process_load_filter_data(file):
         df['profit_risk_score'] = -(npr * npr) / df['fu_profit_sum']
         df['profit_risk_score_pure'] = -npr / df['fu_profit_sum']
 
-        df = compute_rewarded_penalty_from_flat_df(df)
-        df = df[df['score_final'] > -10]
+        # df = compute_rewarded_penalty_from_flat_df(df)
+        # df = df[df['score_final'] > -0]
+
+        df = add_raw_diff_columns(df)
+        df = df[df['norm_diff_score'] > -1]
 
         # # 根据筛选条件过滤数据
         # df = df[
@@ -80,7 +84,7 @@ def process_load_filter_data(file):
         #     (df['avg_profit_rate'] >= 10) &  # 平均盈利率至少为 10
         #     (df['max_hold_time'] <= 10000)  # 最大持仓时间不超过 10000
         #     ]
-
+        # print(f"文件 {file} 原始数据行数: {origin_len}，筛选后数据行数: {len(df)}")
         return df
     except Exception as e:
         print(f"处理文件 {file} 时报错: {e}")
@@ -120,7 +124,7 @@ def load_and_merger_data(inst_id):
     print(f"{inst_id} 合并后的数据行数: {len(result_df)} 耗时: {time.time() - start_time:.2f}秒")
     result_df = calculate_downside_metrics(result_df, ['weekly_net_profit_detail', 'monthly_net_profit_detail'],
                                            threshold=1)
-    # result_df = compute_rewarded_penalty_from_flat_df(result_df)
+    result_df = compute_rewarded_penalty_from_flat_df(result_df)
 
     return result_df
 
@@ -221,14 +225,6 @@ def compute_rewarded_penalty_from_flat_df(df: pd.DataFrame) -> pd.Series:
     penalty = pd.Series(0.0, index=idx)
     reward = pd.Series(0.0, index=idx)
 
-    # 2. 每个特征的参数：
-    #    thr   : 阈值
-    #    sign  : 1 表示希望 val >= thr，超下限会罚，超上限给奖
-    #            -1 表示希望 val <= thr，超上限会罚，低于阈值给奖
-    #    pf    : penalty_factor
-    #    power : 惩罚项是 diff**power
-    #    rf    : reward_factor
-    #    na    : 缺失时填充的默认值
     features = [
         dict(col='max_consecutive_loss', thr=-20, sign=1, pf=10, power=2, rf=1, na=-10000),
         dict(col='net_profit_rate', thr=100, sign=1, pf=10, power=2, rf=1 / 100, na=-10000),
@@ -239,7 +235,7 @@ def compute_rewarded_penalty_from_flat_df(df: pd.DataFrame) -> pd.Series:
         dict(col='top_profit_ratio', thr=0.5, sign=-1, pf=1000, power=2, rf=2, na=10000),
         dict(col='hold_time_mean', thr=3000, sign=-1, pf=1 / 10000, power=2, rf=1 / 3000, na=100000),
         dict(col='max_hold_time', thr=10000, sign=-1, pf=1 / 10000, power=2, rf=1 / 10000, na=100000),
-        dict(col='avg_profit_rate', thr=10, sign=1, pf=1, power=2, rf=1, na=-10000),
+        dict(col='avg_profit_rate', thr=10, sign=1, pf=1, power=2, rf=1 / 100, na=-10000),
     ]
 
     # 3. 逐特征向量化累加
@@ -263,11 +259,79 @@ def compute_rewarded_penalty_from_flat_df(df: pd.DataFrame) -> pd.Series:
     return df
 
 
+def add_raw_diff_columns(df):
+    """
+    计算并只在原 df 上新增综合得分 norm_diff_score：
+      - norm_diff_score：所有指标的 norm_diff 加权求和（负数乘以100）
+
+    norm_diff 的计算方式是：
+      - diff = 原始值 - 阈值 (min型) 或 阈值 - 原始值 (max型)，保留正负
+      - norm_diff = diff / max(abs(diff))，保留正负
+
+    使用向量化计算 norm_diff_score 提高效率。
+
+    返回值：原 df（已被修改，只新增了 norm_diff_score 列）
+    """
+    metrics = [
+        ("max_consecutive_loss", -20,  "min"),
+        ("net_profit_rate",      100,  "min"),
+        ("kai_count",            100,  "min"),
+        ("active_month_ratio",   0.8,  "min"),
+        ("weekly_loss_rate",     0.2,  "max"),
+        ("monthly_loss_rate",    0.2,  "max"),
+        ("top_profit_ratio",     0.5,  "max"),
+        ("hold_time_mean",       3000, "max"),
+        ("max_hold_time",        10000,"max"),
+        ("avg_profit_rate",      10,   "min"),
+    ]
+
+    # List to store the calculated norm_diff Series for each metric
+    temp_norm_diff_series_list = []
+
+    for col, thresh, bound in metrics:
+        # Check if the metric column exists, use NaN series if not
+        if col in df.columns:
+            s = df[col]
+        else:
+
+            s = pd.Series(np.nan, index=df.index, name=col)
+
+
+
+
+        # 计算原始 diff（保留正负）
+        if bound == "min":
+            diff = s - thresh
+        else: # bound == "max"
+            diff = thresh - s
+
+        max_abs = diff.abs().max()
+
+        if pd.notna(max_abs) and max_abs != 0:
+             norm_diff = diff / max_abs
+        else:
+
+             norm_diff = pd.Series(np.nan, index=df.index, name=col) # Give it a name
+
+        temp_norm_diff_series_list.append(norm_diff)
+
+
+    if not temp_norm_diff_series_list:
+         df["norm_diff_score"] = np.nan # Or 0, depending on desired default
+    else:
+        temp_norm_diff_df = pd.concat(temp_norm_diff_series_list, axis=1)
+        weighted_norm_diff_values = np.where(temp_norm_diff_df < 0, temp_norm_diff_df * 100, temp_norm_diff_df)
+        df["norm_diff_score"] = weighted_norm_diff_values.sum(axis=1)
+
+    return df
+
 def example():
-    inst_id_list = ['BTC']
+    inst_id_list = ['SOL']
     for inst_id in inst_id_list:
         output_path = f'temp_back/{inst_id}_pure_data.parquet'
-        result_df = pd.read_parquet(output_path)
+        if os.path.exists(output_path):
+            result_df = pd.read_parquet(output_path)
+            result_df = add_raw_diff_columns(result_df)
         result_df = load_and_merger_data(inst_id)
         result_df.to_parquet(output_path, index=False)
 
