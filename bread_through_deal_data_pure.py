@@ -65,11 +65,11 @@ def process_load_filter_data(file):
         df['profit_risk_score'] = -(npr * npr) / df['fu_profit_sum']
         df['profit_risk_score_pure'] = -npr / df['fu_profit_sum']
 
-        # df = compute_rewarded_penalty_from_flat_df(df)
-        # df = df[df['score_final'] > -0]
+        df = compute_rewarded_penalty_from_flat_df(df)
+        df = df[df['score_final'] > -0]
 
-        df = add_raw_diff_columns(df)
-        df = df[df['norm_diff_score'] > -1]
+        # df = add_raw_diff_columns(df)
+        # df = df[df['norm_diff_score'] > -1]
 
         # # 根据筛选条件过滤数据
         # df = df[
@@ -91,7 +91,7 @@ def process_load_filter_data(file):
         return None
 
 
-def load_and_merger_data(inst_id):
+def load_and_merger_data(inst_id, is_reverse):
     """
     加载并合并ga算法回测得到的数据，需要过滤部分数据
     :return:
@@ -100,7 +100,7 @@ def load_and_merger_data(inst_id):
     file_list = os.listdir('temp')
     file_list = [file for file in file_list if inst_id in file and
                  'donchian_1_20_1_relate_400_1000_100_1_40_6_cci_1_2000_1000_1_2_1_atr_1_3000_3000_boll_1_3000_100_1_50_2_rsi_1_1000_500_abs_1_100_100_40_100_1_macd_300_1000_50_macross_1_3000_100_1_3000_100_' in file and
-                 'pkl' not in file and 'sta' in file and '1m' in file]
+                 'pkl' not in file and '_stats' in file and '1m' in file and str(is_reverse) in file]
     print(f"找到 {len(file_list)} 个文件")
 
     # 完善的文件路径
@@ -326,13 +326,14 @@ def add_raw_diff_columns(df):
     return df
 
 def example():
-    inst_id_list = ['SOL']
+    inst_id_list = ['ETH']
+    is_reverse = True
     for inst_id in inst_id_list:
-        output_path = f'temp_back/{inst_id}_pure_data.parquet'
+        output_path = f'temp_back/{inst_id}_{is_reverse}_pure_data.parquet'
         if os.path.exists(output_path):
             result_df = pd.read_parquet(output_path)
             result_df = add_raw_diff_columns(result_df)
-        result_df = load_and_merger_data(inst_id)
+        result_df = load_and_merger_data(inst_id, is_reverse)
         result_df.to_parquet(output_path, index=False)
 
 

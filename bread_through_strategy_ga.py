@@ -954,14 +954,14 @@ order_key = []
 get_fitness_list = [fitness_getters[key] for key in combined_keys]
 
 
-def evaluate_candidate_batch(candidates, fitness_func=get_fitness_net):
+def evaluate_candidate_batch(candidates, fitness_func=get_fitness_net, is_reverse=False):
     """
     对一批候选个体进行评价，返回列表 [(fitness, candidate, stat), ...]。
     """
     batch_results = []
     for candidate in candidates:
         long_sig, short_sig = candidate
-        _, stat = get_detail_backtest_result_op(df, long_sig, short_sig, is_filter=True, is_reverse=IS_REVERSE)
+        _, stat = get_detail_backtest_result_op(df, long_sig, short_sig, is_filter=True, is_reverse=is_reverse)
         fitness = fitness_func(stat)
         batch_results.append((fitness, candidate, stat))
     return batch_results
@@ -1077,8 +1077,9 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     candidate_long_signals = list(GLOBAL_SIGNALS.keys())
     candidate_short_signals = list(GLOBAL_SIGNALS.keys())
 
-    global_generated_individuals = None
-    checkpoint_file = os.path.join(checkpoint_dir, f"{key_name}_ga_checkpoint.pkl")
+    global IS_REVERSE
+    IS_REVERSE = True
+    checkpoint_file = os.path.join(checkpoint_dir, f"{key_name}_{IS_REVERSE}_ga_checkpoint.pkl")
     if os.path.exists(checkpoint_file):
         try:
             with open(checkpoint_file, "rb") as f:
@@ -1138,9 +1139,9 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     single_generations_count = int(generations / len(get_fitness_list))  # 实际为 generations
     fitness_index = 0
     pre_fitness_index = 0
-    partial_eval = partial(evaluate_candidate_batch, fitness_func=get_fitness_list[fitness_index])
-
-    IS_REVERSE = False
+    partial_eval = partial(evaluate_candidate_batch,
+                           fitness_func=get_fitness_list[fitness_index],
+                           is_reverse=IS_REVERSE)  # 显式传递 is_reverse
     print(
         f"开始搜索，总代数: {generations}，每代种群大小: {population_size}，岛屿数量: {islands_count}，适应度函数个数: {len(get_fitness_list)}。 是否反向评估: {IS_REVERSE}。适应度函数为{combined_keys[fitness_index]}")
 
@@ -1318,7 +1319,9 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
             fitness_index = gen // single_generations_count
             if fitness_index != pre_fitness_index:
                 print(f"[GEN {gen}] 切换适应度函数: {combined_keys[fitness_index]}，当前代数: {gen}。")
-                partial_eval = partial(evaluate_candidate_batch, fitness_func=get_fitness_list[fitness_index])
+                partial_eval = partial(evaluate_candidate_batch,
+                                       fitness_func=get_fitness_list[fitness_index],
+                                       is_reverse=IS_REVERSE)  # 显式传递 is_reverse
                 pre_fitness_index = fitness_index
                 need_restart = True
             if global_no_improve_count >= 10 or need_restart:
@@ -1444,8 +1447,8 @@ def example():
     """
     start_time = time.time()
     data_path_list = [
-        # "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
+        "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_DOGE-USDT-SWAP.csv",
