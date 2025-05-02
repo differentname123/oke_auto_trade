@@ -65,11 +65,11 @@ def process_load_filter_data(file):
         df['profit_risk_score'] = -(npr * npr) / df['fu_profit_sum']
         df['profit_risk_score_pure'] = -npr / df['fu_profit_sum']
 
-        # df = compute_rewarded_penalty_from_flat_df(df)
-        # df = df[df['score_final'] > -0]
+        df = compute_rewarded_penalty_from_flat_df(df)
+        df = df[df['score_final'] > -0]
 
-        df = add_raw_diff_columns(df)
-        df = df[df['norm_diff_score'] > -1]
+        # df = add_raw_diff_columns(df)
+        # df = df[df['norm_diff_score'] > -1]
 
         # # 根据筛选条件过滤数据
         # df = df[
@@ -107,7 +107,7 @@ def load_and_merger_data(inst_id, is_reverse):
     file_list = [os.path.join('temp', file) for file in file_list]
 
     # 使用多进程池并行处理文件
-    with mp.Pool(processes=10) as pool:
+    with mp.Pool(processes=20) as pool:
         df_list = pool.map(process_load_filter_data, file_list)
 
     # 过滤掉 None 值
@@ -360,8 +360,10 @@ def merge_df(inst_id):
         origin_good_df.to_parquet(output_file, index=False)
 
 def example():
-    inst_id_list = ['SOL']
-    is_reverse = False
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE']
+    is_reverse = True
+    # pd.read_parquet(f'temp/final_good_BTC_True_filter_all.parquet')
+
     # for inst_id in inst_id_list:
     #     output_path = f'temp_back/{inst_id}_{is_reverse}_pure_data.parquet'
     #     if os.path.exists(output_path):
@@ -374,6 +376,7 @@ def example():
         output_file = f'temp_back/{inst_id}_{is_reverse}_pure_data_with_future.parquet'
         if os.path.exists(output_file):
             result_df = pd.read_parquet(output_file)
+
         merge_df(inst_id)
 
 

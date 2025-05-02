@@ -93,7 +93,7 @@ def process_group(group_df, sort_key, group_threshold):
         if not drop_flag:
             keep_rows.append(row)
     if keep_rows:
-        # print(f"组内过滤耗时：{time.time() - start_time:.2f} 秒，原始数量为{len(group_df)}保留行数：{len(keep_rows)}")
+        print(f"组内过滤耗时：{time.time() - start_time:.2f} 秒，原始数量为{len(group_df)}保留行数：{len(keep_rows)}")
         return pd.DataFrame(keep_rows)
     else:
         return pd.DataFrame(columns=group_df.columns)
@@ -122,7 +122,7 @@ def filtering(origin_good_df, grouping_column, sort_key, _unused_threshold):
     if start < n:
         groups.append(df_sorted.iloc[start:n])
     # 根据组的数量动态计算组内相关性过滤阈值
-    group_threshold = max(90, 95 - int(0.1 * len(groups)))
+    group_threshold = max(50, 90 - int(0.01 * len(groups)))
     print(f"总分组数量：{len(groups)} ，组内相关性阈值：{group_threshold}")
 
     filtered_dfs = []
@@ -615,8 +615,8 @@ def filter_similar_strategy():
     过滤掉太过于相似的策略。
     :return:
     """
-    inst_id_list =  ['BTC', 'ETH', 'SOL']
-    required_columns = ['kai_count', 'net_profit_rate', 'weekly_net_profit_detail', 'max_hold_time', 'kai_column', 'pin_column']
+    inst_id_list =  ['SOL', 'TON', 'DOGE']
+    required_columns = ['kai_count', 'net_profit_rate', 'weekly_net_profit_detail', 'max_hold_time', 'kai_column', 'pin_column', 'score_final']
     all_data_dfs = []  # 用于存储每个文件的 DataFrame
     is_reverse = True
     for inst_id in inst_id_list:
@@ -636,7 +636,7 @@ def filter_similar_strategy():
         # data_df = data_df[data_df['kai_column'].str.contains('long', na=False)]
         # data_df = data_df.head(10000)
         print(f'处理 {inst_id} 的数据，数据量：{len(data_df)}')
-        filtered_df = filtering(data_df, grouping_column='kai_count', sort_key='net_profit_rate', _unused_threshold=None)
+        filtered_df = filtering(data_df, grouping_column='kai_count', sort_key='score_final', _unused_threshold=None)
         filtered_df.to_parquet(output_path, index=False)
         filtered_df = pd.read_parquet(output_path,columns=['kai_column', 'pin_column'])
         data_df = pd.read_parquet(data_file)

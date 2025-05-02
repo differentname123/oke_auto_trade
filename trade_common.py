@@ -36,6 +36,9 @@ class LatestDataManager:
 
     def get_newest_data(self):
         recent_data_df = get_train_data(max_candles=self.max_single_size, is_newest=False, inst_id=self.inst_id)
+        if recent_data_df.empty:
+            print("获取最新数据失败，返回空数据")
+            return self.data_df
         # 判断recent_data_df第一个时间戳（timestamp）是否在data_df中
         if recent_data_df['timestamp'].iloc[0] in self.data_df['timestamp'].values:
             print('历史数据在最新数据中，更新数据')
