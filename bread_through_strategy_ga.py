@@ -1080,6 +1080,8 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     global IS_REVERSE
     IS_REVERSE = True
     checkpoint_file = os.path.join(checkpoint_dir, f"{key_name}_{IS_REVERSE}_ga_checkpoint.pkl")
+    # checkpoint_file = os.path.join(checkpoint_dir, f"{key_name}_ga_checkpoint.pkl")
+
     if os.path.exists(checkpoint_file):
         try:
             with open(checkpoint_file, "rb") as f:
@@ -1447,8 +1449,8 @@ def example():
     """
     start_time = time.time()
     data_path_list = [
-        "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
+        # "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_DOGE-USDT-SWAP.csv",

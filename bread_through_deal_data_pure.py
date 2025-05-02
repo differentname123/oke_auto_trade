@@ -65,11 +65,11 @@ def process_load_filter_data(file):
         df['profit_risk_score'] = -(npr * npr) / df['fu_profit_sum']
         df['profit_risk_score_pure'] = -npr / df['fu_profit_sum']
 
-        df = compute_rewarded_penalty_from_flat_df(df)
-        df = df[df['score_final'] > -0]
+        # df = compute_rewarded_penalty_from_flat_df(df)
+        # df = df[df['score_final'] > -0]
 
-        # df = add_raw_diff_columns(df)
-        # df = df[df['norm_diff_score'] > -1]
+        df = add_raw_diff_columns(df)
+        df = df[df['norm_diff_score'] > -1]
 
         # # 根据筛选条件过滤数据
         # df = df[
@@ -107,7 +107,7 @@ def load_and_merger_data(inst_id, is_reverse):
     file_list = [os.path.join('temp', file) for file in file_list]
 
     # 使用多进程池并行处理文件
-    with mp.Pool(processes=1) as pool:
+    with mp.Pool(processes=10) as pool:
         df_list = pool.map(process_load_filter_data, file_list)
 
     # 过滤掉 None 值
@@ -325,16 +325,57 @@ def add_raw_diff_columns(df):
 
     return df
 
+def merge_df(inst_id):
+    is_reverse_list = [True, False]
+    merge_columns = ["kai_column", "pin_column"]
+    target_columns = [
+        "kai_count", "hold_time_mean", "net_profit_rate",
+        "fix_profit", "avg_profit_rate", "same_count",
+        "weekly_net_profit_detail"
+    ]
+    columns_to_read = merge_columns + target_columns
+    for is_reverse in is_reverse_list:
+        output_file = f'temp_back/{inst_id}_{is_reverse}_pure_data_with_future.parquet'
+        origin_file = f'temp_back/{inst_id}_{is_reverse}_pure_data.parquet'
+        origin_good_df = pd.read_parquet(origin_file)
+
+        # 读取 Parquet 文件时仅读取需要的列，指定 engine 可根据实际情况选择
+        new_df = pd.read_parquet(
+            f'temp_back/{inst_id}_{is_reverse}_pure_data.parquet_1m_200000_{inst_id}-USDT-SWAP_2025-05-01.csvstatistic_results_final.parquet',
+            columns=columns_to_read,
+            engine='pyarrow'
+        )
+
+        # 选择需要的列，并重命名以区分
+        new_df_selected = new_df.copy()
+        new_df_selected = new_df_selected.rename(
+            columns={col: col + "_new20" for col in target_columns}
+        )
+
+        origin_good_df = origin_good_df.set_index(merge_columns)
+        new_df_selected = new_df_selected.set_index(merge_columns)
+
+        # 使用 join 进行合并（左连接），然后重置索引
+        origin_good_df = origin_good_df.join(new_df_selected, how="left").reset_index()
+        origin_good_df.to_parquet(output_file, index=False)
+
 def example():
-    inst_id_list = ['ETH']
-    is_reverse = True
+    inst_id_list = ['SOL']
+    is_reverse = False
+    # for inst_id in inst_id_list:
+    #     output_path = f'temp_back/{inst_id}_{is_reverse}_pure_data.parquet'
+    #     if os.path.exists(output_path):
+    #         result_df = pd.read_parquet(output_path)
+    #         result_df = add_raw_diff_columns(result_df)
+    #     result_df = load_and_merger_data(inst_id, is_reverse)
+    #     result_df.to_parquet(output_path, index=False)
+
     for inst_id in inst_id_list:
-        output_path = f'temp_back/{inst_id}_{is_reverse}_pure_data.parquet'
-        if os.path.exists(output_path):
-            result_df = pd.read_parquet(output_path)
-            result_df = add_raw_diff_columns(result_df)
-        result_df = load_and_merger_data(inst_id, is_reverse)
-        result_df.to_parquet(output_path, index=False)
+        output_file = f'temp_back/{inst_id}_{is_reverse}_pure_data_with_future.parquet'
+        if os.path.exists(output_file):
+            result_df = pd.read_parquet(output_file)
+        merge_df(inst_id)
+
 
 
 if __name__ == '__main__':

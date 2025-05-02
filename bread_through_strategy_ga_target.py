@@ -535,7 +535,7 @@ def process_signal_pair(pair):
     kai_column, pin_column = pair
     try:
         _, stat = get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is_detail=False,
-                                                is_reverse=False)
+                                                is_reverse=True)
     except Exception as e:
         print(f"Error processing pair ({kai_column}, {pin_column}): {e}")
         stat = None
@@ -628,7 +628,7 @@ def validation(market_data_file):
     df = df_local
 
     # 注意：这里只读取需要的列： kai_column 和 pin_column
-    stat_df_file_list = [f'temp/final_good_{inst_id}_false_filter.parquet']
+    stat_df_file_list = [f'temp_back/{inst_id}_True_pure_data.parquet']
     for stat_df_file in stat_df_file_list:
         try:
             # 1. 加载 stat_df 文件（只读取必要的两列）
@@ -682,10 +682,10 @@ def validation(market_data_file):
                 start_time = time.time()
                 output_file = os.path.join("temp_back",
                                            f"{stat_df_base_name}_{base_name}statistic_results_{batch_index}.parquet")
-                if os.path.exists(output_file):
-                    print(f"{output_file} 已存在，跳过处理。")
-                    batch_output_files.append(output_file)
-                    continue
+                # if os.path.exists(output_file):
+                #     print(f"{output_file} 已存在，跳过处理。")
+                #     batch_output_files.append(output_file)
+                #     continue
                 end_idx = min(start_idx + BATCH_SIZE, total_pairs)
                 batch_pairs = pairs[start_idx:end_idx]
                 print(f"Processing batch {batch_index + 1}/{total_batches} with {len(batch_pairs)} pairs... [{current_time}]")
@@ -993,13 +993,13 @@ if __name__ == "__main__":
         # "kline_data/origin_data_1m_10000_XRP-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_10000_PEPE-USDT-SWAP.csv",
 
-        "kline_data/origin_data_1m_15000_BTC-USDT-SWAP_2025-04-20.csv",
-        "kline_data/origin_data_1m_15000_SOL-USDT-SWAP_2025-04-20.csv",
-        "kline_data/origin_data_1m_15000_ETH-USDT-SWAP_2025-04-20.csv",
-        "kline_data/origin_data_1m_15000_TON-USDT-SWAP_2025-04-20.csv",
-        "kline_data/origin_data_1m_15000_DOGE-USDT-SWAP_2025-04-20.csv",
-        "kline_data/origin_data_1m_15000_XRP-USDT-SWAP_2025-04-20.csv",
-        "kline_data/origin_data_1m_15000_PEPE-USDT-SWAP_2025-04-20.csv",
+        "kline_data/origin_data_1m_200000_BTC-USDT-SWAP_2025-05-01.csv",
+        "kline_data/origin_data_1m_200000_SOL-USDT-SWAP_2025-05-01.csv",
+        "kline_data/origin_data_1m_200000_ETH-USDT-SWAP_2025-05-01.csv",
+        # "kline_data/origin_data_1m_200000_TON-USDT-SWAP_2025-05-01.csv",
+        # "kline_data/origin_data_1m_200000_DOGE-USDT-SWAP_2025-05-01.csv",
+        # "kline_data/origin_data_1m_200000_XRP-USDT-SWAP_2025-05-01.csv",
+        # "kline_data/origin_data_1m_200000_PEPE-USDT-SWAP_2025-05-01.csv",
         # "kline_data/origin_data_1m_10000_ETH-USDT-SWAP_2025-04-07.csv",
         # "kline_data/origin_data_1m_10000_SOL-USDT-SWAP_2025-04-07.csv",
         # "kline_data/origin_data_1m_10000_TON-USDT-SWAP_2025-04-07.csv",
