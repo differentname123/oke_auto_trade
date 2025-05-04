@@ -49,7 +49,7 @@ def merge_and_compute(df_list, merge_on=["feature", "bin_seq"], metric_cols=None
         return pd.DataFrame()
     if metric_cols is None:
         metric_cols = [
-            'avg_net_profit_rate_new', 'pos_ratio',
+            'avg_net_profit_rate_new20', 'pos_ratio',
             'spearman_avg_net_profit_rate', 'spearman_pos_ratio', 'spearman_score'
         ]
 
@@ -72,8 +72,8 @@ def merge_and_compute(df_list, merge_on=["feature", "bin_seq"], metric_cols=None
         merged_df[f"{col}_max"] = merged_df[col_names].max(axis=1)
         merged_df[f"{col}_min"] = merged_df[col_names].min(axis=1)
         merged_df[f"{col}_mean"] = merged_df[col_names].mean(axis=1)
-    merged_df['score'] = merged_df['avg_net_profit_rate_new_min'] * merged_df['pos_ratio_min']
-    merged_df['score1'] = merged_df['avg_net_profit_rate_new_mean'] * merged_df['pos_ratio_mean']
+    merged_df['score'] = merged_df['avg_net_profit_rate_new20_min'] * merged_df['pos_ratio_min']
+    merged_df['score1'] = merged_df['avg_net_profit_rate_new20_mean'] * merged_df['pos_ratio_mean']
 
     output_cols = merge_on.copy()
     for col in metric_cols:
@@ -136,14 +136,14 @@ def process_single_feature(feature, feat_values, target_values, n_bins=50):
             "bin_interval": intervals,
             "min_net_profit": min_net_profit,
             "max_net_profit": max_net_profit,
-            "avg_net_profit_rate_new": avg_net_profit,
+            "avg_net_profit_rate_new20": avg_net_profit,
             "pos_ratio": pos_ratio,
             "count": counts,
             "bin_ratio": counts / total_count
         })
 
         if result_df.shape[0] > 1:
-            spearman_avg, _ = spearmanr(result_df["bin_seq"], result_df["avg_net_profit_rate_new"])
+            spearman_avg, _ = spearmanr(result_df["bin_seq"], result_df["avg_net_profit_rate_new20"])
             spearman_pos, _ = spearmanr(result_df["bin_seq"], result_df["pos_ratio"])
         else:
             spearman_avg = spearman_pos = np.nan
@@ -249,21 +249,24 @@ def main(n_bins=50, batch_size=10):
     total_inst = len(inst_id_list)
     for inst_index, inst_id in enumerate(inst_id_list):
         print(f"\n【处理数据】：开始处理 {inst_id} ({inst_index+1}/{total_inst})")
-        data_file = f'temp/final_good_{inst_id}_false_filter_all.parquet'
+        data_file = f'temp/corr/final_good_{inst_id}_True_filter_all.parquet_origin_good_weekly_net_profit_detail.parquet'
         data_df = pd.read_parquet(data_file)
         data_df = data_df[data_df['hold_time_mean'] < 5000]
-        data_df = data_df[data_df['kai_column'].str.contains('long', na=False)]
+        # data_df = data_df[data_df['kai_column'].str.contains('long', na=False)]
+        if data_df.shape[0] < 100:
+            print(f"【提示】：数据行数不足，跳过 {inst_id} 的处理")
+            continue
         print(f"【提示】：数据加载完成，数据行数：{data_df.shape[0]}")
 
-        # 1. 筛选原始数值特征（排除 'timestamp'、'net_profit_rate_new' 和包含 'new' 的字段）
+        # 1. 筛选原始数值特征（排除 'timestamp'、'net_profit_rate_new20' 和包含 'new' 的字段）
         all_numeric_columns = data_df.select_dtypes(include=np.number).columns.tolist()
         orig_feature_cols = [
             col for col in all_numeric_columns
-            if col not in ['timestamp', 'net_profit_rate_new'] and 'new' not in col
+            if col not in ['timestamp', 'net_profit_rate_new20'] and 'new' not in col
         ]
         print(f"【提示】：待处理的原始特征数量: {len(orig_feature_cols)}")
         orig_feature_data = {feature: data_df[feature].values for feature in orig_feature_cols}
-        target_values = data_df['net_profit_rate_new'].values
+        target_values = data_df['net_profit_rate_new20'].values
         orig_values = data_df[orig_feature_cols].to_numpy(dtype=np.float32)
         num_features = orig_values.shape[1]
 
@@ -541,11 +544,11 @@ def merge_data_optimized(
     """
     need_cols = [
         'feature', 'bin_seq',
-        'min_net_profit', 'avg_net_profit_rate_new',
+        'min_net_profit', 'avg_net_profit_rate_new20',
         'pos_ratio', 'count'
     ]
     positive_ratio_threshold = 0.5
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = ['SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     # 1) 读入并初步筛选
     dfs: list[pd.DataFrame] = []
     for inst in inst_id_list:
@@ -559,13 +562,13 @@ def merge_data_optimized(
             df.groupby('feature')['bin_seq']
               .max()
               .reset_index()
-              .query('bin_seq == 1000')
+              .query('bin_seq == 100')
               ['feature']
         )
         df = df[df['feature'].isin(feat_max)]
         # b) count 范围筛选
-        df = df.query('10 < count < 20000')
-        # df = df[df['avg_net_profit_rate_new'] > -30]
+        df = df.query('3 < count < 20000')
+        # df = df[df['avg_net_profit_rate_new20'] > -30]
         dfs.append(df)
 
     # 2) 求所有 inst 共有的 (feature, bin_seq)
@@ -585,10 +588,10 @@ def merge_data_optimized(
     all_df = all_df.merge(common, on=['feature', 'bin_seq'], how='inner')
 
     # ───────────────────────────────────────────────────────────────
-    # 4) 预先针对 avg_net_profit_rate_new 做一次“分组正例比例”过滤
+    # 4) 预先针对 avg_net_profit_rate_new20 做一次“分组正例比例”过滤
     #    这样后续 heavy aggregator 只跑在符合比例 > threshold 的组上
     # 4a) 生成一列 pos_flag
-    all_df['_avg_pos'] = (all_df['avg_net_profit_rate_new'] > 0).astype('uint8')
+    all_df['_avg_pos'] = (all_df['avg_net_profit_rate_new20'] > 0).astype('uint8')
     # 4b) groupby.transform 计算各组 size 和 pos_sum
     grp_cols = ['feature', 'bin_seq']
     all_df['_grp_size'] = all_df.groupby(grp_cols)['_avg_pos'].transform('size')
@@ -614,7 +617,7 @@ def merge_data_optimized(
         group_cols=['feature', 'bin_seq'],
         target_cols=[
             'min_net_profit',
-            'avg_net_profit_rate_new',
+            'avg_net_profit_rate_new20',
             'pos_ratio',
             'count'
         ]
@@ -632,5 +635,5 @@ def merge_data_optimized(
 
 
 if __name__ == '__main__':
-    main(n_bins=1000, batch_size=12000)
-    # merge_data_optimized()
+    # main(n_bins=100, batch_size=12000)
+    merge_data_optimized()

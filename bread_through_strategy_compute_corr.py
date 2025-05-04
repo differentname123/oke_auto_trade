@@ -217,7 +217,7 @@ def debug():
     调试入口函数：
       遍历 temp/corr 目录下符合条件的文件，调用 find_all_valid_groups 进行处理。
     """
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = ['BTC', 'ETH']
     is_reverse = True
     for inst_id in inst_id_list:
         file_path = f'temp/final_good_{inst_id}_{is_reverse}_filter_all.parquet'
@@ -229,7 +229,7 @@ def select_strategies_optimized(
     correlation_df: pd.DataFrame,
     k: int,
     strategy_id_col: str = 'index', # 新增参数：指定包含策略ID的列名
-    count_col: str = 'score_final',       # 新增参数：指定包含计数的列名
+    count_col: str = 'score_score',       # 新增参数：指定包含计数的列名
     penalty_scaler: float = 1.0,
     use_absolute_correlation: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -581,7 +581,7 @@ def filter_good_df(inst_id):
     return filter_df
 
 def final_compute_corr():
-    inst_id_list = [ 'ETH', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = [ 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
 
     for inst_id in inst_id_list:
         corr_path = f'temp/corr/final_good_{inst_id}_True_filter_all.parquet_corr_weekly_net_profit_detail.parquet'
@@ -610,8 +610,8 @@ def filter_similar_strategy():
     过滤掉太过于相似的策略。
     :return:
     """
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
-    required_columns = ['kai_count', 'net_profit_rate', 'weekly_net_profit_detail', 'max_hold_time', 'kai_column', 'pin_column', 'score_final']
+    inst_id_list = ['BTC', 'ETH']
+    required_columns = ['kai_count', 'net_profit_rate', 'weekly_net_profit_detail', 'max_hold_time', 'kai_column', 'pin_column', 'score_score']
     all_data_dfs = []  # 用于存储每个文件的 DataFrame
     is_reverse = True
     for inst_id in inst_id_list:
@@ -632,7 +632,7 @@ def filter_similar_strategy():
         # data_df = data_df.head(10000)
         print(f'处理 {inst_id} 的数据，数据量：{len(data_df)}')
         while True:
-            filtered_df = filtering(data_df, grouping_column='kai_count', sort_key='score_final', _unused_threshold=None)
+            filtered_df = filtering(data_df, grouping_column='kai_count', sort_key='score_score', _unused_threshold=None)
             print(f'{inst_id} 过滤后的数据量：{len(filtered_df)} 过滤前数据量：{len(data_df)}')
             if filtered_df.shape[0] == data_df.shape[0]:
                 break
@@ -650,7 +650,7 @@ def filter_similar_strategy():
 
 def example():
     # filter_similar_strategy()
-    # final_compute_corr()
+    final_compute_corr()
     debug()
 
 

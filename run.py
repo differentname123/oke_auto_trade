@@ -372,13 +372,15 @@ async def main_instrument():
     all_df = []
     exclude_str = ['macross', 'rsi', 'macd', 'cci', 'atr']
     for is_reverse in [True, False]:
-        file_path = f'temp/final_good_{inst_id}_{is_reverse}_filter_all.parquet'
+        # file_path = f'temp/final_good_{inst_id}_{is_reverse}_filter_all.parquet'
+        file_path = f'temp/corr/final_good_{inst_id}_{is_reverse}_filter_all.parquet_origin_good_weekly_net_profit_detail.parquet'
+
         if os.path.exists(file_path):
             final_good_df = pd.read_parquet(file_path)
             for exclude in exclude_str:
                 final_good_df = final_good_df[~final_good_df['kai_column'].str.contains(exclude)]
                 final_good_df = final_good_df[~final_good_df['pin_column'].str.contains(exclude)]
-            final_good_df = final_good_df.sort_values(by='score_final', ascending=False).head(10)
+            final_good_df = final_good_df.sort_values(by='score_score', ascending=False).head(10)
             all_df.append(final_good_df)
             print(f'{INSTRUMENT} final_good_df shape: {final_good_df.shape[0]} 来自 {file_path}')
     if all_df:

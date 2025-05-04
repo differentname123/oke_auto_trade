@@ -52,25 +52,45 @@ def check_array_len(df: pd.DataFrame, column_list: list) -> None:
 
 
 def process_load_filter_data(file):
-    """处理单个文件的函数，并根据条件过滤数据"""
+    """处理单个文件的函数，并根据条件过滤数据；
+    如果过滤结果不为空，则返回过滤后的整个 DataFrame，
+    如果过滤后为空，则返回备份数据中 score_score 最大的那一行。
+    """
     try:
+        # 读取数据
         df = pd.read_parquet(file)
         origin_len = len(df)
-        check_array_len(df, ['monthly_kai_count_detail', 'monthly_net_profit_detail', 'weekly_kai_count_detail',
-                             'weekly_net_profit_detail'])
 
-        # 预计算 net_profit_rate 的平方，简化 profit_risk_score 的计算
+        # 检查必要列的数组长度
+        check_array_len(
+            df,
+            [
+                'monthly_kai_count_detail',
+                'monthly_net_profit_detail',
+                'weekly_kai_count_detail',
+                'weekly_net_profit_detail'
+            ]
+        )
+
+        # 预计算各项 profit_risk_score 指标
         npr = df['net_profit_rate']
         df['profit_risk_score_con'] = -(npr * npr) / df['max_consecutive_loss']
         df['profit_risk_score'] = -(npr * npr) / df['fu_profit_sum']
         df['profit_risk_score_pure'] = -npr / df['fu_profit_sum']
 
+        # 计算奖励与惩罚相关数据
         df = compute_rewarded_penalty_from_flat_df(df)
-        df = df[df['score_final'] > -10]
 
+        # 备份处理前的数据，后续用于 fallback（确保原始数据完整性）
+        df_backup = df.copy()
+
+        # 根据 score_final 过滤
+        df = df[df['score_final'] > -10]
+        # 添加原始差值相关列，并根据 norm_diff_score 过滤
         df = add_raw_diff_columns(df)
         df = df[df['norm_diff_score'] > -10]
 
+        # 计算 score_score，并对负值情况进行调整
         df['score_score'] = df['score_final'] * df['norm_diff_score']
         df['score_score'] = np.where(
             (df['score_final'] < 0) | (df['norm_diff_score'] < 0),
@@ -78,23 +98,24 @@ def process_load_filter_data(file):
             df['score_score']
         )
 
-        # # 根据筛选条件过滤数据
-        # df = df[
-        #     (df['max_consecutive_loss'] >= -20) &  # 最大连续亏损必须大于等于 -20
-        #     (df['net_profit_rate'] >= 100) &  # 净盈利率至少为 100
-        #     (df['kai_count'] >= 100) &  # 交易次数（kai_count）不少于 100
-        #     (df['active_month_ratio'] >= 0.8) &  # 活跃月份比率至少为 0.8
-        #     (df['weekly_loss_rate'] <= 0.2) &  # 每周亏损率不超过 0.2
-        #     (df['monthly_loss_rate'] <= 0.2) &  # 每月亏损率不超过 0.2
-        #     (df['top_profit_ratio'] <= 0.5) &  # 盈利峰值比率不超过 0.5
-        #     (df['hold_time_mean'] <= 3000) &  # 平均持仓时间不超过 3000
-        #     (df['avg_profit_rate'] >= 10) &  # 平均盈利率至少为 10
-        #     (df['max_hold_time'] <= 10000)  # 最大持仓时间不超过 10000
-        #     ]
-        # print(f"文件 {file} 原始数据行数: {origin_len}，筛选后数据行数: {len(df)}")
-        return df
+        # 如果经过过滤后结果不为空，正常返回整个 DataFrame
+        if not df.empty:
+            return df
+        else:
+            # 当过滤结果为空时，对备份数据进行处理：
+            # 为备份数据添加原始差值相关列，并计算 score_score
+            df_backup = add_raw_diff_columns(df_backup)
+            df_backup['score_score'] = df_backup['score_final'] * df_backup['norm_diff_score']
+            df_backup['score_score'] = np.where(
+                (df_backup['score_final'] < 0) | (df_backup['norm_diff_score'] < 0),
+                -abs(df_backup['score_score']),
+                df_backup['score_score']
+            )
+            # 取 score_score 最大的那一行
+            max_idx = df_backup['score_score'].idxmax()
+            return df_backup.loc[[max_idx]]
     except Exception as e:
-        print(f"处理文件 {file} 时报错: {e}")
+        print(f"处理文件 {file} 时出错: {e}")
         return None
 
 
@@ -367,17 +388,17 @@ def merge_df(inst_id):
         origin_good_df.to_parquet(output_file, index=False)
 
 def example():
-    inst_id_list = ['ETH', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = ['BTC', 'ETH']
     is_reverse = True
     # pd.read_parquet(f'temp/final_good_BTC_True_filter_all.parquet')
 
-    # for inst_id in inst_id_list:
-    #     output_path = f'temp_back/{inst_id}_{is_reverse}_pure_data.parquet'
-    #     if os.path.exists(output_path):
-    #         result_df = pd.read_parquet(output_path)
-    #         result_df = add_raw_diff_columns(result_df)
-    #     result_df = load_and_merger_data(inst_id, is_reverse)
-    #     result_df.to_parquet(output_path, index=False)
+    for inst_id in inst_id_list:
+        output_path = f'temp_back/{inst_id}_{is_reverse}_pure_data.parquet'
+        if os.path.exists(output_path):
+            result_df = pd.read_parquet(output_path)
+            result_df = add_raw_diff_columns(result_df)
+        result_df = load_and_merger_data(inst_id, is_reverse)
+        result_df.to_parquet(output_path, index=False)
 
     for inst_id in inst_id_list:
         output_file = f'temp_back/{inst_id}_{is_reverse}_pure_data_with_future.parquet'
