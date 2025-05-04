@@ -615,7 +615,7 @@ def filter_similar_strategy():
     过滤掉太过于相似的策略。
     :return:
     """
-    inst_id_list =  ['SOL', 'TON', 'DOGE']
+    inst_id_list =  ['DOGE', 'XRP', 'PEPE']
     required_columns = ['kai_count', 'net_profit_rate', 'weekly_net_profit_detail', 'max_hold_time', 'kai_column', 'pin_column', 'score_final']
     all_data_dfs = []  # 用于存储每个文件的 DataFrame
     is_reverse = True
@@ -648,7 +648,7 @@ def filter_similar_strategy():
 def example():
     filter_similar_strategy()
     # final_compute_corr()
-    # debug()
+    debug()
 
 
 

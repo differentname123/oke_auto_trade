@@ -16,7 +16,7 @@ OKX_WS_URL = "wss://ws.okx.com:8443/ws/v5/public"
 
 # 订阅的交易对
 INSTRUMENT = "SOL-USDT-SWAP"
-min_count_map = {"BTC-USDT-SWAP": 0.01, "ETH-USDT-SWAP": 0.01, "SOL-USDT-SWAP": 0.1, "TON-USDT-SWAP": 1}
+min_count_map = {"BTC-USDT-SWAP": 0.01, "ETH-USDT-SWAP": 0.01, "SOL-USDT-SWAP": 0.01, "TON-USDT-SWAP": 1}
 
 # 初始化价格映射
 kai_target_price_info_map = {}
@@ -440,6 +440,10 @@ def update_price_map(strategy_df, df, target_column='kai_column'):
         # 获取threshold_price_series最后一行的值
         threshold_price = threshold_price_series.iloc[-1]
         last_direction = direction.iloc[-1]
+        # 判断threshold_price是否是正常的数值
+        if pd.isna(threshold_price) or threshold_price == 0:
+            print(f"❌ {kai_column} 的阈值计算失败，跳过该信号")
+            continue
         target_price_info_map[kai_column] = (threshold_price, last_direction)
     return target_price_info_map
 
@@ -832,18 +836,24 @@ async def main():
         os.makedirs("temp")
     load_order_detail_map()
     exclude_str = ['macross', 'rsi', 'macd', 'cci', 'atr']
-
+    is_reverse_list = [True, False]
     inst_id = INSTRUMENT.split('-')[0]
-    final_good_df = pd.read_parquet(f'temp/final_good_{inst_id}_True_filter_all.parquet')
-    # 过滤掉kai_column和pin_column中包含exclude_str的行
-    for exclude in exclude_str:
-        final_good_df = final_good_df[~final_good_df['kai_column'].str.contains(exclude)]
-        final_good_df = final_good_df[~final_good_df['pin_column'].str.contains(exclude)]
-    # 只保留score_final最大的前10行
-    final_good_df = final_good_df.sort_values(by='score_final', ascending=False)
-    final_good_df = final_good_df.head(10)
-
-    print(f'final_good_df shape: {final_good_df.shape[0]}')
+    all_df = []
+    for is_reverse in is_reverse_list:
+        file_path = f'temp/final_good_{inst_id}_{is_reverse}_filter_all.parquet'
+        if os.path.exists(file_path):
+            final_good_df = pd.read_parquet(f'temp/final_good_{inst_id}_{is_reverse}_filter_all.parquet')
+            # 过滤掉kai_column和pin_column中包含exclude_str的行
+            for exclude in exclude_str:
+                final_good_df = final_good_df[~final_good_df['kai_column'].str.contains(exclude)]
+                final_good_df = final_good_df[~final_good_df['pin_column'].str.contains(exclude)]
+            # 只保留score_final最大的前10行
+            final_good_df = final_good_df.sort_values(by='score_final', ascending=False)
+            final_good_df = final_good_df.head(10)
+            all_df.append(final_good_df)
+            print(f'final_good_df shape: {final_good_df.shape[0]} {file_path}')
+    final_good_df = pd.concat(all_df)
+    print(f'{inst_id} final_good_df shape: {final_good_df.shape[0]}')
     period_list = []
     for index, row in final_good_df.iterrows():
         if 'is_reverse' not in row:
