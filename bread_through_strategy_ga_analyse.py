@@ -635,5 +635,5 @@ def merge_data_optimized(
 
 
 if __name__ == '__main__':
-    # main(n_bins=100, batch_size=12000)
-    merge_data_optimized()
+    main(n_bins=50, batch_size=12000)
+    # merge_data_optimized()

@@ -388,17 +388,17 @@ def merge_df(inst_id):
         origin_good_df.to_parquet(output_file, index=False)
 
 def example():
-    inst_id_list = ['BTC', 'ETH']
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     is_reverse = True
     # pd.read_parquet(f'temp/final_good_BTC_True_filter_all.parquet')
 
-    for inst_id in inst_id_list:
-        output_path = f'temp_back/{inst_id}_{is_reverse}_pure_data.parquet'
-        if os.path.exists(output_path):
-            result_df = pd.read_parquet(output_path)
-            result_df = add_raw_diff_columns(result_df)
-        result_df = load_and_merger_data(inst_id, is_reverse)
-        result_df.to_parquet(output_path, index=False)
+    # for inst_id in inst_id_list:
+    #     output_path = f'temp_back/{inst_id}_{is_reverse}_pure_data.parquet'
+    #     if os.path.exists(output_path):
+    #         result_df = pd.read_parquet(output_path)
+    #         result_df = add_raw_diff_columns(result_df)
+    #     result_df = load_and_merger_data(inst_id, is_reverse)
+    #     result_df.to_parquet(output_path, index=False)
 
     for inst_id in inst_id_list:
         output_file = f'temp_back/{inst_id}_{is_reverse}_pure_data_with_future.parquet'

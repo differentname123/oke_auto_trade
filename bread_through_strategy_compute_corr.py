@@ -115,7 +115,7 @@ def filtering(origin_good_df, grouping_column, sort_key, _unused_threshold):
     ref_value = df_sorted.loc[0, grouping_column]
     for i in range(n):
         current_value = df_sorted.loc[i, grouping_column]
-        if (i - start + 1) > 1000 or (current_value - ref_value > 2):
+        if (i - start + 1) > 1000 or (current_value - ref_value > 10):
             groups.append(df_sorted.iloc[start:i])
             start = i
             ref_value = current_value
@@ -217,7 +217,7 @@ def debug():
     调试入口函数：
       遍历 temp/corr 目录下符合条件的文件，调用 find_all_valid_groups 进行处理。
     """
-    inst_id_list = ['BTC', 'ETH']
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     is_reverse = True
     for inst_id in inst_id_list:
         file_path = f'temp/final_good_{inst_id}_{is_reverse}_filter_all.parquet'
@@ -581,7 +581,7 @@ def filter_good_df(inst_id):
     return filter_df
 
 def final_compute_corr():
-    inst_id_list = [ 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = [ 'ETH', 'TON', 'DOGE', 'XRP', 'PEPE']
 
     for inst_id in inst_id_list:
         corr_path = f'temp/corr/final_good_{inst_id}_True_filter_all.parquet_corr_weekly_net_profit_detail.parquet'
@@ -610,7 +610,7 @@ def filter_similar_strategy():
     过滤掉太过于相似的策略。
     :return:
     """
-    inst_id_list = ['BTC', 'ETH']
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     required_columns = ['kai_count', 'net_profit_rate', 'weekly_net_profit_detail', 'max_hold_time', 'kai_column', 'pin_column', 'score_score']
     all_data_dfs = []  # 用于存储每个文件的 DataFrame
     is_reverse = True
@@ -649,8 +649,8 @@ def filter_similar_strategy():
 
 
 def example():
-    # filter_similar_strategy()
-    final_compute_corr()
+    filter_similar_strategy()
+    # final_compute_corr()
     debug()
 
 
