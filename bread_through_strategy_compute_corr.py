@@ -122,11 +122,11 @@ def filtering(origin_good_df, grouping_column, sort_key, _unused_threshold):
     if start < n:
         groups.append(df_sorted.iloc[start:n])
     # 根据组的数量动态计算组内相关性过滤阈值
-    group_threshold = max(50, 90 - int(0.01 * len(groups)))
+    group_threshold = max(50, 90 - int(0.1 * len(groups)))
     print(f"总分组数量：{len(groups)} ，组内相关性阈值：{group_threshold}")
 
     filtered_dfs = []
-    with ProcessPoolExecutor(max_workers=10) as executor:
+    with ProcessPoolExecutor(max_workers=3) as executor:
         futures = [executor.submit(process_group, group, sort_key, group_threshold) for group in groups]
         for future in futures:
             result = future.result()
@@ -196,9 +196,9 @@ def find_all_valid_groups(file_path):
     correlation_field = 'weekly_net_profit_detail'
     base_name = os.path.basename(file_path)
     output_path = f'temp/corr/{base_name}_origin_good_{correlation_field}.parquet'
-    if os.path.exists(output_path):
-        print(f'文件已存在，跳过处理：{output_path}')
-        return
+    # if os.path.exists(output_path):
+    #     print(f'文件已存在，跳过处理：{output_path}')
+    #     return
     origin_good_df = pd.read_parquet(file_path)
     if len(origin_good_df) > 20000:
         print(f'数据量过大，跳过处理：{len(origin_good_df)}')
@@ -217,23 +217,19 @@ def debug():
     调试入口函数：
       遍历 temp/corr 目录下符合条件的文件，调用 find_all_valid_groups 进行处理。
     """
-    base_dir = 'temp/corr'
-    if not os.path.exists(base_dir):
-        print(f"目录不存在：{base_dir}")
-        return
-    file_list = os.listdir(base_dir)
-    file_list = [file for file in file_list if '_feature_' in file and 'good' not in file and 'corr' not in file]
-    print(f'找到 {len(file_list)} 个文件')
-    for file_name in file_list:
-        file_path = os.path.join(base_dir, file_name)
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    is_reverse = True
+    for inst_id in inst_id_list:
+        file_path = f'temp/final_good_{inst_id}_{is_reverse}_filter_all.parquet'
         find_all_valid_groups(file_path)
+
 
 def select_strategies_optimized(
     strategy_df: pd.DataFrame,
     correlation_df: pd.DataFrame,
     k: int,
     strategy_id_col: str = 'index', # 新增参数：指定包含策略ID的列名
-    count_col: str = 'count',       # 新增参数：指定包含计数的列名
+    count_col: str = 'score_final',       # 新增参数：指定包含计数的列名
     penalty_scaler: float = 1.0,
     use_absolute_correlation: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -585,17 +581,16 @@ def filter_good_df(inst_id):
     return filter_df
 
 def final_compute_corr():
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
-    final_df = pd.read_parquet('temp/corr/final_good_df.parquet')
+    inst_id_list = [ 'ETH', 'TON', 'DOGE', 'XRP', 'PEPE']
 
     for inst_id in inst_id_list:
-        corr_path = f'temp/corr/{inst_id}_corr.parquet'
-        origin_good_path = f'temp/corr/{inst_id}_origin_good.parquet'
-        # strategy_df = pd.read_parquet(origin_good_path)
+        corr_path = f'temp/corr/final_good_{inst_id}_True_filter_all.parquet_corr_weekly_net_profit_detail.parquet'
+        origin_good_path = f'temp/corr/final_good_{inst_id}_True_filter_all.parquet_origin_good_weekly_net_profit_detail.parquet'
+        strategy_df = pd.read_parquet(origin_good_path)
         # 计算score，逻辑为对kai_count取对数，然后除以max_consecutive_loss
         # strategy_df['score666'] = strategy_df['kai_count'].apply(lambda x: np.log(x) if x > 0 else 0) / strategy_df['max_consecutive_loss']
 
-        strategy_df = filter_good_df(inst_id)
+        # strategy_df = filter_good_df(inst_id)
 
         correlation_df = pd.read_parquet(corr_path)
         selected_strategies, selected_correlation_df = select_strategies_optimized(strategy_df, correlation_df, k=5,
@@ -615,7 +610,7 @@ def filter_similar_strategy():
     过滤掉太过于相似的策略。
     :return:
     """
-    inst_id_list =  ['DOGE', 'XRP', 'PEPE']
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     required_columns = ['kai_count', 'net_profit_rate', 'weekly_net_profit_detail', 'max_hold_time', 'kai_column', 'pin_column', 'score_final']
     all_data_dfs = []  # 用于存储每个文件的 DataFrame
     is_reverse = True
@@ -636,7 +631,15 @@ def filter_similar_strategy():
         # data_df = data_df[data_df['kai_column'].str.contains('long', na=False)]
         # data_df = data_df.head(10000)
         print(f'处理 {inst_id} 的数据，数据量：{len(data_df)}')
-        filtered_df = filtering(data_df, grouping_column='kai_count', sort_key='score_final', _unused_threshold=None)
+        while True:
+            filtered_df = filtering(data_df, grouping_column='kai_count', sort_key='score_final', _unused_threshold=None)
+            print(f'{inst_id} 过滤后的数据量：{len(filtered_df)} 过滤前数据量：{len(data_df)}')
+            if filtered_df.shape[0] == data_df.shape[0]:
+                break
+            data_df = filtered_df
+            print(f'继续过滤')
+
+
         filtered_df.to_parquet(output_path, index=False)
         filtered_df = pd.read_parquet(output_path,columns=['kai_column', 'pin_column'])
         data_df = pd.read_parquet(data_file)
@@ -646,7 +649,7 @@ def filter_similar_strategy():
 
 
 def example():
-    filter_similar_strategy()
+    # filter_similar_strategy()
     # final_compute_corr()
     debug()
 

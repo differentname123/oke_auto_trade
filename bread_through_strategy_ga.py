@@ -1455,7 +1455,7 @@ def example():
         "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_DOGE-USDT-SWAP.csv",
         "kline_data/origin_data_1m_10000000_XRP-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_10000000_PEPE-USDT-SWAP.csv"
+        # "kline_data/origin_data_1m_10000000_PEPE-USDT-SWAP.csv"
     ]
     for data_path in data_path_list:
         try:

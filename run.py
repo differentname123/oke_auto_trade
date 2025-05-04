@@ -13,12 +13,11 @@ from trade_common import LatestDataManager, place_order
 
 # WebSocket 服务器地址
 OKX_WS_URL = "wss://ws.okx.com:8443/ws/v5/public"
-
 # 定义需要操作的多个交易对
-INSTRUMENT_LIST = ["SOL-USDT-SWAP", "BTC-USDT-SWAP", "ETH-USDT-SWAP", "TON-USDT-SWAP"]
+INSTRUMENT_LIST = ["SOL-USDT-SWAP", "BTC-USDT-SWAP", "ETH-USDT-SWAP", "TON-USDT-SWAP", "DOGE-USDT-SWAP", "XRP-USDT-SWAP"]
 
 # 各交易对最小下单量映射
-min_count_map = {"BTC-USDT-SWAP": 0.01, "ETH-USDT-SWAP": 0.01, "SOL-USDT-SWAP": 0.01, "TON-USDT-SWAP": 1}
+min_count_map = {"BTC-USDT-SWAP": 0.01, "ETH-USDT-SWAP": 0.01, "SOL-USDT-SWAP": 0.01, "TON-USDT-SWAP": 1, "DOGE-USDT-SWAP": 0.01, "XRP-USDT-SWAP": 0.01, "PEPE-USDT-SWAP": 0.1}
 
 ##############################################
 # 单进程全局变量（每个进程只处理单一 INSTRUMENT）
@@ -211,7 +210,7 @@ async def fetch_new_data(max_period):
                         price_list.clear()
                         kai_target_price_info_map = update_price_map(strategy_df, df, target_column='kai_column')
                         pin_target_price_info_map = update_price_map(strategy_df, df, target_column='pin_column')
-                        print(f"📈 {INSTRUMENT} 更新开仓映射: {kai_target_price_info_map}")
+                        print(f"📈 {INSTRUMENT} 更新开仓映射: {len(kai_target_price_info_map)} {kai_target_price_info_map}")
                         previous_timestamp = latest_timestamp
                         current_minute = now.minute
                         break

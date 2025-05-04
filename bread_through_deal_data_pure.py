@@ -65,11 +65,18 @@ def process_load_filter_data(file):
         df['profit_risk_score'] = -(npr * npr) / df['fu_profit_sum']
         df['profit_risk_score_pure'] = -npr / df['fu_profit_sum']
 
-        # df = compute_rewarded_penalty_from_flat_df(df)
-        # df = df[df['score_final'] > -0]
+        df = compute_rewarded_penalty_from_flat_df(df)
+        df = df[df['score_final'] > -10]
 
         df = add_raw_diff_columns(df)
-        df = df[df['norm_diff_score'] > -1]
+        df = df[df['norm_diff_score'] > -10]
+
+        df['score_score'] = df['score_final'] * df['norm_diff_score']
+        df['score_score'] = np.where(
+            (df['score_final'] < 0) | (df['norm_diff_score'] < 0),
+            -abs(df['score_score']),
+            df['score_score']
+        )
 
         # # 根据筛选条件过滤数据
         # df = df[
@@ -360,7 +367,7 @@ def merge_df(inst_id):
         origin_good_df.to_parquet(output_file, index=False)
 
 def example():
-    inst_id_list = ['DOGE', 'XRP', 'PEPE']
+    inst_id_list = ['ETH', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     is_reverse = True
     # pd.read_parquet(f'temp/final_good_BTC_True_filter_all.parquet')
 
