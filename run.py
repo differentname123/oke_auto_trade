@@ -201,6 +201,12 @@ async def fetch_new_data(max_period):
     newest_data = LatestDataManager(max_period, INSTRUMENT)
     max_attempts = 200
     previous_timestamp = None
+    kai_column_list = strategy_df['kai_column'].unique().tolist()
+    result = {
+        "instrument": INSTRUMENT,
+        "total_strategy_count": len(strategy_df),  # 所有策略个数
+        "signals": {}  # 以信号为 key 存储信息
+    }
     while True:
         try:
             now = datetime.datetime.now()
@@ -215,10 +221,20 @@ async def fetch_new_data(max_period):
                         price_list.clear()
                         kai_target_price_info_map = update_price_map(strategy_df, df, target_column='kai_column')
                         pin_target_price_info_map = update_price_map(strategy_df, df, target_column='pin_column')
-                        for key, kai_value in kai_target_price_info_map.items():
-                            pin = kai_pin_map.get(key)
+
+                        for kai in kai_column_list:
+                            kai_value = kai_target_price_info_map.get(kai)
+                            pin = kai_pin_map.get(kai)
                             pin_value = pin_target_price_info_map.get(pin)
-                            print(f"📊 {INSTRUMENT} 所有策略个数{len(strategy_df)} 开仓信号个数{len(kai_target_price_info_map)} 开仓信号: {key} 目标价格: {kai_value} 平仓信号: {pin} 目标价格: {pin_value}")
+
+                            # 使用 kai 作为 key 存储对应信号的数据
+                            result["signals"][kai] = {
+                                "open_target_price": kai_value,  # 开仓目标价格
+                                "close_signal": pin,  # 平仓信号
+                                "close_target_price": pin_value  # 平仓目标价格
+                            }
+
+                        print(f"{INSTRUMENT} 开仓信号个数 {len(kai_target_price_info_map)} 平仓信号个数{len(pin_target_price_info_map)}  详细结果：{result}")
                         previous_timestamp = latest_timestamp
                         current_minute = now.minute
                         break
