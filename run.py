@@ -89,9 +89,13 @@ def compute_threshold_direction(df, col_name):
         if direction == "long":
             threshold_series = lower_band
             op = ">"
+            if df["close"].iloc[-1] > lower_band.iloc[-1]:
+                op = None
         else:
             threshold_series = upper_band
             op = "<"
+            if df["close"].iloc[-1] < upper_band.iloc[-1]:
+                op = None
         direction_series = pd.Series([op] * len(df), index=df.index)
         return threshold_series, direction_series
 
@@ -185,7 +189,8 @@ def update_price_map(strategy_df, df, target_column='kai_column'):
         if pd.isna(threshold_price) or threshold_price == 0:
             print(f"❌ {kai_column} 的阈值计算失败，跳过该信号")
             continue
-        target_price_info_map[kai_column] = (threshold_price, direction.iloc[-1])
+        if direction.iloc[-1] != None:
+            target_price_info_map[kai_column] = (threshold_price, direction.iloc[-1])
     return target_price_info_map
 
 ##############################################
@@ -210,7 +215,10 @@ async def fetch_new_data(max_period):
                         price_list.clear()
                         kai_target_price_info_map = update_price_map(strategy_df, df, target_column='kai_column')
                         pin_target_price_info_map = update_price_map(strategy_df, df, target_column='pin_column')
-                        print(f"📈 {INSTRUMENT} 更新开仓映射: {len(kai_target_price_info_map)} {kai_target_price_info_map}")
+                        for key, kai_value in kai_target_price_info_map.items():
+                            pin = kai_pin_map.get(key)
+                            pin_value = pin_target_price_info_map.get(pin)
+                            print(f"📊 {INSTRUMENT} 所有策略个数{len(strategy_df)} 开仓信号个数{len(kai_target_price_info_map)} 开仓信号: {key} 目标价格: {kai_value} 平仓信号: {pin} 目标价格: {pin_value}")
                         previous_timestamp = latest_timestamp
                         current_minute = now.minute
                         break
@@ -321,11 +329,15 @@ def process_close_orders(price_val):
                     if result:
                         keys_to_remove.append(kai_key)
                         print(f"【平仓】 {pin_key} for {INSTRUMENT} {order['pin_side']} 成交, 价格: {price_val}, 开仓价格: {kai_price}, 时间: {datetime.datetime.now()}")
+                    else:
+                        print(f"❌ {pin_key} for {INSTRUMENT} 平仓失败, 价格: {price_val}, 开仓价格: {kai_price}, 时间: {datetime.datetime.now()}")
                 elif comp == '<' and price_val < threshold_price:
                     result = place_order(INSTRUMENT, order['pin_side'], order['size'], trade_action="close")
                     if result:
                         keys_to_remove.append(kai_key)
                         print(f"【平仓】 {pin_key} for {INSTRUMENT} {order['pin_side']} 成交, 价格: {price_val}, 开仓价格: {kai_price}, 时间: {datetime.datetime.now()}")
+                    else:
+                        print(f"❌ {pin_key} for {INSTRUMENT} 平仓失败, 价格: {price_val}, 开仓价格: {kai_price}, 时间: {datetime.datetime.now()}")
     if keys_to_remove:
         for k in keys_to_remove:
             order_detail_map.pop(k, None)
@@ -380,7 +392,7 @@ async def main_instrument():
             for exclude in exclude_str:
                 final_good_df = final_good_df[~final_good_df['kai_column'].str.contains(exclude)]
                 final_good_df = final_good_df[~final_good_df['pin_column'].str.contains(exclude)]
-            final_good_df = final_good_df.sort_values(by='score_score', ascending=False).head(10)
+            final_good_df = final_good_df.sort_values(by='score_final', ascending=False).head(10)
             all_df.append(final_good_df)
             print(f'{INSTRUMENT} final_good_df shape: {final_good_df.shape[0]} 来自 {file_path}')
     if all_df:

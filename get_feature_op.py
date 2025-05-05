@@ -1,4 +1,5 @@
 import datetime
+import traceback
 
 import pandas as pd
 import numpy as np
@@ -35,7 +36,7 @@ def get_kline_data(inst_id, bar="1m", limit=100, max_candles=1000):
     after = ''  # 初始值为None，获取最新数据
     fetched_candles = 0  # 已获取的K线数量
     fail_count = 0  # 失败次数
-    max_retries = 100  # 最大重试次数
+    max_retries = 20  # 最大重试次数
 
     while fetched_candles < max_candles:
         try:
@@ -44,36 +45,44 @@ def get_kline_data(inst_id, bar="1m", limit=100, max_candles=1000):
 
             if response.get("code") != "0":
                 print(f"获取K线数据失败，错误代码：{response.get('code')}，错误消息：{response.get('msg')}")
-                time.sleep(1)
                 fail_count += 1
                 if fail_count >= max_retries:
                     print(f"连续失败 {max_retries} 次，停止获取。")
                     break
-            else:
-                fail_count = 0
-                # 提取返回数据
-                data = response.get("data", [])
-                if not data:
-                    print("无更多数据，已全部获取。")
-                    break
+                time.sleep(1)
+                continue  # 继续下一轮尝试
 
-                # 解析数据并添加到总数据中
-                all_data.extend(data)
-                fetched_candles += len(data)
+            fail_count = 0  # 成功获取后重置失败计数
 
-                # 更新 `after` 参数为当前返回数据的最早时间戳，用于获取更早的数据
-                after = data[-1][0]
+            # 提取返回数据
+            data = response.get("data", [])
+            if not data:
+                print("无更多数据，已全部获取。")
+                break
 
-                # 如果获取的数据量小于limit，说明数据已获取完毕
-                if len(data) < limit:
-                    break
+            # 解析数据并添加到总数据中
+            all_data.extend(data)
+            fetched_candles += len(data)
 
-                # 短暂延迟，避免触发API限频
-                time.sleep(0.2)
+            # 更新 `after` 参数为当前返回数据的最早时间戳，用于获取更早的数据
+            after = data[-1][0]
+
+            # 如果获取的数据量小于limit，说明数据已获取完毕
+            if len(data) < limit:
+                break
+
+            # 短暂延迟，避免触发API限频
+            time.sleep(0.2)
 
         except Exception as e:
+            traceback.print_exc()
             print(f"获取K线数据时出现异常：{e}")
-            break
+            fail_count += 1
+            if fail_count >= max_retries:
+                print(f"连续异常 {max_retries} 次，停止获取。")
+                break
+            time.sleep(1)  # 等待后重试
+            continue
 
     # 将所有数据转换为DataFrame，即使all_data为空也能处理
     if all_data:
@@ -1945,7 +1954,7 @@ def download_data():
     backtest_path = 'kline_data'
     base_file_path = 'origin_data.csv'
     is_reload = True
-    inst_id_list = ['OKB-USDT']
+    inst_id_list = ['BTC-USDT-SWAP']
     if not os.path.exists(backtest_path):
         os.makedirs(backtest_path)
     bar_list = ['1m']

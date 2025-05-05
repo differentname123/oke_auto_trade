@@ -262,9 +262,11 @@ def place_order(inst_id, side, size, trade_action="open"):
         # 调用 OKX 下单 API
         order = tradeAPI.place_order(**order_params)
 
-        # print(f"✅ {trade_action.upper()} {side.upper()} 市价单下单成功：", order)
-        if 'fail' not in order:
-            return True
+        # 尝试获取order中的code
+        if order.get("code") != "0":
+            print(f"❌ {trade_action.upper()} {side.upper()} 市价单下单失败，错误信息：", order)
+            return False
+
     except Exception as e:
         print(f"❌ {trade_action.upper()} {side.upper()} 市价单下单失败，错误信息：", e)
     return False

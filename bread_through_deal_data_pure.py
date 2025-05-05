@@ -353,52 +353,33 @@ def add_raw_diff_columns(df):
 
     return df
 
-def find_continuous_min_sum(arr):
-    """
-    计算数组中任意连续子序列的和的最小值
-    使用改进版的 Kadane 算法：
-     - 当前子序列和：current_sum = min(num, current_sum + num)
-     - 全局最小和：min_sum = min(min_sum, current_sum)
-    """
-    # 如果数组为空，直接返回 np.nan（或者你可以选择其他异常处理方式）
-    if len(arr) == 0:
-        return np.nan
-
+@njit
+def kadane_min(arr):
     current_sum = arr[0]
     min_sum = arr[0]
-    for num in arr[1:]:
-        current_sum = min(num, current_sum + num)
-        min_sum = min(min_sum, current_sum)
+    for i in range(1, arr.shape[0]):
+        x = arr[i]
+        current_sum = x if x < current_sum + x else current_sum + x
+        min_sum = current_sum if current_sum < min_sum else min_sum
     return min_sum
 
-
-def process_df(df):
-    """
-    对 DataFrame 中的 'weekly_net_profit_detail_new20' 列（每行为 np.array）进行处理，
-    添加两列：
-      - 'min_contiguous_sum'：连续子数组的最小和
-      - 'min_value'：数组中的最小值
-    """
+def process_df_numba(df):
     origin_len = len(df)
-    def compute_metrics(arr):
-        # 确保 arr 为 numpy 数组
-        arr = np.array(arr)
-        continuous_min_sum = find_continuous_min_sum(arr)
-        min_value = np.min(arr) if arr.size > 0 else np.nan
-        return pd.Series({
-            'min_contiguous_sum': continuous_min_sum,
-            'min_value': min_value
-        })
+    arrs = df['weekly_net_profit_detail_new20'].values
 
-    # 使用 apply 逐行处理，并将结果合并到 DataFrame 中
-    df[['min_contiguous_sum', 'min_value']] = df['weekly_net_profit_detail_new20'].apply(compute_metrics)
-    # 删除min_value小于weekly_net_profit_min的行
-    df = df[df['min_value'] > df['weekly_net_profit_min']]
-    # 删除min_contiguous_sum小于max_consecutive_loss的行
-    df = df[df['min_contiguous_sum'] > df['max_consecutive_loss']]
-    print(f"处理后的数据行数: {len(df)}，原始数据行数: {origin_len}")
+    # 第一次调用时有编译开销，随后即享受 JIT 加速
+    min_contig = [kadane_min(a) for a in arrs]
+    min_vals   = [a.min() if a.size>0 else np.nan for a in arrs]
+
+    df = df.copy()
+    df['min_contiguous_sum'] = min_contig
+    df['min_value']          = min_vals
+
+    mask = (df['min_value'] > df['weekly_net_profit_min']) & \
+           (df['min_contiguous_sum'] > df['max_consecutive_loss'])
+    df = df.loc[mask]
+    print(f"处理后 {len(df)} 行 ← 原始 {origin_len} 行")
     return df
-
 
 def merge_df(inst_id):
     is_reverse_list = [False, True]
@@ -432,11 +413,11 @@ def merge_df(inst_id):
 
         # 使用 join 进行合并（左连接），然后重置索引
         origin_good_df = origin_good_df.join(new_df_selected, how="left").reset_index()
-        origin_good_df = process_df(origin_good_df)
+        origin_good_df = process_df_numba(origin_good_df)
         origin_good_df.to_parquet(output_file, index=False)
 
 def example():
-    inst_id_list = ['BTC']
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
     is_reverse = True
     # pd.read_parquet(f'temp/final_good_BTC_True_filter_all.parquet')
 

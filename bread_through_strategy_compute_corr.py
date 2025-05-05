@@ -220,10 +220,11 @@ def debug():
       遍历 temp/corr 目录下符合条件的文件，调用 find_all_valid_groups 进行处理。
     """
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
-    is_reverse = False
+    is_reverse_list = [True, False]
     for inst_id in inst_id_list:
-        file_path = f'temp/final_good_{inst_id}_{is_reverse}_filter_all.parquet'
-        find_all_valid_groups(file_path)
+        for is_reverse in is_reverse_list:
+            file_path = f'temp/final_good_{inst_id}_{is_reverse}_filter_all.parquet'
+            find_all_valid_groups(file_path)
 
 
 def select_strategies_optimized(
@@ -630,13 +631,12 @@ def process_df(df):
     return df
 
 def final_compute_corr():
-    inst_id_list = [ 'BTC', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = [ 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
 
     for inst_id in inst_id_list:
         corr_path = f'temp/corr/final_good_{inst_id}_False_filter_all.parquet_corr_weekly_net_profit_detail.parquet'
         origin_good_path = f'temp/corr/final_good_{inst_id}_False_filter_all.parquet_origin_good_weekly_net_profit_detail.parquet'
         strategy_df = pd.read_parquet(origin_good_path)
-        df = process_df(strategy_df)
         # 计算score，逻辑为对kai_count取对数，然后除以max_consecutive_loss
         # strategy_df['score666'] = strategy_df['kai_count'].apply(lambda x: np.log(x) if x > 0 else 0) / strategy_df['max_consecutive_loss']
 
@@ -644,7 +644,7 @@ def final_compute_corr():
 
         correlation_df = pd.read_parquet(corr_path)
         selected_strategies, selected_correlation_df = select_strategies_optimized(strategy_df, correlation_df, k=5,
-                                    penalty_scaler=10, use_absolute_correlation=True)
+                                    penalty_scaler=1, use_absolute_correlation=True)
 
 
         filter_df = final_df[final_df['inst_id'] == inst_id]
@@ -796,8 +796,8 @@ def get_statistic_data():
 
 def example():
     # get_statistic_data()
-    filter_similar_strategy()
-    # final_compute_corr()
+    # filter_similar_strategy()
+    final_compute_corr()
     debug()
 
 
