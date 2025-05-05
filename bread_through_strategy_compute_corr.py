@@ -1,6 +1,8 @@
 import os
 import time
 import itertools
+from collections import Counter, defaultdict
+
 import numpy as np
 import pandas as pd
 from concurrent.futures import ProcessPoolExecutor
@@ -647,8 +649,83 @@ def filter_similar_strategy():
         merged_df.to_parquet(f'temp/final_good_{inst_id}_{is_reverse}_filter_all.parquet', index=False)
         print(f'保存过滤后的数据：{output_path} 长度：{len(filtered_df)}')
 
+def count_pairs_to_df(df_list):
+    required_columns = ['kai_column', 'pin_column', 'inst_id', 'net_profit_rate_new20']
+    dfs = []
+    # 1. 筛选并拼接所有合法的 DataFrame
+    for i, df in enumerate(df_list):
+        if not all(col in df.columns for col in required_columns):
+            missing = [col for col in required_columns if col not in df.columns]
+            print(f"警告：DataFrame 索引 {i} 缺少列 {missing}，已跳过。")
+            continue
+        dfs.append(df[required_columns])
+    if not dfs:
+        return pd.DataFrame(columns=[
+            'kai_column', 'pin_column', 'count',
+            'detail_info', 'inst_id_list',
+            'profit_mean', 'profit_min', 'profit_max'
+        ])
+
+    all_df = pd.concat(dfs, ignore_index=True)
+
+    # 2. groupby 一次性算出：count, inst_id 列表, 以及 profit 的 mean/min/max
+    grp = all_df.groupby(['kai_column', 'pin_column'], sort=False)
+    stats = grp.agg(
+        count=('inst_id', 'size'),
+        inst_id_list=('inst_id', list),
+        profit_mean=('net_profit_rate_new20', 'mean'),
+        profit_min=('net_profit_rate_new20', 'min'),
+        profit_max=('net_profit_rate_new20', 'max'),
+    )
+
+    # 3. 只保留 count > 1
+    stats = stats[stats['count'] > 1]
+    if stats.empty:
+        return pd.DataFrame(columns=[
+            'kai_column', 'pin_column', 'count',
+            'detail_info', 'inst_id_list',
+            'profit_mean', 'profit_min', 'profit_max'
+        ])
+
+    # 4. 构造 detail_info 字段
+    #    对每个组，用 inst_id_list 与 net_profit_rate_new20 列表一一对应成字典
+    #    我们先拿出每组的 net_profit_rate_new20 列表：
+    profit_lists = grp['net_profit_rate_new20'].agg(list)
+    # 注意：profit_lists 与 stats 索引完全对齐
+    stats = stats.join(profit_lists.rename('profit_list'))
+
+    # zip 成 dict
+    stats['detail_info'] = stats.apply(
+        lambda row: dict(zip(row['inst_id_list'], row['profit_list'])),
+        axis=1
+    )
+
+    # 5. 整理列顺序、重置索引并返回
+    result = stats.reset_index()[[
+        'kai_column', 'pin_column', 'count',
+        'detail_info', 'inst_id_list',
+        'profit_mean', 'profit_min', 'profit_max'
+    ]].sort_values('count', ascending=False).reset_index(drop=True)
+
+    return result
+
+
+def get_statistic_data():
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    all_data_dfs = []  # 用于存储每个文件的 DataFrame
+    is_reverse = True
+    for inst_id in inst_id_list:
+        data_file = f'temp_back/{inst_id}_{is_reverse}_pure_data_with_future.parquet'
+        temp_df = pd.read_parquet(data_file)
+        temp_df['inst_id'] = inst_id
+        all_data_dfs.append(temp_df)
+    result_df = count_pairs_to_df(all_data_dfs)
+    filter_result_df = result_df[result_df['count'] > 1]
+    print()
+
 
 def example():
+    get_statistic_data()
     filter_similar_strategy()
     # final_compute_corr()
     debug()

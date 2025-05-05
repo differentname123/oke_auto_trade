@@ -253,7 +253,7 @@ def main(n_bins=50, batch_size=10):
         data_df = pd.read_parquet(data_file)
         data_df = data_df[data_df['hold_time_mean'] < 5000]
         # data_df = data_df[data_df['kai_column'].str.contains('long', na=False)]
-        if data_df.shape[0] < 100:
+        if data_df.shape[0] < 50:
             print(f"【提示】：数据行数不足，跳过 {inst_id} 的处理")
             continue
         print(f"【提示】：数据加载完成，数据行数：{data_df.shape[0]}")
@@ -548,12 +548,11 @@ def merge_data_optimized(
         'pos_ratio', 'count'
     ]
     positive_ratio_threshold = 0.5
-    inst_id_list = ['SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     # 1) 读入并初步筛选
     dfs: list[pd.DataFrame] = []
     for inst in inst_id_list:
-        path = os.path.join(images_dir,
-                            f"combined_bin_analysis_{inst}_false_new_1000.parquet")
+        path = os.path.join(images_dir, f"combined_bin_analysis_{inst}_false_new_1000.parquet")
         df = pd.read_parquet(path, columns=need_cols)
         df['inst_id'] = inst
 
@@ -562,7 +561,7 @@ def merge_data_optimized(
             df.groupby('feature')['bin_seq']
               .max()
               .reset_index()
-              .query('bin_seq == 100')
+              .query('bin_seq == 10')
               ['feature']
         )
         df = df[df['feature'].isin(feat_max)]
@@ -635,5 +634,5 @@ def merge_data_optimized(
 
 
 if __name__ == '__main__':
-    main(n_bins=50, batch_size=12000)
-    # merge_data_optimized()
+    # main(n_bins=10, batch_size=12000)
+    merge_data_optimized()
