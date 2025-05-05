@@ -354,7 +354,7 @@ def add_raw_diff_columns(df):
     return df
 
 def merge_df(inst_id):
-    is_reverse_list = [True]
+    is_reverse_list = [False]
     merge_columns = ["kai_column", "pin_column"]
     target_columns = [
         "kai_count", "hold_time_mean", "net_profit_rate",
@@ -388,8 +388,8 @@ def merge_df(inst_id):
         origin_good_df.to_parquet(output_file, index=False)
 
 def example():
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
-    is_reverse = True
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
+    is_reverse = False
     # pd.read_parquet(f'temp/final_good_BTC_True_filter_all.parquet')
 
     # for inst_id in inst_id_list:

@@ -35,7 +35,7 @@ def get_kline_data(inst_id, bar="1m", limit=100, max_candles=1000):
     after = ''  # 初始值为None，获取最新数据
     fetched_candles = 0  # 已获取的K线数量
     fail_count = 0  # 失败次数
-    max_retries = 30  # 最大重试次数
+    max_retries = 100  # 最大重试次数
 
     while fetched_candles < max_candles:
         try:
@@ -1945,7 +1945,7 @@ def download_data():
     backtest_path = 'kline_data'
     base_file_path = 'origin_data.csv'
     is_reload = True
-    inst_id_list = ['BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'TON-USDT-SWAP', 'DOGE-USDT-SWAP', 'XRP-USDT-SWAP', 'PEPE-USDT-SWAP']
+    inst_id_list = ['OKB-USDT']
     if not os.path.exists(backtest_path):
         os.makedirs(backtest_path)
     bar_list = ['1m']
@@ -1953,7 +1953,7 @@ def download_data():
     now = datetime.datetime.now()
     # 转换为可读性格式
     readable_time = now.strftime("%Y-%m-%d")
-    max_candles_list = [200000]
+    max_candles_list = [10000000]
 
     for max_candles in max_candles_list:
         for bar in bar_list:

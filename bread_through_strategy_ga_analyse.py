@@ -232,6 +232,21 @@ def process_data_flat(data_df, target_column_list):
     ).reset_index(drop=True)
     return result_df
 
+def get_statistic(good_df):
+    """
+    使用 groupby().transform('size') 优化统计函数。
+    """
+    # 1. 使用 transform('size') 直接计算并对齐计数值
+    # 它会按 'kai_column' 分组，计算每组的大小，并将该大小赋给组内所有行
+    good_df['kai_value'] = good_df.groupby('kai_column')['kai_column'].transform('size')
+    good_df['pin_value'] = good_df.groupby('pin_column')['pin_column'].transform('size')
+
+    # 2. 后续计算已经是向量化操作，本身是高效的
+    good_df['value_score'] = good_df['kai_value'] + good_df['pin_value']
+    good_df['value_score1'] = good_df['kai_value'] * good_df['pin_value']
+
+    return good_df
+
 def main(n_bins=50, batch_size=10):
     """
     主流程：
@@ -241,16 +256,30 @@ def main(n_bins=50, batch_size=10):
       4. 可根据需要调用 process_data_flat、merge_and_compute、auto_reduce_precision 进行后续处理。
     """
     print("【主流程】：开始处理数据")
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
     images_dir = "temp_back"
     if not os.path.exists(images_dir):
         os.makedirs(images_dir)
-
+    is_reverse = True
     total_inst = len(inst_id_list)
     for inst_index, inst_id in enumerate(inst_id_list):
         print(f"\n【处理数据】：开始处理 {inst_id} ({inst_index+1}/{total_inst})")
-        data_file = f'temp/corr/final_good_{inst_id}_True_filter_all.parquet_origin_good_weekly_net_profit_detail.parquet'
-        data_df = pd.read_parquet(data_file)
+        # data_file = f'temp/corr/final_good_{inst_id}_{is_reverse}_filter_all.parquet_origin_good_weekly_net_profit_detail.parquet'
+        # data_df = pd.read_parquet(data_file)
+
+        data_file = f'temp_back/{inst_id}_{is_reverse}_pure_data_with_future.parquet'
+        statistic_df = get_statistic(pd.read_parquet(data_file))
+        # 只保留statistic_df的kai_column和pin_column列还有kai_value和pin_value，value_score和value_score1
+        statistic_df = statistic_df[
+            ['kai_column', 'pin_column', 'kai_value', 'pin_value', 'value_score', 'value_score1']]
+
+        data_file = f'temp/corr/final_good_{inst_id}_{is_reverse}_filter_all.parquet_origin_good_weekly_net_profit_detail.parquet'
+        temp_df = pd.read_parquet(data_file)
+        temp_df['inst_id'] = inst_id
+        # 将temp_df按照'kai_column', 'pin_column'和statistic_df进行合并
+        data_df = pd.merge(temp_df, statistic_df, on=['kai_column', 'pin_column'], how='inner')
+
+
         data_df = data_df[data_df['hold_time_mean'] < 5000]
         # data_df = data_df[data_df['kai_column'].str.contains('long', na=False)]
         if data_df.shape[0] < 50:
@@ -398,7 +427,7 @@ def main(n_bins=50, batch_size=10):
         # 5. 合并所有分箱结果，并保存为 Parquet 文件
         if all_bin_analyses:
             combined_bin_analysis_df = pd.concat(all_bin_analyses, ignore_index=True)
-            combined_file = os.path.join(images_dir, f"combined_bin_analysis_{inst_id}_false_new_1000.parquet")
+            combined_file = os.path.join(images_dir, f"combined_bin_analysis_{inst_id}_{is_reverse}_new_1000.parquet")
             combined_bin_analysis_df.to_parquet(combined_file, index=False, compression='snappy')
             print(f"【提示】：合并后的 bin_analysis 已保存为 Parquet 文件：{combined_file}")
         else:
@@ -547,28 +576,30 @@ def merge_data_optimized(
         'min_net_profit', 'avg_net_profit_rate_new20',
         'pos_ratio', 'count'
     ]
+    is_reverse_list = [True, False]
     positive_ratio_threshold = 0.5
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
     # 1) 读入并初步筛选
     dfs: list[pd.DataFrame] = []
     for inst in inst_id_list:
-        path = os.path.join(images_dir, f"combined_bin_analysis_{inst}_false_new_1000.parquet")
-        df = pd.read_parquet(path, columns=need_cols)
-        df['inst_id'] = inst
+        for is_reverse in is_reverse_list:
+            path = os.path.join(images_dir, f"combined_bin_analysis_{inst}_{is_reverse}_new_1000.parquet")
+            df = pd.read_parquet(path, columns=need_cols)
+            df['inst_id'] = inst
 
-        # a) feature 分组取 max bin_seq
-        feat_max = (
-            df.groupby('feature')['bin_seq']
-              .max()
-              .reset_index()
-              .query('bin_seq == 10')
-              ['feature']
-        )
-        df = df[df['feature'].isin(feat_max)]
-        # b) count 范围筛选
-        df = df.query('3 < count < 20000')
-        # df = df[df['avg_net_profit_rate_new20'] > -30]
-        dfs.append(df)
+            # a) feature 分组取 max bin_seq
+            feat_max = (
+                df.groupby('feature')['bin_seq']
+                  .max()
+                  .reset_index()
+                  .query('bin_seq == 20')
+                  ['feature']
+            )
+            df = df[df['feature'].isin(feat_max)]
+            # b) count 范围筛选
+            df = df.query('1 < count < 20000')
+            # df = df[df['avg_net_profit_rate_new20'] > -30]
+            dfs.append(df)
 
     # 2) 求所有 inst 共有的 (feature, bin_seq)
     #    先取第一个，依次 merge 取 inner
@@ -634,5 +665,5 @@ def merge_data_optimized(
 
 
 if __name__ == '__main__':
-    # main(n_bins=10, batch_size=12000)
+    # main(n_bins=20, batch_size=12000)
     merge_data_optimized()

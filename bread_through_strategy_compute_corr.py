@@ -219,8 +219,8 @@ def debug():
     调试入口函数：
       遍历 temp/corr 目录下符合条件的文件，调用 find_all_valid_groups 进行处理。
     """
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
-    is_reverse = True
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
+    is_reverse = False
     for inst_id in inst_id_list:
         file_path = f'temp/final_good_{inst_id}_{is_reverse}_filter_all.parquet'
         find_all_valid_groups(file_path)
@@ -231,7 +231,7 @@ def select_strategies_optimized(
     correlation_df: pd.DataFrame,
     k: int,
     strategy_id_col: str = 'index', # 新增参数：指定包含策略ID的列名
-    count_col: str = 'score_score',       # 新增参数：指定包含计数的列名
+    count_col: str = 'score_final',       # 新增参数：指定包含计数的列名
     penalty_scaler: float = 1.0,
     use_absolute_correlation: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -586,8 +586,8 @@ def final_compute_corr():
     inst_id_list = [ 'ETH', 'TON', 'DOGE', 'XRP', 'PEPE']
 
     for inst_id in inst_id_list:
-        corr_path = f'temp/corr/final_good_{inst_id}_True_filter_all.parquet_corr_weekly_net_profit_detail.parquet'
-        origin_good_path = f'temp/corr/final_good_{inst_id}_True_filter_all.parquet_origin_good_weekly_net_profit_detail.parquet'
+        corr_path = f'temp/corr/final_good_{inst_id}_False_filter_all.parquet_corr_weekly_net_profit_detail.parquet'
+        origin_good_path = f'temp/corr/final_good_{inst_id}_False_filter_all.parquet_origin_good_weekly_net_profit_detail.parquet'
         strategy_df = pd.read_parquet(origin_good_path)
         # 计算score，逻辑为对kai_count取对数，然后除以max_consecutive_loss
         # strategy_df['score666'] = strategy_df['kai_count'].apply(lambda x: np.log(x) if x > 0 else 0) / strategy_df['max_consecutive_loss']
@@ -596,7 +596,7 @@ def final_compute_corr():
 
         correlation_df = pd.read_parquet(corr_path)
         selected_strategies, selected_correlation_df = select_strategies_optimized(strategy_df, correlation_df, k=5,
-                                    penalty_scaler=1.0, use_absolute_correlation=True)
+                                    penalty_scaler=10, use_absolute_correlation=True)
 
 
         filter_df = final_df[final_df['inst_id'] == inst_id]
@@ -612,10 +612,10 @@ def filter_similar_strategy():
     过滤掉太过于相似的策略。
     :return:
     """
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
     required_columns = ['kai_count', 'net_profit_rate', 'weekly_net_profit_detail', 'max_hold_time', 'kai_column', 'pin_column', 'score_score']
     all_data_dfs = []  # 用于存储每个文件的 DataFrame
-    is_reverse = True
+    is_reverse = False
     for inst_id in inst_id_list:
         data_file = f'temp_back/{inst_id}_{is_reverse}_pure_data_with_future.parquet'
 
@@ -709,25 +709,47 @@ def count_pairs_to_df(df_list):
 
     return result
 
+def get_statistic(good_df):
+    """
+    使用 groupby().transform('size') 优化统计函数。
+    """
+    # 1. 使用 transform('size') 直接计算并对齐计数值
+    # 它会按 'kai_column' 分组，计算每组的大小，并将该大小赋给组内所有行
+    good_df['kai_value'] = good_df.groupby('kai_column')['kai_column'].transform('size')
+    good_df['pin_value'] = good_df.groupby('pin_column')['pin_column'].transform('size')
+
+    # 2. 后续计算已经是向量化操作，本身是高效的
+    good_df['value_score'] = good_df['kai_value'] + good_df['pin_value']
+    good_df['value_score1'] = good_df['kai_value'] * good_df['pin_value']
+
+    return good_df
 
 def get_statistic_data():
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
     all_data_dfs = []  # 用于存储每个文件的 DataFrame
-    is_reverse = True
+    is_reverse_list = [False, True]
     for inst_id in inst_id_list:
-        data_file = f'temp_back/{inst_id}_{is_reverse}_pure_data_with_future.parquet'
-        temp_df = pd.read_parquet(data_file)
-        temp_df['inst_id'] = inst_id
-        all_data_dfs.append(temp_df)
+        for is_reverse in is_reverse_list:
+            data_file = f'temp_back/{inst_id}_{is_reverse}_pure_data_with_future.parquet'
+            statistic_df = get_statistic(pd.read_parquet(data_file))
+            # 只保留statistic_df的kai_column和pin_column列还有kai_value和pin_value，value_score和value_score1
+            statistic_df = statistic_df[['kai_column', 'pin_column', 'kai_value', 'pin_value', 'value_score', 'value_score1']]
+
+            data_file = f'temp/corr/final_good_{inst_id}_{is_reverse}_filter_all.parquet_origin_good_weekly_net_profit_detail.parquet'
+            temp_df = pd.read_parquet(data_file)
+            temp_df['inst_id'] = inst_id
+            # 将temp_df按照'kai_column', 'pin_column'和statistic_df进行合并
+            temp_df = pd.merge(temp_df, statistic_df, on=['kai_column', 'pin_column'], how='inner')
+            all_data_dfs.append(temp_df)
     result_df = count_pairs_to_df(all_data_dfs)
     filter_result_df = result_df[result_df['count'] > 1]
     print()
 
 
 def example():
-    get_statistic_data()
-    filter_similar_strategy()
-    # final_compute_corr()
+    # get_statistic_data()
+    # filter_similar_strategy()
+    final_compute_corr()
     debug()
 
 
