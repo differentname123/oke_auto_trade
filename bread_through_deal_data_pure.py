@@ -85,10 +85,10 @@ def process_load_filter_data(file):
         df_backup = df.copy()
 
         # 根据 score_final 过滤
-        df = df[df['score_final'] > -10]
+        df = df[df['score_final'] > -1000]
         # 添加原始差值相关列，并根据 norm_diff_score 过滤
         df = add_raw_diff_columns(df)
-        df = df[df['norm_diff_score'] > -10]
+        df = df[df['norm_diff_score'] > -1000]
 
         # 计算 score_score，并对负值情况进行调整
         df['score_score'] = df['score_final'] * df['norm_diff_score']
@@ -353,8 +353,55 @@ def add_raw_diff_columns(df):
 
     return df
 
+def find_continuous_min_sum(arr):
+    """
+    计算数组中任意连续子序列的和的最小值
+    使用改进版的 Kadane 算法：
+     - 当前子序列和：current_sum = min(num, current_sum + num)
+     - 全局最小和：min_sum = min(min_sum, current_sum)
+    """
+    # 如果数组为空，直接返回 np.nan（或者你可以选择其他异常处理方式）
+    if len(arr) == 0:
+        return np.nan
+
+    current_sum = arr[0]
+    min_sum = arr[0]
+    for num in arr[1:]:
+        current_sum = min(num, current_sum + num)
+        min_sum = min(min_sum, current_sum)
+    return min_sum
+
+
+def process_df(df):
+    """
+    对 DataFrame 中的 'weekly_net_profit_detail_new20' 列（每行为 np.array）进行处理，
+    添加两列：
+      - 'min_contiguous_sum'：连续子数组的最小和
+      - 'min_value'：数组中的最小值
+    """
+    origin_len = len(df)
+    def compute_metrics(arr):
+        # 确保 arr 为 numpy 数组
+        arr = np.array(arr)
+        continuous_min_sum = find_continuous_min_sum(arr)
+        min_value = np.min(arr) if arr.size > 0 else np.nan
+        return pd.Series({
+            'min_contiguous_sum': continuous_min_sum,
+            'min_value': min_value
+        })
+
+    # 使用 apply 逐行处理，并将结果合并到 DataFrame 中
+    df[['min_contiguous_sum', 'min_value']] = df['weekly_net_profit_detail_new20'].apply(compute_metrics)
+    # 删除min_value小于weekly_net_profit_min的行
+    df = df[df['min_value'] > df['weekly_net_profit_min']]
+    # 删除min_contiguous_sum小于max_consecutive_loss的行
+    df = df[df['min_contiguous_sum'] > df['max_consecutive_loss']]
+    print(f"处理后的数据行数: {len(df)}，原始数据行数: {origin_len}")
+    return df
+
+
 def merge_df(inst_id):
-    is_reverse_list = [False]
+    is_reverse_list = [False, True]
     merge_columns = ["kai_column", "pin_column"]
     target_columns = [
         "kai_count", "hold_time_mean", "net_profit_rate",
@@ -385,11 +432,12 @@ def merge_df(inst_id):
 
         # 使用 join 进行合并（左连接），然后重置索引
         origin_good_df = origin_good_df.join(new_df_selected, how="left").reset_index()
+        origin_good_df = process_df(origin_good_df)
         origin_good_df.to_parquet(output_file, index=False)
 
 def example():
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
-    is_reverse = False
+    inst_id_list = ['BTC']
+    is_reverse = True
     # pd.read_parquet(f'temp/final_good_BTC_True_filter_all.parquet')
 
     # for inst_id in inst_id_list:

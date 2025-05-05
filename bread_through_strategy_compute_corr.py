@@ -582,13 +582,61 @@ def filter_good_df(inst_id):
     filter_df = pd.merge(filter_df, strategy_df, on=['kai_column', 'pin_column'], how='inner')
     return filter_df
 
+
+def find_continuous_min_sum(arr):
+    """
+    计算数组中任意连续子序列的和的最小值
+    使用改进版的 Kadane 算法：
+     - 当前子序列和：current_sum = min(num, current_sum + num)
+     - 全局最小和：min_sum = min(min_sum, current_sum)
+    """
+    # 如果数组为空，直接返回 np.nan（或者你可以选择其他异常处理方式）
+    if len(arr) == 0:
+        return np.nan
+
+    current_sum = arr[0]
+    min_sum = arr[0]
+    for num in arr[1:]:
+        current_sum = min(num, current_sum + num)
+        min_sum = min(min_sum, current_sum)
+    return min_sum
+
+
+def process_df(df):
+    """
+    对 DataFrame 中的 'weekly_net_profit_detail_new20' 列（每行为 np.array）进行处理，
+    添加两列：
+      - 'min_contiguous_sum'：连续子数组的最小和
+      - 'min_value'：数组中的最小值
+    """
+
+    def compute_metrics(arr):
+        # 确保 arr 为 numpy 数组
+        arr = np.array(arr)
+        continuous_min_sum = find_continuous_min_sum(arr)
+        min_value = np.min(arr) if arr.size > 0 else np.nan
+        return pd.Series({
+            'min_contiguous_sum': continuous_min_sum,
+            'min_value': min_value
+        })
+
+    # 使用 apply 逐行处理，并将结果合并到 DataFrame 中
+    df[['min_contiguous_sum', 'min_value']] = df['weekly_net_profit_detail_new20'].apply(compute_metrics)
+    # 删除min_value小于weekly_net_profit_min的行
+    df = df[df['min_value'] > df['weekly_net_profit_min']]
+    # 删除min_contiguous_sum小于max_consecutive_loss的行
+    df = df[df['min_contiguous_sum'] > df['max_consecutive_loss']]
+
+    return df
+
 def final_compute_corr():
-    inst_id_list = [ 'ETH', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = [ 'BTC', 'TON', 'DOGE', 'XRP', 'PEPE']
 
     for inst_id in inst_id_list:
         corr_path = f'temp/corr/final_good_{inst_id}_False_filter_all.parquet_corr_weekly_net_profit_detail.parquet'
         origin_good_path = f'temp/corr/final_good_{inst_id}_False_filter_all.parquet_origin_good_weekly_net_profit_detail.parquet'
         strategy_df = pd.read_parquet(origin_good_path)
+        df = process_df(strategy_df)
         # 计算score，逻辑为对kai_count取对数，然后除以max_consecutive_loss
         # strategy_df['score666'] = strategy_df['kai_count'].apply(lambda x: np.log(x) if x > 0 else 0) / strategy_df['max_consecutive_loss']
 
@@ -613,41 +661,41 @@ def filter_similar_strategy():
     :return:
     """
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
-    required_columns = ['kai_count', 'net_profit_rate', 'weekly_net_profit_detail', 'max_hold_time', 'kai_column', 'pin_column', 'score_score']
-    all_data_dfs = []  # 用于存储每个文件的 DataFrame
-    is_reverse = False
-    for inst_id in inst_id_list:
-        data_file = f'temp_back/{inst_id}_{is_reverse}_pure_data_with_future.parquet'
+    required_columns = ['kai_count', 'net_profit_rate', 'weekly_net_profit_detail', 'max_hold_time', 'kai_column', 'pin_column', 'score_final']
+    is_reverse_list = [False, True]
+    for is_reverse in is_reverse_list:
+        for inst_id in inst_id_list:
+            data_file = f'temp_back/{inst_id}_{is_reverse}_pure_data_with_future.parquet'
 
-        output_path = f'temp_back/{inst_id}_{is_reverse}_pure_data_with_future_filter_similar_strategy.parquet'
-        # if os.path.exists(output_path):
-        #     filtered_df = pd.read_parquet(output_path,columns=['kai_column', 'pin_column'])
-        #     data_df = pd.read_parquet(data_file)
-        #     merged_df = pd.merge(data_df, filtered_df, on=['kai_column', 'pin_column'], how='inner')
-        #     merged_df.to_parquet(f'temp/final_good_{inst_id}_false_filter_all.parquet', index=False)
-        #     print(f'文件已存在，跳过处理：{output_path}')
-        #     continue
-        data_df = pd.read_parquet(data_file, columns=required_columns)
-        # data_df = data_df[data_df['max_hold_time'] < 5000]
-        data_df = data_df[data_df['kai_count'] > 50]
-        # data_df = data_df[data_df['kai_column'].str.contains('long', na=False)]
-        # data_df = data_df.head(10000)
-        print(f'处理 {inst_id} 的数据，数据量：{len(data_df)}')
-        while True:
-            filtered_df = filtering(data_df, grouping_column='kai_count', sort_key='score_score', _unused_threshold=None)
-            print(f'{inst_id} 过滤后的数据量：{len(filtered_df)} 过滤前数据量：{len(data_df)}')
-            if filtered_df.shape[0] == data_df.shape[0]:
-                break
-            data_df = filtered_df
-            print(f'继续过滤')
+            output_path = f'temp_back/{inst_id}_{is_reverse}_pure_data_with_future_filter_similar_strategy.parquet'
+            # if os.path.exists(output_path):
+            #     filtered_df = pd.read_parquet(output_path,columns=['kai_column', 'pin_column'])
+            #     data_df = pd.read_parquet(data_file)
+            #     merged_df = pd.merge(data_df, filtered_df, on=['kai_column', 'pin_column'], how='inner')
+            #     merged_df.to_parquet(f'temp/final_good_{inst_id}_false_filter_all.parquet', index=False)
+            #     print(f'文件已存在，跳过处理：{output_path}')
+            #     continue
+            data_df = pd.read_parquet(data_file, columns=required_columns)
+            # data_df = data_df[data_df['max_hold_time'] < 5000]
+            data_df = data_df[data_df['kai_count'] > 50]
+            # data_df = data_df[data_df['kai_column'].str.contains('long', na=False)]
+            # data_df = data_df.head(10000)
+            print(f'处理 {inst_id} 的数据，数据量：{len(data_df)}')
+            while True:
+                filtered_df = filtering(data_df, grouping_column='kai_count', sort_key='score_final', _unused_threshold=None)
+                print(f'{inst_id} 过滤后的数据量：{len(filtered_df)} 过滤前数据量：{len(data_df)}')
+                if filtered_df.shape[0] == data_df.shape[0]:
+                    break
+                data_df = filtered_df
+                print(f'继续过滤')
 
 
-        filtered_df.to_parquet(output_path, index=False)
-        filtered_df = pd.read_parquet(output_path,columns=['kai_column', 'pin_column'])
-        data_df = pd.read_parquet(data_file)
-        merged_df = pd.merge(data_df, filtered_df, on=['kai_column', 'pin_column'], how='inner')
-        merged_df.to_parquet(f'temp/final_good_{inst_id}_{is_reverse}_filter_all.parquet', index=False)
-        print(f'保存过滤后的数据：{output_path} 长度：{len(filtered_df)}')
+            filtered_df.to_parquet(output_path, index=False)
+            filtered_df = pd.read_parquet(output_path,columns=['kai_column', 'pin_column'])
+            data_df = pd.read_parquet(data_file)
+            merged_df = pd.merge(data_df, filtered_df, on=['kai_column', 'pin_column'], how='inner')
+            merged_df.to_parquet(f'temp/final_good_{inst_id}_{is_reverse}_filter_all.parquet', index=False)
+            print(f'保存过滤后的数据：{output_path} 长度：{len(filtered_df)}')
 
 def count_pairs_to_df(df_list):
     required_columns = ['kai_column', 'pin_column', 'inst_id', 'net_profit_rate_new20']
@@ -748,8 +796,8 @@ def get_statistic_data():
 
 def example():
     # get_statistic_data()
-    # filter_similar_strategy()
-    final_compute_corr()
+    filter_similar_strategy()
+    # final_compute_corr()
     debug()
 
 

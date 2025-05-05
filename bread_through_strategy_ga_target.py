@@ -628,7 +628,7 @@ def validation(market_data_file):
     df = df_local
 
     # 注意：这里只读取需要的列： kai_column 和 pin_column
-    stat_df_file_list = [f'temp_back/{inst_id}_False_pure_data.parquet']
+    stat_df_file_list = [f'temp_back/{inst_id}_False_pure_data.parquet', f'temp_back/{inst_id}_True_pure_data.parquet']
     for stat_df_file in stat_df_file_list:
         try:
             # 1. 加载 stat_df 文件（只读取必要的两列）
