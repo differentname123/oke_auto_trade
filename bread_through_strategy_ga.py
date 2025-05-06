@@ -1167,7 +1167,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     no_improvement_threshold = 3
     restart_threshold = 5
     max_memory = 45
-    pool_processes = min(31, int(max_memory * 1024 * 1024 * 1024 / total_size) if total_size > 0 else 1)
+    pool_processes = min(30, int(max_memory * 1024 * 1024 * 1024 / total_size) if total_size > 0 else 1)
     print(f"使用 {pool_processes} 个进程。")
     batch_size = 1000
     prev_overall_best = overall_best
@@ -1490,7 +1490,7 @@ def ga_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
         population_size=population_size, generations=700,
         crossover_rate=0.9, mutation_rate=0.2,
         key_name=f'{base_name}_{key_name}',
-        islands_count=2, migration_interval=10, migration_rate=0.05
+        islands_count=1, migration_interval=10, migration_rate=0.05
     )
     print(f"数据 {base_name} 最优信号组合: {best_candidate}，净利率: {best_fitness}")
 
