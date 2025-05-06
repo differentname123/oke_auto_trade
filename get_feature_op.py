@@ -63,6 +63,8 @@ def get_kline_data(inst_id, bar="1m", limit=100, max_candles=1000):
             # 解析数据并添加到总数据中
             all_data.extend(data)
             fetched_candles += len(data)
+            if fetched_candles % 10000 == 0:
+                print(f"已获取 {fetched_candles} 根K线数据...")
 
             # 更新 `after` 参数为当前返回数据的最早时间戳，用于获取更早的数据
             after = data[-1][0]
@@ -1954,7 +1956,7 @@ def download_data():
     backtest_path = 'kline_data'
     base_file_path = 'origin_data.csv'
     is_reload = True
-    inst_id_list = ['BTC-USDT-SWAP']
+    inst_id_list = ['BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'TON-USDT-SWAP', 'DOGE-USDT-SWAP', 'XRP-USDT-SWAP', 'PEPE-USDT-SWAP']
     if not os.path.exists(backtest_path):
         os.makedirs(backtest_path)
     bar_list = ['1m']
@@ -1962,7 +1964,7 @@ def download_data():
     now = datetime.datetime.now()
     # 转换为可读性格式
     readable_time = now.strftime("%Y-%m-%d")
-    max_candles_list = [10000000]
+    max_candles_list = [5000000]
 
     for max_candles in max_candles_list:
         for bar in bar_list:

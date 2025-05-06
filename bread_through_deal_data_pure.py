@@ -135,7 +135,7 @@ def load_and_merger_data(inst_id, is_reverse):
     file_list = [os.path.join('temp', file) for file in file_list]
 
     # 使用多进程池并行处理文件
-    with mp.Pool(processes=20) as pool:
+    with mp.Pool(processes=1) as pool:
         df_list = pool.map(process_load_filter_data, file_list)
 
     # 过滤掉 None 值
@@ -153,8 +153,18 @@ def load_and_merger_data(inst_id, is_reverse):
     result_df = calculate_downside_metrics(result_df, ['weekly_net_profit_detail', 'monthly_net_profit_detail'],
                                            threshold=1)
     result_df = compute_rewarded_penalty_from_flat_df(result_df)
+    df = add_raw_diff_columns(result_df)
+    df = df[df['norm_diff_score'] > -1000]
 
-    return result_df
+    # 计算 score_score，并对负值情况进行调整
+    df['score_score'] = df['score_final'] * df['norm_diff_score']
+    df['score_score'] = np.where(
+        (df['score_final'] < 0) | (df['norm_diff_score'] < 0),
+        -abs(df['score_score']),
+        df['score_score']
+    )
+
+    return df
 
 
 def _single_downside_metrics(data_array, threshold=0):
@@ -418,16 +428,16 @@ def merge_df(inst_id):
 
 def example():
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
-    is_reverse = True
+    is_reverse = False
     # pd.read_parquet(f'temp/final_good_BTC_True_filter_all.parquet')
 
-    # for inst_id in inst_id_list:
-    #     output_path = f'temp_back/{inst_id}_{is_reverse}_pure_data.parquet'
-    #     if os.path.exists(output_path):
-    #         result_df = pd.read_parquet(output_path)
-    #         result_df = add_raw_diff_columns(result_df)
-    #     result_df = load_and_merger_data(inst_id, is_reverse)
-    #     result_df.to_parquet(output_path, index=False)
+    for inst_id in inst_id_list:
+        output_path = f'temp_back/{inst_id}_{is_reverse}_pure_data.parquet'
+        if os.path.exists(output_path):
+            result_df = pd.read_parquet(output_path)
+            result_df = add_raw_diff_columns(result_df)
+        result_df = load_and_merger_data(inst_id, is_reverse)
+        result_df.to_parquet(output_path, index=False)
 
     for inst_id in inst_id_list:
         output_file = f'temp_back/{inst_id}_{is_reverse}_pure_data_with_future.parquet'

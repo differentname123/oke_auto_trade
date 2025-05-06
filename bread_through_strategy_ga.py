@@ -340,7 +340,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         kai_idx, kai_prices = op_signal(df, kai_column)
         pin_idx, pin_prices = op_signal(df, pin_column)
 
-    if (kai_idx is None or pin_idx is None or kai_idx.size < 200 or pin_idx.size < 200):
+    if (kai_idx is None or pin_idx is None or kai_idx.size < 100 or pin_idx.size < 100):
         return None, None
 
     # 根据信号索引提取子数据集
@@ -405,7 +405,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     # 计算连续盈利金额或者亏损的序列，函数 calculate_max_sequence_numba 和 calculate_max_profit_numba 假设已定义
     profits_arr = kai_data_df["true_profit"].values
     max_loss, max_loss_start_idx, max_loss_end_idx, loss_trade_count = calculate_max_sequence_numba(profits_arr)
-    if net_profit_rate < 50 or trade_count < 50 or max_loss < -30:
+    if net_profit_rate < 25 or trade_count < 25 or max_loss < -30:
         return None, None
 
     if max_loss_start_idx < len(kai_data_df) and max_loss_end_idx < len(kai_data_df):
@@ -734,7 +734,7 @@ def process_signal(sig):
         if p_np.dtype == np.float64:
             p_np = p_np.astype(np.float32)
         indices = np.nonzero(s_np)[0]
-        if indices.size < 200:
+        if indices.size < 100:
             return None
         return (sig, (indices.astype(np.int32), p_np[indices]))
     except Exception as e:
@@ -867,14 +867,14 @@ def get_fitness_op(stat, key, invert=False):
 
     # 2. 净利润率（net_profit_rate）：要求 >= 100
     net_profit_rate = stat.get("net_profit_rate", -10000)
-    if net_profit_rate < 100:
-        diff = 100 - net_profit_rate
+    if net_profit_rate < 50:
+        diff = 50 - net_profit_rate
         penalty += (diff ** 2) * 10
 
     # 3. 交易次数（kai_count）：要求 >= 100
     trade_count = stat.get("kai_count", -10000)
-    if trade_count < 100:
-        diff = 100 - trade_count
+    if trade_count < 50:
+        diff = 50 - trade_count
         penalty += (diff ** 2) * 10
 
     # 4. 活跃月份比例（active_month_ratio）：要求 >= 0.8
@@ -1006,17 +1006,52 @@ def filter_existing_individuals(candidate_list, global_generated_individuals):
     return [ind for ind in candidate_list if ind not in global_generated_individuals]
 
 
-def get_unique_candidate(candidate_long_signals, candidate_short_signals, global_generated_individuals, candidate_list,
-                         target_size):
+def get_unique_candidate(candidate_long_signals, candidate_short_signals,
+                         global_generated_individuals, existing_individuals, count):
     """
-    补充 candidate_list 至 target_size，生成的新候选个体不能重复（全局已出现或当前列表内）。
+    优化后的 get_unique_candidate
+    --------------------------------------------------
+    基于批量采样、向量化和集合加速查重的方式生成指定数量的唯一候选个体。
+
+    参数：
+        candidate_long_signals (list): 长信号列表
+        candidate_short_signals (list): 短信号列表
+        global_generated_individuals: 用于检测候选个体是否已生成的全局记录（例如 BloomFilter，对 in 操作具有支持）
+        existing_individuals (list): 已经存在的候选个体列表（新生成的候选个体应避免重复插入）
+        count (int): 所需生成的候选个体数量
+
+    返回：
+        list: count 个唯一候选个体的列表，每个候选个体是由 (long_signal, short_signal) 组成的元组
     """
-    while len(candidate_list) < target_size:
-        candidate = (random.choice(candidate_long_signals), random.choice(candidate_short_signals))
-        if candidate in global_generated_individuals or candidate in candidate_list:
-            continue
-        candidate_list.append(candidate)
-    return candidate_list
+    # 将已有候选个体转为集合，便于快速查重
+    existing_set = set(existing_individuals)
+    output = []
+
+    total_long = len(candidate_long_signals)
+    total_short = len(candidate_short_signals)
+    # 批量尺寸可以适当调大，以减少循环次数
+    batch_size = max(100, count * 2)
+
+    while len(output) < count:
+        # 向量化生成候选个体的下标
+        idx_long = np.random.randint(0, total_long, size=batch_size)
+        idx_short = np.random.randint(0, total_short, size=batch_size)
+        # 批量构造候选个体列表
+        batch_candidates = [
+            (candidate_long_signals[i], candidate_short_signals[j])
+            for i, j in zip(idx_long, idx_short)
+        ]
+        for cand in batch_candidates:
+            # 若候选个体在已有集合或全局记录中，则跳过
+            if cand in existing_set or cand in global_generated_individuals:
+                continue
+            # 添加到局部集合和最终输出列表中
+            existing_set.add(cand)
+            output.append(cand)
+            if len(output) == count:
+                break
+
+    return output
 
 
 def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_signals,
@@ -1079,8 +1114,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
 
     global IS_REVERSE
     IS_REVERSE = False
-    # checkpoint_file = os.path.join(checkpoint_dir, f"{key_name}_{IS_REVERSE}_ga_checkpoint.pkl")
-    checkpoint_file = os.path.join(checkpoint_dir, f"{key_name}_ga_checkpoint.pkl")
+    checkpoint_file = os.path.join(checkpoint_dir, f"{key_name}_{IS_REVERSE}_ga_checkpoint.pkl")
 
     if os.path.exists(checkpoint_file):
         try:
@@ -1114,7 +1148,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
         overall_best_fitness = -1e9
         all_history = []
         global_generated_individuals = BloomFilter(generations * population_size, 0.01)
-
+    print('finish load')
     island_pop_size = population_size // islands_count
     if not islands:
         for _ in range(islands_count):
@@ -1133,9 +1167,9 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     no_improvement_threshold = 3
     restart_threshold = 5
     max_memory = 45
-    pool_processes = min(32, int(max_memory * 1024 * 1024 * 1024 / total_size) if total_size > 0 else 1)
+    pool_processes = min(31, int(max_memory * 1024 * 1024 * 1024 / total_size) if total_size > 0 else 1)
     print(f"使用 {pool_processes} 个进程。")
-    batch_size = 500
+    batch_size = 1000
     prev_overall_best = overall_best
     global_no_improve_count = 0
     single_generations_count = int(generations / len(get_fitness_list))  # 实际为 generations
@@ -1388,7 +1422,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                 "overall_best_candidate": overall_best,
                 "overall_best_fitness": overall_best_fitness,
             })
-            if (gen + 1) % 50 == 0:
+            if (gen + 1) % 10 == 0:
                 try:
                     data_to_save = (gen + 1, islands, overall_best, overall_best_fitness, all_history,
                                     global_generated_individuals)
@@ -1410,9 +1444,27 @@ def ga_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
     """
     os.makedirs("temp", exist_ok=True)
     base_name = os.path.basename(data_path).replace("-USDT-SWAP.csv", "").replace("origin_data_", "")
+    base_name = base_name.split("-")[0]
     df_local = pd.read_csv(data_path)
     needed_columns = ["timestamp", "high", "low", "close"]
     df_local = df_local[needed_columns]
+
+    # 将时间列转换为 datetime 类型
+    df_local["timestamp"] = pd.to_datetime(df_local["timestamp"])
+    # 过滤掉首尾月数据（避免数据不完整问题），可根据实际情况调整
+    df_monthly = df_local["timestamp"].dt.to_period("Y")
+    df_local = df_local[(df_monthly != df_monthly.min()) & (df_monthly != df_monthly.max())]
+    # 添加年份列，按照年份分段回测
+    df_local["year"] = df_local["timestamp"].dt.year
+
+    # 只获取第一年的数据
+    first_year = df_local["year"].min()
+    print(f"数据 {base_name} 的第一年: {first_year}")
+    df_local = df_local[df_local["year"] == first_year]
+    # 删除年份列
+    df_local.drop(columns=["year"], inplace=True)
+
+
     while df_local["low"].min() < 1:
         df_local[["high", "low", "close"]] *= 10
     jingdu = "float32"
@@ -1431,7 +1483,7 @@ def ga_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
     print(f"生成 {len(long_signals)} 长信号和 {len(short_signals)} 短信号。")
     global df
     df = df_local.copy()
-    population_size = min(100000, int(len(long_signals) * len(short_signals) * 0.1))
+    population_size = min(1000000, int(len(long_signals) * len(short_signals) * 0.1))
     print(f"种群规模: {population_size}，信号总数: {len(all_signals)}")
     best_candidate, best_fitness, history = genetic_algorithm_optimization(
         df_local, all_signals, all_signals,
@@ -1449,13 +1501,7 @@ def example():
     """
     start_time = time.time()
     data_path_list = [
-        # "kline_data/origin_data_1m_10000000_BTC-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_10000000_SOL-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_10000000_ETH-USDT-SWAP.csv",
-        # "kline_data/origin_data_1m_10000000_TON-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_10000000_DOGE-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_10000000_XRP-USDT-SWAP.csv",
-        "kline_data/origin_data_1m_10000000_PEPE-USDT-SWAP.csv"
+        "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
     ]
     for data_path in data_path_list:
         try:
