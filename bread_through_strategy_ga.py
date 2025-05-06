@@ -879,21 +879,21 @@ def get_fitness_op(stat, key, invert=False):
 
     # 4. 活跃月份比例（active_month_ratio）：要求 >= 0.8
     active_month_ratio = stat.get("active_month_ratio", -10000)
-    if active_month_ratio < 0.8:
-        diff = 0.8 - active_month_ratio
+    if active_month_ratio < 0.7:
+        diff = 0.7 - active_month_ratio
         # 由于 diff 通常为小数，为了使惩罚较为明显，这里的系数调大到 10000
         penalty += (diff ** 2) * 10000
 
     # 5. 每周亏损率（weekly_loss_rate）：要求 <= 0.2
     weekly_loss_rate = stat.get("weekly_loss_rate", 10000)
-    if weekly_loss_rate > 0.2:
-        diff = weekly_loss_rate - 0.2
+    if weekly_loss_rate > 0.3:
+        diff = weekly_loss_rate - 0.3
         penalty += (diff ** 2) * 1000
 
     # 6. 每月亏损率（monthly_loss_rate）：要求 <= 0.2
     monthly_loss_rate = stat.get("monthly_loss_rate", 10000)
-    if monthly_loss_rate > 0.2:
-        diff = monthly_loss_rate - 0.2
+    if monthly_loss_rate > 0.3:
+        diff = monthly_loss_rate - 0.3
         penalty += (diff ** 2) * 1000
 
     # 7. 盈利集中度（top_profit_ratio）：要求 <= 0.5
@@ -1422,7 +1422,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
                 "overall_best_candidate": overall_best,
                 "overall_best_fitness": overall_best_fitness,
             })
-            if (gen + 1) % 10 == 0:
+            if (gen + 1) % 2 == 0:
                 try:
                     data_to_save = (gen + 1, islands, overall_best, overall_best_fitness, all_history,
                                     global_generated_individuals)
@@ -1490,7 +1490,7 @@ def ga_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
         population_size=population_size, generations=700,
         crossover_rate=0.9, mutation_rate=0.2,
         key_name=f'{base_name}_{key_name}',
-        islands_count=4, migration_interval=10, migration_rate=0.05
+        islands_count=2, migration_interval=10, migration_rate=0.05
     )
     print(f"数据 {base_name} 最优信号组合: {best_candidate}，净利率: {best_fitness}")
 
