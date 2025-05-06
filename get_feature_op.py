@@ -1956,7 +1956,7 @@ def download_data():
     backtest_path = 'kline_data'
     base_file_path = 'origin_data.csv'
     is_reload = True
-    inst_id_list = ['BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'TON-USDT-SWAP', 'DOGE-USDT-SWAP', 'XRP-USDT-SWAP', 'PEPE-USDT-SWAP']
+    inst_id_list = ['TON-USDT-SWAP', 'DOGE-USDT-SWAP', 'XRP-USDT-SWAP', 'OKB-USDT']
     if not os.path.exists(backtest_path):
         os.makedirs(backtest_path)
     bar_list = ['1m']
