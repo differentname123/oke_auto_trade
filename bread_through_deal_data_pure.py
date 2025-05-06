@@ -265,8 +265,8 @@ def compute_rewarded_penalty_from_flat_df(df: pd.DataFrame) -> pd.Series:
 
     features = [
         dict(col='max_consecutive_loss', thr=-20, sign=1, pf=10, power=2, rf=1, na=-10000),
-        dict(col='net_profit_rate', thr=100, sign=1, pf=10, power=2, rf=1 / 100, na=-10000),
-        dict(col='kai_count', thr=100, sign=1, pf=10, power=2, rf=1 / 100, na=-10000),
+        dict(col='net_profit_rate', thr=50, sign=1, pf=10, power=2, rf=1 / 100, na=-10000),
+        dict(col='kai_count', thr=50, sign=1, pf=10, power=2, rf=1 / 100, na=-10000),
         dict(col='active_month_ratio', thr=0.8, sign=1, pf=10000, power=2, rf=2, na=-10000),
         dict(col='weekly_loss_rate', thr=0.2, sign=-1, pf=1000, power=2, rf=5, na=10000),
         dict(col='monthly_loss_rate', thr=0.2, sign=-1, pf=1000, power=2, rf=5, na=10000),
@@ -312,8 +312,8 @@ def add_raw_diff_columns(df):
     """
     metrics = [
         ("max_consecutive_loss", -20,  "min"),
-        ("net_profit_rate",      100,  "min"),
-        ("kai_count",            100,  "min"),
+        ("net_profit_rate",      50,  "min"),
+        ("kai_count",            50,  "min"),
         ("active_month_ratio",   0.8,  "min"),
         ("weekly_loss_rate",     0.2,  "max"),
         ("monthly_loss_rate",    0.2,  "max"),
