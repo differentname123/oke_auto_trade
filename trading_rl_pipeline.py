@@ -247,7 +247,7 @@ if __name__ == "__main__":
     multiprocessing.freeze_support()
 
     # -------- 4. 训练 -------------------------------------------------------------
-    N_ENVS = 12
+    N_ENVS = 1
     train_vec = SubprocVecEnv([make_env(df_train, i) for i in range(N_ENVS)])
     train_vec = VecNormalize(train_vec, norm_obs=True, norm_reward=False)
 
