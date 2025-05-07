@@ -460,12 +460,12 @@ def get_detail_backtest_result_op_simple(df, kai_column, pin_column, is_filter=T
     statistic_dict = {
         "kai_column": kai_column,
         "pin_column": pin_column,
-        "trade_count": trade_count,
+        "kai_count": trade_count,
         "net_profit_rate": net_profit_rate,
-        "max_loss": max_loss,
+        "max_consecutive_loss": max_loss,
         "active_week_ratio": active_week_ratio,
         "active_month_ratio": active_month_ratio,
-        "true_profit_mean": true_profit_mean,
+        "avg_profit_rate": true_profit_mean,
         "hold_time_mean": hold_time_mean,
         "max_hold_time": max_hold_time,
         "top_profit_ratio": top_profit_ratio,
@@ -997,88 +997,140 @@ def get_fitness_op(stat, key, invert=False):
     """
     根据统计结果 stat 和目标指标 key 计算适应度。
 
-    所有不满足限定条件的指标均采用二次惩罚：
-      - 对于要求“至少达到某个下限”的指标（如 max_consecutive_loss、net_profit_rate、kai_count、active_month_ratio 和 avg_profit_rate），
-        当数值低于下限时，计算 diff = (下限 - 指标值)，惩罚为 diff**2 * 系数。
-      - 对于要求“至多不超过某个上限”的指标（如 weekly_loss_rate、monthly_loss_rate、top_profit_ratio、hold_time_mean 和 max_hold_time），
-        当数值超过上限时，计算 diff = (指标值 - 上限)，惩罚为 diff**2 * 系数。
+    对于每个指标，如果不满足限定条件，则按照原逻辑采用二次惩罚；
+    如果满足限定条件，则适当计算奖励值：
+      - 对于“下限型”指标，如 max_consecutive_loss、net_profit_rate、kai_count、
+        active_month_ratio 和 avg_profit_rate，当指标值 ≥ 阈值时，
+        奖励值 = (实际值 - 阈值) / (阈值的绝对值) ；
+      - 对于“上限型”指标，如 weekly_loss_rate、monthly_loss_rate、top_profit_ratio、
+        hold_time_mean 和 max_hold_time，当指标值 ≤ 阈值时，
+        奖励值 = (阈值 - 实际值) / (阈值) ；
 
     如果 stat 为 None 或目标指标 key 不存在，则基础值 base 设为 0。
-    最终适应度为基础值减去所有累加的惩罚项。
+
+    最终适应度 = 基础值 + 累加的奖励值 - 累加的惩罚项
+    对于需要反转的指标（invert=True），采用：
+         fitness = base - total_reward + total_penalty, 并返回 -fitness
     """
     if stat is None:
-        return -10000
+        return -1000000000000
 
     # 取目标指标的基础值，若不存在，则设为 0
     base = stat.get(key, 0)
     penalty = 0.0
+    reward = 0.0
 
     # 1. 最大连续亏损（max_consecutive_loss）：要求 >= -20
+    #   下限型指标，采用阈值 abs(-20)=20
     max_loss = stat.get("max_consecutive_loss", -10000)
     if max_loss < -20:
-        diff = -20 - max_loss  # 正数
+        diff = -20 - max_loss  # diff 为正
         penalty += (diff ** 2) * 10
+    else:
+        diff = max_loss - (-20)  # 实际值超出阈值的幅度
+        reward += diff / 20.0
 
-    # 2. 净利润率（net_profit_rate）：要求 >= 100
+    # 2. 净利润率（net_profit_rate）：要求 >= 50（原代码中要求50）
+    #   下限型指标
     net_profit_rate = stat.get("net_profit_rate", -10000)
     if net_profit_rate < 50:
         diff = 50 - net_profit_rate
         penalty += (diff ** 2) * 10
+    else:
+        diff = net_profit_rate - 50
+        reward += diff / 50.0
 
-    # 3. 交易次数（kai_count）：要求 >= 100
+    # 3. 交易次数（kai_count）：要求 >= 50（原代码中要求50）
+    #   下限型指标
     trade_count = stat.get("kai_count", -10000)
     if trade_count < 50:
         diff = 50 - trade_count
         penalty += (diff ** 2) * 10
+    else:
+        diff = trade_count - 50
+        reward += diff / 50.0
 
-    # 4. 活跃月份比例（active_month_ratio）：要求 >= 0.8
+    # 4. 活跃月份比例（active_month_ratio）：要求 >= 0.7（原代码中要求0.7）
+    #   下限型指标
     active_month_ratio = stat.get("active_month_ratio", -10000)
     if active_month_ratio < 0.7:
         diff = 0.7 - active_month_ratio
-        # 由于 diff 通常为小数，为了使惩罚较为明显，这里的系数调大到 10000
         penalty += (diff ** 2) * 10000
+    else:
+        diff = active_month_ratio - 0.7
+        reward += diff / 0.7
 
-    # 5. 每周亏损率（weekly_loss_rate）：要求 <= 0.2
+    # 5. 每周亏损率（weekly_loss_rate）：要求 <= 0.3
+    #   上限型指标
     weekly_loss_rate = stat.get("weekly_loss_rate", 10000)
     if weekly_loss_rate > 0.3:
         diff = weekly_loss_rate - 0.3
         penalty += (diff ** 2) * 1000
+    else:
+        diff = 0.3 - weekly_loss_rate
+        reward += diff / 0.3
 
-    # 6. 每月亏损率（monthly_loss_rate）：要求 <= 0.2
+    # 6. 每月亏损率（monthly_loss_rate）：要求 <= 0.3
+    #   上限型指标
     monthly_loss_rate = stat.get("monthly_loss_rate", 10000)
     if monthly_loss_rate > 0.3:
         diff = monthly_loss_rate - 0.3
         penalty += (diff ** 2) * 1000
+    else:
+        diff = 0.3 - monthly_loss_rate
+        reward += diff / 0.3
 
     # 7. 盈利集中度（top_profit_ratio）：要求 <= 0.5
+    #   上限型指标
     top_profit_ratio = stat.get("top_profit_ratio", 10000)
     if top_profit_ratio > 0.5:
         diff = top_profit_ratio - 0.5
         penalty += (diff ** 2) * 1000
+    else:
+        diff = 0.5 - top_profit_ratio
+        reward += diff / 0.5
 
     # 8. 持仓时间均值（hold_time_mean）：要求 <= 3000
+    #   上限型指标
     hold_time_mean = stat.get("hold_time_mean", 100000)
     if hold_time_mean > 3000:
         diff = hold_time_mean - 3000
-        # 系数这里采用除以 10000，可根据实际量级调整
         penalty += (diff ** 2) / 10000.0
+    else:
+        diff = 3000 - hold_time_mean
+        reward += diff / 3000.0
 
     # 9. 最大持仓时间（max_hold_time）：要求 <= 10000
+    #   上限型指标
     max_hold_time = stat.get("max_hold_time", 100000)
     if max_hold_time > 10000:
         diff = max_hold_time - 10000
         penalty += (diff ** 2) / 10000.0
+    else:
+        diff = 10000 - max_hold_time
+        reward += diff / 10000.0
 
     # 10. 平均盈利率（avg_profit_rate）：要求 >= 10
+    #    下限型指标
     true_profit_mean = stat.get("avg_profit_rate", -10000)
     if true_profit_mean < 10:
         diff = 10 - true_profit_mean
         penalty += (diff ** 2) * 1
+    else:
+        diff = true_profit_mean - 10
+        reward += diff / 10.0
+
+    # 按原代码将总惩罚项再乘以 100（以匹配量级）
     penalty = penalty * 100
-    fitness = base - penalty
+
+    # 根据是否需要反转计算最终适应度：
+    # 正常指标：适应度 = base + reward - penalty
+    # 反转指标：适应度 = base - reward + penalty, 并返回 -fitness，使得更优表现对应更高的返回值
     if invert:
-        # 对于需要反转的指标，适应度值为基础值加上惩罚项
-        fitness = base + penalty
+        fitness = base - reward + penalty
+    else:
+        fitness = base + reward - penalty
+
     return -fitness if invert else fitness
 
 # 声明两组 key:

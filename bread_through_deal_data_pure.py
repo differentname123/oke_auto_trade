@@ -72,11 +72,11 @@ def process_load_filter_data(file):
             ]
         )
 
-        # 预计算各项 profit_risk_score 指标
-        npr = df['net_profit_rate']
-        df['profit_risk_score_con'] = -(npr * npr) / df['max_consecutive_loss']
-        df['profit_risk_score'] = -(npr * npr) / df['fu_profit_sum']
-        df['profit_risk_score_pure'] = -npr / df['fu_profit_sum']
+        # # 预计算各项 profit_risk_score 指标
+        # npr = df['net_profit_rate']
+        # df['profit_risk_score_con'] = -(npr * npr) / df['max_consecutive_loss']
+        # df['profit_risk_score'] = -(npr * npr) / df['fu_profit_sum']
+        # df['profit_risk_score_pure'] = -npr / df['fu_profit_sum']
 
         # 计算奖励与惩罚相关数据
         df = compute_rewarded_penalty_from_flat_df(df)
@@ -128,7 +128,7 @@ def load_and_merger_data(inst_id, is_reverse):
     file_list = os.listdir('temp')
     file_list = [file for file in file_list if inst_id in file and
                  'donchian_1_20_1_relate_400_1000_100_1_40_6_cci_1_2000_1000_1_2_1_atr_1_3000_3000_boll_1_3000_100_1_50_2_rsi_1_1000_500_abs_1_100_100_40_100_1_macd_300_1000_50_macross_1_3000_100_1_3000_100_' in file and
-                 'pkl' not in file and '_stats' in file and '1m' in file and str(is_reverse) in file]
+                 'pkl' not in file and '340' in file and '1m' in file and str(is_reverse) in file]
     print(f"找到 {len(file_list)} 个文件")
 
     # 完善的文件路径
