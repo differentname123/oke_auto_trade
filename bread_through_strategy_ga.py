@@ -1317,6 +1317,7 @@ def genetic_algorithm_optimization(df, candidate_long_signals, candidate_short_s
     # 重置候选信号为预计算结果的 key
     candidate_long_signals = list(GLOBAL_SIGNALS.keys())
     candidate_short_signals = list(GLOBAL_SIGNALS.keys())
+    print(f"候选信号数量: {len(candidate_long_signals)}。")
 
     global IS_REVERSE
     IS_REVERSE = False
