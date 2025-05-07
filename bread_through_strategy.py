@@ -38,7 +38,7 @@ checkpoint_dir = 'temp'
 GLOBAL_SIGNALS = {}
 df = None  # 回测数据，在子进程中通过初始化传入
 
-
+pd.options.mode.chained_assignment = None
 ##############################################
 # 辅助函数
 ##############################################
@@ -645,8 +645,8 @@ def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, 
     all_valid_results = []
     batch_index = 0
     start_time = time.time()
-    pool_processes = 30
-    chunk_size = max(100, batch_size // (pool_processes * 10))
+    pool_processes = 31
+    chunk_size = max(100, batch_size // (pool_processes * 20))
 
     print(f"开始穷举回测，批次大小: {batch_size}，进程池大小: {pool_processes}，chunk_size: {chunk_size}。时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
     # 创建持久进程池，避免多个批次中重复创建/销毁进程的开销
@@ -742,7 +742,7 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
         print(f"候选信号数量: {len(candidate_signals)}。")
 
         # 穷举回测所有候选组合，每一批次计算并保存结果
-        valid_results = brute_force_backtesting(df, candidate_signals, candidate_signals, batch_size=1000000,
+        valid_results = brute_force_backtesting(df, candidate_signals, candidate_signals, batch_size=10000000,
                                                 key_name=f'{year}_{base_name}_{key_name}')
         print(f"\n暴力回测结束，共找到 {len(valid_results)} 个有效信号组合。")
 
