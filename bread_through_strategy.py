@@ -660,13 +660,17 @@ def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, 
             batch = list(itertools.islice(candidate_gen, batch_size))
             if not batch:
                 break
+            stats_file_name = os.path.join(checkpoint_dir, f"{key_name}_{batch_index}_{IS_REVERSE}_stats.parquet")
+            if os.path.exists(stats_file_name):
+                print(f"批次 {batch_index} 的统计文件已存在，跳过。")
+                batch_index += 1
+                continue
             # 动态设置较大的 chunksize 以减少调度次数
             # results = pool.map(evaluate_candidate, batch, chunksize=chunk_size)
             results = pool.imap_unordered(evaluate_candidate, batch, chunksize=chunk_size)
             valid_results = [res for res in results if res is not None]
             all_valid_results.extend(valid_results)
             temp_df = pd.DataFrame(valid_results)
-            stats_file_name = os.path.join(checkpoint_dir, f"{key_name}_{batch_index}_{IS_REVERSE}_stats.parquet")
             temp_df.to_parquet(stats_file_name, index=False)
             print(
                 f"批次 {batch_index} 处理完毕，有效组合数量: {len(valid_results)} 耗时 {time.time() - start_time:.2f} 秒")
@@ -738,7 +742,7 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
         print(f"候选信号数量: {len(candidate_signals)}。")
 
         # 穷举回测所有候选组合，每一批次计算并保存结果
-        valid_results = brute_force_backtesting(df, candidate_signals, candidate_signals, batch_size=100000,
+        valid_results = brute_force_backtesting(df, candidate_signals, candidate_signals, batch_size=1000000,
                                                 key_name=f'{year}_{base_name}_{key_name}')
         print(f"\n暴力回测结束，共找到 {len(valid_results)} 个有效信号组合。")
 
