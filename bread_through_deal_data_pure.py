@@ -59,6 +59,7 @@ def process_load_filter_data(file):
     try:
         # 读取数据
         df = pd.read_parquet(file)
+
         origin_len = len(df)
 
         # 检查必要列的数组长度
@@ -72,11 +73,11 @@ def process_load_filter_data(file):
             ]
         )
 
-        # 预计算各项 profit_risk_score 指标
-        npr = df['net_profit_rate']
-        df['profit_risk_score_con'] = -(npr * npr) / df['max_consecutive_loss']
-        df['profit_risk_score'] = -(npr * npr) / df['fu_profit_sum']
-        df['profit_risk_score_pure'] = -npr / df['fu_profit_sum']
+        # # 预计算各项 profit_risk_score 指标
+        # npr = df['net_profit_rate']
+        # df['profit_risk_score_con'] = -(npr * npr) / df['max_consecutive_loss']
+        # df['profit_risk_score'] = -(npr * npr) / df['fu_profit_sum']
+        # df['profit_risk_score_pure'] = -npr / df['fu_profit_sum']
 
         # 计算奖励与惩罚相关数据
         df = compute_rewarded_penalty_from_flat_df(df)
@@ -85,10 +86,10 @@ def process_load_filter_data(file):
         df_backup = df.copy()
 
         # 根据 score_final 过滤
-        df = df[df['score_final'] > -1000]
+        # df = df[df['score_final'] > -1000]
         # 添加原始差值相关列，并根据 norm_diff_score 过滤
         df = add_raw_diff_columns(df)
-        df = df[df['norm_diff_score'] > -1000]
+        # df = df[df['norm_diff_score'] > -1000]
 
         # 计算 score_score，并对负值情况进行调整
         df['score_score'] = df['score_final'] * df['norm_diff_score']
@@ -439,12 +440,12 @@ def example():
         result_df = load_and_merger_data(inst_id, is_reverse)
         result_df.to_parquet(output_path, index=False)
 
-    for inst_id in inst_id_list:
-        output_file = f'temp_back/{inst_id}_{is_reverse}_pure_data_with_future.parquet'
-        if os.path.exists(output_file):
-            result_df = pd.read_parquet(output_file)
-
-        merge_df(inst_id)
+    # for inst_id in inst_id_list:
+    #     output_file = f'temp_back/{inst_id}_{is_reverse}_pure_data_with_future.parquet'
+    #     if os.path.exists(output_file):
+    #         result_df = pd.read_parquet(output_file)
+    #
+    #     merge_df(inst_id)
 
 
 

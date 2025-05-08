@@ -39,22 +39,10 @@ GLOBAL_SIGNALS = {}
 df = None  # 回测数据，在子进程中通过初始化传入
 
 pd.options.mode.chained_assignment = None
-##############################################
-# 辅助函数
-##############################################
 def series_to_numpy(series):
     """将 Pandas Series 转为 NumPy 数组。"""
     return series.to_numpy(copy=False) if hasattr(series, "to_numpy") else np.asarray(series)
 
-
-def safe_round(value, ndigits=4):
-    """对数值执行四舍五入转换。"""
-    return round(value, ndigits)
-
-
-##############################################
-# 信号生成及回测函数
-##############################################
 def compute_signal(df, col_name):
     """
     根据历史行情数据(df)和指定信号名称(col_name)生成交易信号和目标价格。
@@ -233,14 +221,94 @@ def op_signal(df, sig):
     indices = np.nonzero(s_np)[0]
     if indices.size < 100:
         return None
+    # 判断最大idx和最小idx的差值是否大于0.1 * len(df)
+    if len(df) > 0:
+        max_idx = indices.max()
+        min_idx = indices.min()
+        if max_idx - min_idx < 0.1 * len(df):
+            return None
     return (indices.astype(np.int32), p_np[indices])
 
 
-def get_detail_backtest_result_op_simple(df, kai_column, pin_column, is_filter=True, is_reverse=False):
+@njit(cache=True, fastmath=True)
+def fast_check(k_idx, k_price, p_idx, p_price, min_trades=10, loss_th=-30.0, is_reverse=False):
     """
-    优化后的函数：提前进行部分判断以避免后续不必要的计算。
+    使用单持仓模式计算交易组合的盈亏情况：
+      - 在持仓未平仓前，后续的开仓信号将被忽略；
+      - k_idx, k_price 为开仓信号对应的索引和价格；
+      - p_idx, p_price 为平仓信号对应的索引和价格。
+    如果匹配过程中的最小累计收益（连续亏损）低于 loss_th，则提前返回 False，
+    最后判断是否满足最少 min_trades 笔交易要求。
     """
-    # --- 1. 获取信号数据 ---
+    i = 0  # 开仓信号的指针
+    j = 0  # 平仓信号的指针
+    n_k = k_idx.shape[0]
+    n_p = p_idx.shape[0]
+
+    # 如果任一信号触发次数少于最小交易次数，直接返回 False
+    if n_k < min_trades or n_p < min_trades:
+        return False
+
+    trades = 0
+    cur_sum = 0.0
+    min_sum = 0.0
+    trade_count = 0
+
+    # 记录上一次平仓的时刻，未平仓前不允许新开仓
+    last_closed_time = -1  # 假设所有索引均 >= 0
+
+    while i < n_k and j < n_p:
+        # 如果当前开仓信号在上一次平仓之前，说明此信号处于上一笔仓位未平仓期间，跳过
+        if k_idx[i] <= last_closed_time:
+            i += 1
+            continue
+
+        # 找到第一个有效平仓信号，其时间必须晚于当前开仓信号
+        while j < n_p and p_idx[j] <= k_idx[i]:
+            j += 1
+        if j >= n_p:
+            break
+
+        # 执行一笔交易：开仓在 k_idx[i]，平仓在 p_idx[j]
+        chg = (p_price[j] - k_price[i]) / k_price[i] * 100.0
+        if not is_reverse:
+            chg = - chg
+        pnl = chg - 0.07  # 计算收益率并扣除手续费
+        trades += 1
+
+        # 累计连续亏损计算逻辑
+        if cur_sum == 0:
+            trade_count = 0
+        cur_sum += pnl
+        trade_count += 1
+        if cur_sum < min_sum:
+            min_sum = cur_sum
+        if cur_sum > 0:
+            cur_sum = 0.0
+            trade_count = 0
+
+        # 若累计亏损超过允许阈值，则提前退出
+        if min_sum < loss_th:
+            return False
+
+        # 更新上一次平仓时刻，之后开仓信号必须晚于此时刻才能开新仓
+        last_closed_time = p_idx[j]
+
+        # 移动指针，进行下一笔交易的匹配
+        i += 1
+        j += 1
+
+    return (trades >= min_trades) and (min_sum >= loss_th)
+
+
+def check_max_loss(df, kai_column, pin_column, is_reverse=False):
+    """
+    融合了 fast_check 的版本：
+      1. 首先尝试从 GLOBAL_SIGNALS 中获取 kai 与 pin 信号数据，若不存在则计算。
+      2. 控制条件：若 kai_idx 与 pin_idx 重叠率（交集除以较少的触发次数） >= 1%，直接返回 False。
+      3. 调用 fast_check 进行加速计算，匹配方式假设两个信号生成的数据均为时间上递增的 NumPy 数组，
+         并计算累计盈亏；若最大连续亏损未低于 -30% 且交易次数不少于 100 笔，则返回 True。
+    """
     try:
         kai_idx, kai_prices = GLOBAL_SIGNALS[kai_column]
         pin_idx, pin_prices = GLOBAL_SIGNALS[pin_column]
@@ -248,141 +316,19 @@ def get_detail_backtest_result_op_simple(df, kai_column, pin_column, is_filter=T
         kai_idx, kai_prices = op_signal(df, kai_column)
         pin_idx, pin_prices = op_signal(df, pin_column)
 
-    if (kai_idx is None or pin_idx is None or kai_idx.size < 100 or pin_idx.size < 100):
-        return None, None
+    # --- 新增筛选条件：检查 kai_idx 与 pin_idx 之间的重叠率 ---
+    # 以较小信号数量为分母，确保对少量信号敏感
+    common = np.intersect1d(kai_idx, pin_idx)
+    overlap_ratio = common.size / min(kai_idx.size, pin_idx.size)
+    if overlap_ratio >= 0.01:
+        return False
+    side = True
+    if 'short' in kai_column:
+        side = False
+    if is_reverse:
+        side = not side
+    return fast_check(kai_idx, kai_prices, pin_idx, pin_prices, is_reverse=side)
 
-    # --- 2. 提取子数据集并匹配信号 ---
-    kai_data_df = df.iloc[kai_idx].copy()
-    pin_data_df = df.iloc[pin_idx].copy()
-    kai_data_df["kai_price"] = kai_prices
-    pin_data_df["pin_price"] = pin_prices
-
-    kai_idx_arr = np.asarray(kai_data_df.index)
-    pin_idx_arr = np.asarray(pin_data_df.index)
-    pin_match_indices = np.searchsorted(pin_idx_arr, kai_idx_arr, side="right")
-    valid_mask = pin_match_indices < len(pin_idx_arr)
-    if valid_mask.sum() == 0:
-        return None, None
-
-    kai_data_df = kai_data_df.iloc[valid_mask].copy()
-    kai_idx_valid = kai_idx_arr[valid_mask]
-    pin_match_indices_valid = pin_match_indices[valid_mask]
-    matched_pin = pin_data_df.iloc[pin_match_indices_valid].copy()
-
-    # 添加匹配的 pin 数据
-    kai_data_df["pin_price"] = matched_pin["pin_price"].values
-    kai_data_df["pin_time"] = matched_pin["timestamp"].values
-    kai_data_df["hold_time"] = matched_pin.index.values - kai_idx_valid
-
-    if is_filter:
-        kai_data_df = kai_data_df.sort_values("timestamp").drop_duplicates("pin_time", keep="first")
-
-    trade_count = len(kai_data_df)
-    if trade_count < 25:
-        return None, None
-
-    # --- 3. 策略方向判断和初步盈亏计算 ---
-    is_long = (("long" in kai_column.lower()) if not is_reverse else ("short" in kai_column.lower()))
-    # 使用价格映射更新 kai_price（耗时较低）
-    pin_price_map = kai_data_df.set_index("pin_time")["pin_price"]
-    mapped_prices = kai_data_df["timestamp"].map(pin_price_map)
-    if mapped_prices.notna().sum() > 0:
-        kai_data_df["kai_price"] = mapped_prices.combine_first(kai_data_df["kai_price"])
-
-    if is_long:
-        profit_series = ((kai_data_df["pin_price"] - kai_data_df["kai_price"]) /
-                         kai_data_df["kai_price"] * 100).round(4)
-    else:
-        profit_series = ((kai_data_df["kai_price"] - kai_data_df["pin_price"]) /
-                         kai_data_df["kai_price"] * 100).round(4)
-    kai_data_df["true_profit"] = profit_series - 0.07
-
-    # --- 4. 初步检测净盈亏率 ---
-    fix_profit = safe_round(kai_data_df[mapped_prices.notna()]["true_profit"].sum(), ndigits=4)
-    net_profit_rate = kai_data_df["true_profit"].sum() - fix_profit
-    if net_profit_rate < 25:
-        return None, None
-
-    # --- 5. 快速判断：检查平均收益和持有时间 ---
-    true_profit_mean = kai_data_df["true_profit"].mean() * 100 if trade_count > 0 else 0
-    hold_time_mean = kai_data_df["hold_time"].mean() if trade_count else 0
-    max_hold_time = kai_data_df["hold_time"].max() if trade_count else 0
-
-    if true_profit_mean < 10 or max_hold_time > 10000 or hold_time_mean > 3000:
-        return None, None
-
-    # --- 6. 耗时操作：计算最大连续亏损 ---
-    profits_arr = kai_data_df["true_profit"].values
-    max_loss, max_loss_start_idx, max_loss_end_idx, _ = calculate_max_sequence_numba(profits_arr)
-    if max_loss < -30:
-        return None, None
-
-    # --- 7. 月度和周度统计，判断活跃情况和亏损比例 ---
-    full_start_time = df["timestamp"].min()
-    full_end_time = df["timestamp"].max()
-
-    # 月度统计
-    monthly_groups = kai_data_df["timestamp"].dt.to_period("M")
-    monthly_agg = kai_data_df.groupby(monthly_groups)["true_profit"].sum()
-    active_months = monthly_agg.shape[0]
-    total_months = len(pd.period_range(start=full_start_time.to_period("M"),
-                                       end=full_end_time.to_period("M"),
-                                       freq="M"))
-    active_month_ratio = active_months / total_months if total_months else 0
-    monthly_loss_rate = (np.sum(monthly_agg < 0) / active_months) if active_months else 0
-    if active_month_ratio < 0.5 or monthly_loss_rate > 0.3:
-        return None, None
-
-    # 周度统计
-    weekly_groups = kai_data_df["timestamp"].dt.to_period("W")
-    weekly_agg = kai_data_df.groupby(weekly_groups)["true_profit"].sum()
-    active_weeks = weekly_agg.shape[0]
-    total_weeks = len(pd.period_range(start=full_start_time.to_period("W"),
-                                      end=full_end_time.to_period("W"),
-                                      freq="W"))
-    active_week_ratio = active_weeks / total_weeks if total_weeks else 0
-    weekly_loss_rate = (np.sum(weekly_agg < 0) / active_weeks) if active_weeks else 0
-    if active_week_ratio < 0.5 or weekly_loss_rate > 0.3:
-        return None, None
-
-    # --- 8. 判断前10%盈利贡献比例 ---
-    profit_df = kai_data_df[kai_data_df["true_profit"] > 0]
-    if not profit_df.empty:
-        top_profit_count = max(1, int(np.ceil(len(profit_df) * 0.1)))
-        profit_sorted = profit_df.sort_values("true_profit", ascending=False)
-        top_profit_sum = profit_sorted["true_profit"].iloc[:top_profit_count].sum()
-        total_profit_sum = profit_df["true_profit"].sum()
-        top_profit_ratio = top_profit_sum / total_profit_sum if total_profit_sum != 0 else 0
-    else:
-        top_profit_ratio = 0
-
-    if top_profit_ratio > 0.5:
-        return None, None
-
-    # --- 9. 构造结果字典 ---
-    statistic_dict = {
-        "kai_column": kai_column,
-        "pin_column": pin_column,
-        "kai_count": trade_count,
-        "net_profit_rate": net_profit_rate,
-        "max_consecutive_loss": max_loss,
-        "active_week_ratio": active_week_ratio,
-        "active_month_ratio": active_month_ratio,
-        "avg_profit_rate": true_profit_mean,
-        "hold_time_mean": hold_time_mean,
-        "max_hold_time": max_hold_time,
-        "top_profit_ratio": top_profit_ratio,
-        "monthly_loss_rate": monthly_loss_rate,
-        "weekly_loss_rate": weekly_loss_rate,
-        "is_reverse": is_reverse,
-    }
-
-    return None, statistic_dict
-
-
-##############################################
-# 信号生成名称函数
-##############################################
 def generate_numbers(start, end, number, even=True):
     """
     生成区间内均匀或非均匀分布的一组整数。
@@ -623,10 +569,10 @@ def evaluate_candidate(candidate):
     若回测条件不满足，则返回 None。
     """
     long_sig, short_sig = candidate
-    _, stat = get_detail_backtest_result_op_simple(df, long_sig, short_sig, is_filter=True, is_reverse=False)
-    if stat is None:
-        return None
-    return stat
+    check_result = check_max_loss(df, long_sig, short_sig, is_reverse=False)
+    if check_result:
+        return (long_sig, short_sig)
+    return None
 
 
 def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, key_name="brute_force_results"):
@@ -642,7 +588,6 @@ def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, 
     total_pairs = len(long_signals) * len(short_signals)
     print(f"候选组合总数: {total_pairs} 预计批次数: {total_pairs // batch_size + 1}")
     candidate_gen = candidate_pairs_generator(long_signals, short_signals)
-    all_valid_results = []
     batch_index = 0
     start_time = time.time()
     pool_processes = 30
@@ -660,17 +605,17 @@ def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, 
             batch = list(itertools.islice(candidate_gen, batch_size))
             if not batch:
                 break
-            stats_file_name = os.path.join(checkpoint_dir, f"{key_name}_{batch_index}_{IS_REVERSE}_stats.parquet")
+            stats_file_name = os.path.join(checkpoint_dir, f"{key_name}_{batch_index}_{IS_REVERSE}_stats_debug.parquet")
             if os.path.exists(stats_file_name):
                 print(f"批次 {batch_index} 的统计文件已存在，跳过。")
                 batch_index += 1
                 continue
-            # 动态设置较大的 chunksize 以减少调度次数
-            # results = pool.map(evaluate_candidate, batch, chunksize=chunk_size)
             results = pool.imap_unordered(evaluate_candidate, batch, chunksize=chunk_size)
             valid_results = [res for res in results if res is not None]
-            all_valid_results.extend(valid_results)
-            temp_df = pd.DataFrame(valid_results)
+            if valid_results:  # 确保 valid_results 不为空，否则创建空 DataFrame 时指定列名可能无意义或报错
+                temp_df = pd.DataFrame(valid_results, columns=['kai_column', 'pin_column'])
+            else:
+                temp_df = pd.DataFrame(columns=['kai_column', 'pin_column'])  # 创建一个空的但有列名的DataFrame
             temp_df.to_parquet(stats_file_name, index=False)
             print(
                 f"批次 {batch_index} 处理完毕，有效组合数量: {len(valid_results)} 耗时 {time.time() - start_time:.2f} 秒 当前时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
@@ -679,12 +624,6 @@ def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, 
         pool.close()
         pool.join()
 
-    return all_valid_results
-
-
-##############################################
-# 主流程：直接对所有候选组合进行回测
-##############################################
 def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
     """
     加载数据后直接对所有 (长信号, 短信号) 组合进行回测，
@@ -726,7 +665,7 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
         df_monthly = temp_df_local["timestamp"].dt.to_period("M")
         temp_df_local = temp_df_local[(df_monthly != df_monthly.min()) & (df_monthly != df_monthly.max())]
         print(f"\n开始基于暴力穷举回测 {base_name} ... 数据长度 {temp_df_local.shape[0]} 时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
-
+        # temp_df_local.to_csv("kline_data/origin_data_1m_500000_BTC-USDT-SWAP_2025-05-06.csv")
         global df
         df = temp_df_local.copy()
         # 预计算所有候选信号数据
@@ -746,11 +685,6 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
                                                 key_name=f'{year}_{base_name}_{key_name}')
         print(f"\n暴力回测结束，共找到 {len(valid_results)} 个有效信号组合。")
 
-
-
-##############################################
-# 示例入口函数
-##############################################
 def example():
     """
     示例入口：处理多个数据文件调用暴力穷举回测流程。
