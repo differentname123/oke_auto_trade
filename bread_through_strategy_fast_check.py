@@ -681,9 +681,9 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
         print(f"候选信号数量: {len(candidate_signals)}。")
 
         # 穷举回测所有候选组合，每一批次计算并保存结果
-        valid_results = brute_force_backtesting(df, candidate_signals, candidate_signals, batch_size=10000000,
+        brute_force_backtesting(df, candidate_signals, candidate_signals, batch_size=10000000,
                                                 key_name=f'{year}_{base_name}_{key_name}')
-        print(f"\n暴力回测结束，共找到 {len(valid_results)} 个有效信号组合。")
+        break
 
 def example():
     """
@@ -692,6 +692,12 @@ def example():
     start_time = time.time()
     data_path_list = [
         "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_DOGE-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_XRP-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_OKB-USDT_2025-05-06.csv",
     ]
     for data_path in data_path_list:
         try:
