@@ -333,7 +333,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     # 3. 一旦成功匹配，将平仓信号记录下来，并更新“最后平仓信号”，后续的开仓信号必须大于此值。
     #
     # 在给定的例子中，会匹配为：
-    #    (1,2)  → 平仓2使用后，不再允许2作为开仓信号
+    #    (1,2)  → 平仓2使用后，不再允许2作为后续开仓信号
     #    (3,5)
     #    (6,10)
     ############################################################################
@@ -347,7 +347,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     pin_ptr = 0  # 平仓信号的指针
 
     for kai_val in kai_idx_sorted:
-        # 如果当前开仓信号不大于上一笔交易的平仓信号，则视为无效（已经作为平仓使用或在平仓后出现）
+        # 如果当前开仓信号小于等于上一笔交易的平仓信号，则跳过
         if kai_val <= last_exit:
             continue
 
@@ -395,7 +395,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         kai_data_df["kai_price"] = mapped_prices.combine_first(kai_data_df["kai_price"])
     modification_rate = (100 * mapped_prices.notna().sum() / trade_count) if trade_count else 0
 
-    # 根据做多或做空策略计算盈亏比例（百分比）并扣除交易成本
+    # 根据传入的参数判断做多或做空策略，计算盈亏比例（百分比）并扣除交易成本
     is_long = (("long" in kai_column.lower()) if not is_reverse else ("short" in kai_column.lower()))
     if is_long:
         profit_series = ((kai_data_df["pin_price"] - kai_data_df["kai_price"]) /
@@ -414,13 +414,18 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     fix_profit = safe_round(kai_data_df[mapped_prices.notna()]["true_profit"].sum(), ndigits=4)
     net_profit_rate = kai_data_df["true_profit"].sum() - fix_profit
 
-    # 计算连续盈利或亏损序列（假设 calculate_max_sequence_numba 与 calculate_max_profit_numba 已定义）
+    # 计算连续盈利或亏损序列
+    # calculate_max_sequence_numba 返回： (max_loss, max_loss_start_idx, max_loss_end_idx, loss_trade_count)
     profits_arr = kai_data_df["true_profit"].values
     max_loss, max_loss_start_idx, max_loss_end_idx, loss_trade_count = calculate_max_sequence_numba(profits_arr)
     if max_loss_start_idx < len(kai_data_df) and max_loss_end_idx < len(kai_data_df):
         max_loss_hold_time = kai_data_df.index[max_loss_end_idx] - kai_data_df.index[max_loss_start_idx]
+        max_loss_start_time = kai_data_df["timestamp"].iloc[max_loss_start_idx]
+        max_loss_end_time = kai_data_df["timestamp"].iloc[max_loss_end_idx]
     else:
         max_loss_hold_time = None
+        max_loss_start_time = None
+        max_loss_end_time = None
 
     if max_loss_start_idx < len(kai_data_df) and max_loss_end_idx < len(kai_data_df):
         max_profit, max_profit_start_idx, max_profit_end_idx, profit_trade_count = calculate_max_profit_numba(profits_arr)
@@ -546,6 +551,9 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         "max_consecutive_loss": safe_round(max_loss, 4),
         "max_loss_trade_count": loss_trade_count,
         "max_loss_hold_time": max_loss_hold_time,
+        # 新增最大亏损的开始和结束时间
+        "max_loss_start_time": max_loss_start_time,
+        "max_loss_end_time": max_loss_end_time,
         "max_consecutive_profit": safe_round(max_profit, 4) if max_profit is not None else None,
         "max_profit_trade_count": profit_trade_count if max_profit is not None else None,
         "max_profit_hold_time": max_profit_hold_time,
@@ -969,10 +977,10 @@ def validation(market_data_file):
                 batch_pairs = pairs[start_idx:end_idx]
                 print(f"Processing batch {batch_index + 1}/{total_batches} with {len(batch_pairs)} pairs... [{current_time}]")
 
-                with multiprocessing.Pool(processes=pool_processes,
+                with multiprocessing.Pool(processes=10,
                                           initializer=init_worker_with_signals,
                                           initargs=(GLOBAL_SIGNALS, df)) as pool:
-                    results = pool.map(process_signal_pair, batch_pairs, chunksize=1000)
+                    results = pool.map(process_signal_pair, batch_pairs, chunksize=1)
 
                 # 过滤掉返回 None 的结果
                 results_filtered = [r for r in results if r[2] is not None]
