@@ -427,7 +427,88 @@ def merge_df(inst_id):
         origin_good_df = process_df_numba(origin_good_df)
         origin_good_df.to_parquet(output_file, index=False)
 
+
+def group_statistics_and_inst_details(df: pd.DataFrame,
+                                                group_cols,
+                                                target_cols) -> pd.DataFrame:
+    """
+    对 df 按 group_cols 分组，对 target_cols 计算 max, min, mean,
+    positive_ratio, group_count（分组大小），并收集每个 target_col 的
+    {inst_id: value} 字典。
+
+    Arguments:
+        df: 输入的 Pandas DataFrame。
+        group_cols: 用于分组的列名列表。
+        target_cols: 需要计算统计信息和收集值的列名列表。
+
+    Returns:
+        一个 Pandas DataFrame，包含分组键、统计结果以及每个 target_col 的
+        {inst_id: value} 字典。
+    """
+    inst_id_col = 'inst_id'
+    if inst_id_col not in df.columns:
+        raise ValueError(f"inst_id_col '{inst_id_col}' not found in DataFrame columns.")
+
+    # 按分组键分组，保留 NaN
+    grouped = df.groupby(group_cols, dropna=False)
+
+    # 计算分组大小，使用内置 size() 方法（C层级优化）
+    group_count = grouped.size().rename("group_count")
+    result_df = group_count.to_frame()
+
+    for col in target_cols:
+        # 计算 max, min, mean，使用内置聚合函数agg
+        agg_stats = grouped[col].agg(['max', 'min', 'mean'])
+        agg_stats.columns = [f"{col}_{stat}" for stat in ['max', 'min', 'mean']]
+        result_df = result_df.join(agg_stats)
+
+        # 计算正例比例：
+        # 先将整列转换为数值，再生成布尔标记列（大于 0 为1，否则为0），
+        # 然后对该布尔列用内置聚合函数求和，实现向量化操作。
+        tmp_flag_col = f"_{col}_pos_flag"
+        df[tmp_flag_col] = pd.to_numeric(df[col], errors='coerce').gt(0).astype(int)
+        pos_ratio = grouped[tmp_flag_col].sum() / group_count
+        result_df[f"{col}_positive_ratio"] = pos_ratio
+        df.drop(columns=[tmp_flag_col], inplace=True)
+
+        # 生成 {inst_id: value} 字典：
+        # 先将 inst_id 与目标列聚合为列表，再利用 apply 对每个分组
+        # 用 zip 构造字典（减少了在每个循环内部的纯 Python 操作次数）
+        details_lists = grouped.agg({inst_id_col: list, col: list})
+        result_df[f"{col}_details"] = details_lists.apply(lambda row: dict(zip(row[inst_id_col], row[col])), axis=1)
+
+    return result_df.reset_index()
+
+
+def get_common_data():
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
+    combinations_list = []
+
+    for inst_id in inst_id_list:
+        file_path = f'temp_back\statistic_results_final_{inst_id}_False.parquet'
+        if os.path.exists(file_path):
+            df = pd.read_parquet(file_path)
+            df['inst_id'] = inst_id
+            df = compute_rewarded_penalty_from_flat_df(df)
+
+            df = df[df['max_consecutive_loss'] > -30]
+            combinations_list.append(df)
+    all_df = pd.concat(combinations_list, ignore_index=True)
+    result = group_statistics_and_inst_details(
+        all_df,
+        group_cols=['kai_column', 'pin_column'],
+        target_cols=[
+            'max_consecutive_loss',
+            'net_profit_rate',
+            'kai_count',
+            'score_final'
+        ]
+    )
+    return result
+
+
 def example():
+    get_common_data()
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
     is_reverse = False
     # pd.read_parquet(f'temp/final_good_BTC_True_filter_all.parquet')
@@ -436,7 +517,7 @@ def example():
         output_path = f'temp_back/{inst_id}_{is_reverse}_pure_data.parquet'
         if os.path.exists(output_path):
             result_df = pd.read_parquet(output_path)
-            df = pd.read_parquet('temp_back\debug.parquet')
+            df = pd.read_parquet(f'temp_back\statistic_results_final_{inst_id}_False.parquet')
             df = compute_rewarded_penalty_from_flat_df(df)
 
             result_df = add_raw_diff_columns(result_df)

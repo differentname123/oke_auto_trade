@@ -907,17 +907,16 @@ def validation(market_data_file):
     df_local["timestamp"] = pd.to_datetime(df_local["timestamp"])
 
     print(f"Loaded market data: 共 {df_local.shape[0]} 行")
+    is_reverse = False
 
     # 3. 设置主进程全局变量，用于预计算
     global df
     df = df_local
 
     # 注意：这里只读取需要的列： kai_column 和 pin_column
-    stat_df_file_list = [f'temp_back/{inst_id}_False_pure_data.parquet']
+    stat_df_file_list = [f'temp/2024_1m_5000000_{inst_id}_donchian_1_20_1_relate_400_1000_100_1_40_6_cci_1_2000_1000_1_2_1_atr_1_3000_3000_boll_1_3000_100_1_50_2_rsi_1_1000_500_abs_1_100_100_40_100_1_macd_300_1000_50_macross_1_3000_100_1_3000_100__0_{is_reverse}_stats_debug.parquet']
     for stat_df_file in stat_df_file_list:
         try:
-            stat_df_file = f'temp/2024_1m_5000000_BTC_donchian_1_20_1_relate_400_1000_100_1_40_6_cci_1_2000_1000_1_2_1_atr_1_3000_3000_boll_1_3000_100_1_50_2_rsi_1_1000_500_abs_1_100_100_40_100_1_macd_300_1000_50_macross_1_3000_100_1_3000_100__0_False_stats_debug.parquet'
-
             # 1. 加载 stat_df 文件（只读取必要的两列）
             stat_df = pd.read_parquet(stat_df_file, columns=["kai_column", "pin_column"])
             # 去重
@@ -952,7 +951,7 @@ def validation(market_data_file):
 
             # 根据内存限制调整进程数
             max_memory = 50  # 单位：GB
-            pool_processes = min(25, int(max_memory * 1024 * 1024 * 1024 / total_size) if total_size > 0 else 1)
+            pool_processes = min(10, int(max_memory * 1024 * 1024 * 1024 / total_size) if total_size > 0 else 1)
             print(f"进程数限制为 {pool_processes}，根据内存限制调整。")
 
             # 定义每个批次处理的 pair 数量
@@ -967,8 +966,7 @@ def validation(market_data_file):
                 # 获取当前时间
                 current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 start_time = time.time()
-                output_file = os.path.join("temp_back",
-                                           f"debug.parquet")
+                output_file = os.path.join("temp_back", f"{inst_id}_{is_reverse}_{batch_index}.parquet")
                 # if os.path.exists(output_file):
                 #     print(f"{output_file} 已存在，跳过处理。")
                 #     batch_output_files.append(output_file)
@@ -977,10 +975,10 @@ def validation(market_data_file):
                 batch_pairs = pairs[start_idx:end_idx]
                 print(f"Processing batch {batch_index + 1}/{total_batches} with {len(batch_pairs)} pairs... [{current_time}]")
 
-                with multiprocessing.Pool(processes=10,
+                with multiprocessing.Pool(processes=pool_processes,
                                           initializer=init_worker_with_signals,
                                           initargs=(GLOBAL_SIGNALS, df)) as pool:
-                    results = pool.map(process_signal_pair, batch_pairs, chunksize=1)
+                    results = pool.map(process_signal_pair, batch_pairs, chunksize=1000)
 
                 # 过滤掉返回 None 的结果
                 results_filtered = [r for r in results if r[2] is not None]
@@ -1004,7 +1002,7 @@ def validation(market_data_file):
                     print(f"文件 {file} 不存在，跳过加载。")
             if merged_dfs:
                 merged_df = pd.concat(merged_dfs, ignore_index=True)
-                final_output_file = os.path.join("temp_back", f"statistic_results_final.parquet")
+                final_output_file = os.path.join("temp_back", f"statistic_results_final_{inst_id}_{is_reverse}.parquet")
                 merged_df.to_parquet(final_output_file, index=False, compression='snappy')
                 print(f"所有批次结果已合并，并保存到 {final_output_file} (共 {merged_df.shape[0]} 行)。")
             else:
@@ -1281,14 +1279,12 @@ if __name__ == "__main__":
         # "kline_data/origin_data_1m_10000_XRP-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_10000_PEPE-USDT-SWAP.csv",
 
-        "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
-
-        # "kline_data/origin_data_1m_200000_BTC-USDT-SWAP_2025-05-01.csv",
-        # "kline_data/origin_data_1m_200000_SOL-USDT-SWAP_2025-05-01.csv",
-        # "kline_data/origin_data_1m_200000_ETH-USDT-SWAP_2025-05-01.csv",
-        # "kline_data/origin_data_1m_200000_TON-USDT-SWAP_2025-05-01.csv",
-        # "kline_data/origin_data_1m_200000_DOGE-USDT-SWAP_2025-05-01.csv",
-        # "kline_data/origin_data_1m_200000_XRP-USDT-SWAP_2025-05-01.csv",
+        # "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_DOGE-USDT-SWAP_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_XRP-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_200000_PEPE-USDT-SWAP_2025-05-01.csv",
         # "kline_data/origin_data_1m_10000_ETH-USDT-SWAP_2025-04-07.csv",
         # "kline_data/origin_data_1m_10000_SOL-USDT-SWAP_2025-04-07.csv",
