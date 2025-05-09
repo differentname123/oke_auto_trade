@@ -217,14 +217,11 @@ def fast_check(k_idx, k_price, p_idx, p_price, min_trades=10, loss_th=-30.0, is_
     n_k = k_idx.shape[0]
     n_p = p_idx.shape[0]
 
-    # # 如果任一信号触发次数少于最小交易次数，直接返回 False
-    # if n_k < min_trades or n_p < min_trades:
-    #     return False
-
     trades = 0
     cur_sum = 0.0
     min_sum = 0.0
     trade_count = 0
+    total_profit = 0.0  # 新增变量，累计所有交易的利润
 
     # 记录上一次平仓的时刻，未平仓前不允许新开仓
     last_closed_time = -1  # 假设所有索引均 >= 0
@@ -244,8 +241,12 @@ def fast_check(k_idx, k_price, p_idx, p_price, min_trades=10, loss_th=-30.0, is_
         # 执行一笔交易：开仓在 k_idx[i]，平仓在 p_idx[j]
         chg = (p_price[j] - k_price[i]) / k_price[i] * 100.0
         if not is_reverse:
-            chg = - chg
+            chg = -chg
         pnl = chg - 0.07  # 计算收益率并扣除手续费
+
+        # 累计总利润（这里的 pnl 单位为百分比）
+        total_profit += pnl
+
         trades += 1
 
         # 累计连续亏损计算逻辑
@@ -270,7 +271,8 @@ def fast_check(k_idx, k_price, p_idx, p_price, min_trades=10, loss_th=-30.0, is_
         i += 1
         j += 1
 
-    return (trades >= min_trades) and (min_sum >= loss_th)
+    # 最终返回条件：交易数达到要求、累计最大亏损不超过阈值、且累计利润大于10
+    return (trades >= min_trades) and (min_sum >= loss_th) and (total_profit > 10)
 
 
 def check_max_loss(df, kai_column, pin_column, is_reverse=False):
@@ -541,7 +543,7 @@ def evaluate_candidate(candidate):
     若回测条件不满足，则返回 None。
     """
     long_sig, short_sig = candidate
-    check_result = check_max_loss(df, long_sig, short_sig, is_reverse=False)
+    check_result = check_max_loss(df, long_sig, short_sig, is_reverse=IS_REVERSE)
     if check_result:
         return (long_sig, short_sig)
     return None
@@ -582,7 +584,7 @@ def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, 
             return
     batch_index = 0
     start_time = time.time()
-    pool_processes = 30
+    pool_processes = 32
     chunk_size = max(100, batch_size // (pool_processes * 20))
 
     print(f"开始穷举回测，批次大小: {batch_size}，进程池大小: {pool_processes}，chunk_size: {chunk_size}。时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
