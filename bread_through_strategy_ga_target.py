@@ -317,41 +317,75 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         kai_idx, kai_prices = op_signal(df, kai_column)
         pin_idx, pin_prices = op_signal(df, pin_column)
 
-    # if (kai_idx is None or pin_idx is None or kai_idx.size < 100 or pin_idx.size < 100):
-    #     return None, None
-
     # 根据信号索引提取子数据集
     kai_data_df = df.iloc[kai_idx].copy()
     pin_data_df = df.iloc[pin_idx].copy()
     kai_data_df["kai_price"] = kai_prices
     pin_data_df["pin_price"] = pin_prices
 
-    # 信号匹配：使用 np.searchsorted 找到 pin 的匹配位置
-    kai_idx_arr = np.asarray(kai_data_df.index)
-    pin_idx_arr = np.asarray(pin_data_df.index)
-    pin_match_indices = np.searchsorted(pin_idx_arr, kai_idx_arr, side="right")
-    valid_mask = pin_match_indices < len(pin_idx_arr)
-    # if valid_mask.sum() == 0:
-    #     return None, None
+    ############################################################################
+    # 修改后的信号匹配逻辑：确保一个 idx 不能既作为平仓又作为开仓信号
+    #
+    # 说明：
+    # 1. 先获取已排序的开仓（kai）和平仓（pin）的索引列表。
+    # 2. 遍历开仓信号，对于每个开仓信号，找到第一个严格大于当前开仓信号的平仓信号，
+    #    并且该平仓信号未被使用过。
+    # 3. 一旦成功匹配，将平仓信号记录下来，并更新“最后平仓信号”，后续的开仓信号必须大于此值。
+    #
+    # 在给定的例子中，会匹配为：
+    #    (1,2)  → 平仓2使用后，不再允许2作为开仓信号
+    #    (3,5)
+    #    (6,10)
+    ############################################################################
 
-    # 只保留有匹配的交易
-    kai_data_df = kai_data_df.iloc[valid_mask].copy()
-    kai_idx_valid = kai_idx_arr[valid_mask]
-    pin_match_indices_valid = pin_match_indices[valid_mask]
-    matched_pin = pin_data_df.iloc[pin_match_indices_valid].copy()
+    # 取出开仓信号和平仓信号的索引（假定 DataFrame 的索引已经排序）
+    kai_idx_sorted = list(kai_data_df.index)
+    pin_idx_sorted = list(pin_data_df.index)
 
-    # 增加匹配的 pin 数据
+    matched_pairs = []  # 存放匹配的交易对，形式为 (entry_idx, exit_idx)
+    last_exit = -float('inf')  # 上一笔交易的平仓信号索引
+    pin_ptr = 0  # 平仓信号的指针
+
+    for kai_val in kai_idx_sorted:
+        # 如果当前开仓信号不大于上一笔交易的平仓信号，则视为无效（已经作为平仓使用或在平仓后出现）
+        if kai_val <= last_exit:
+            continue
+
+        # 移动平仓信号指针，直到找到严格大于 kai_val 的平仓信号
+        while pin_ptr < len(pin_idx_sorted) and pin_idx_sorted[pin_ptr] <= kai_val:
+            pin_ptr += 1
+
+        # 如果没有找到合适的平仓信号则退出
+        if pin_ptr >= len(pin_idx_sorted):
+            break
+
+        exit_val = pin_idx_sorted[pin_ptr]
+        matched_pairs.append((kai_val, exit_val))
+        last_exit = exit_val  # 更新最后一笔交易的平仓信号
+        pin_ptr += 1  # 使用过的平仓信号后移，确保不再复用
+
+    # 如果匹配不到交易，则返回 None
+    if not matched_pairs:
+        return None, None
+
+    # 构造最终的 kai_data_df，只保留匹配到的开仓信号数据
+    matched_kai_idx = [pair[0] for pair in matched_pairs]
+    kai_data_df = kai_data_df.loc[matched_kai_idx].copy()
+
+    # 提取匹配的平仓信号数据
+    matched_pin_idx = [pair[1] for pair in matched_pairs]
+    matched_pin = pin_data_df.loc[matched_pin_idx].copy()
+
+    # 将匹配的平仓数据加入到开仓数据中
     kai_data_df["pin_price"] = matched_pin["pin_price"].values
     kai_data_df["pin_time"] = matched_pin["timestamp"].values
-    kai_data_df["hold_time"] = matched_pin.index.values - kai_idx_valid
+    # 这里假设索引即代表时间，持有时间为平仓索引减去开仓索引
+    kai_data_df["hold_time"] = np.array(matched_pin_idx) - np.array(matched_kai_idx)
+    ############################################################################
 
-    # 根据传入的参数判断做多或做空策略
-    is_long = (("long" in kai_column.lower()) if not is_reverse else ("short" in kai_column.lower()))
-
+    # 如果需过滤重复的平仓时间记录（is_filter==True），则进行排序去重
     if is_filter:
-        # 排序并去除重复的pin_time记录
         kai_data_df = kai_data_df.sort_values("timestamp").drop_duplicates("pin_time", keep="first")
-
     trade_count = len(kai_data_df)
 
     # 使用 pin_time 的价格映射 kai_price，如果存在更新价格
@@ -361,7 +395,8 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         kai_data_df["kai_price"] = mapped_prices.combine_first(kai_data_df["kai_price"])
     modification_rate = (100 * mapped_prices.notna().sum() / trade_count) if trade_count else 0
 
-    # 计算盈亏比例（百分比）并扣除交易成本
+    # 根据做多或做空策略计算盈亏比例（百分比）并扣除交易成本
+    is_long = (("long" in kai_column.lower()) if not is_reverse else ("short" in kai_column.lower()))
     if is_long:
         profit_series = ((kai_data_df["pin_price"] - kai_data_df["kai_price"]) /
                          kai_data_df["kai_price"] * 100).round(4)
@@ -379,12 +414,9 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     fix_profit = safe_round(kai_data_df[mapped_prices.notna()]["true_profit"].sum(), ndigits=4)
     net_profit_rate = kai_data_df["true_profit"].sum() - fix_profit
 
-    # 计算连续盈利金额或者亏损的序列，函数 calculate_max_sequence_numba 和 calculate_max_profit_numba 假设已定义
+    # 计算连续盈利或亏损序列（假设 calculate_max_sequence_numba 与 calculate_max_profit_numba 已定义）
     profits_arr = kai_data_df["true_profit"].values
     max_loss, max_loss_start_idx, max_loss_end_idx, loss_trade_count = calculate_max_sequence_numba(profits_arr)
-    # if net_profit_rate < 25 or trade_count < 25 or max_loss < -30:
-    #     return None, None
-
     if max_loss_start_idx < len(kai_data_df) and max_loss_end_idx < len(kai_data_df):
         max_loss_hold_time = kai_data_df.index[max_loss_end_idx] - kai_data_df.index[max_loss_start_idx]
     else:
@@ -411,7 +443,7 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     hold_time_mean = kai_data_df["hold_time"].mean() if trade_count else 0
     max_hold_time = kai_data_df["hold_time"].max() if trade_count else 0
 
-    # 使用整个原始 df 的最早和最晚时间作为统计范围，确保不同信号使用统一范围
+    # 使用整个原始 df 的最早和最晚时间作为统计范围
     full_start_time = df["timestamp"].min()
     full_end_time = df["timestamp"].max()
 
@@ -467,10 +499,6 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
 
     hold_time_std = kai_data_df["hold_time"].std()
 
-    # # 当统计时间范围中活跃的月份或周不足时，则返回 None
-    # if active_week_ratio < 0.5 or active_month_ratio < 0.5:
-    #     return None, None
-
     # 统计 top 10% 盈利和亏损的比率
     if not profit_df.empty:
         top_profit_count = max(1, int(np.ceil(len(profit_df) * 0.1)))
@@ -493,10 +521,6 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     common_index = kai_data_df.index.intersection(pin_data_df.index)
     same_count_rate = safe_round(
         100 * len(common_index) / min(len(kai_data_df), len(pin_data_df)) if trade_count else 0, 4)
-
-
-    # if true_profit_mean < 10 or max_hold_time > 10000 or hold_time_mean > 3000 or top_profit_ratio > 0.5 or monthly_loss_rate > 0.2 or weekly_loss_rate > 0.2 or monthly_loss_rate > 0.2:
-    #     return None, None
 
     statistic_dict = {
         "kai_column": kai_column,
@@ -884,7 +908,7 @@ def validation(market_data_file):
     stat_df_file_list = [f'temp_back/{inst_id}_False_pure_data.parquet']
     for stat_df_file in stat_df_file_list:
         try:
-            stat_df_file = f'temp/2020_1m_5000000_BTC_donchian_1_20_1_relate_400_1000_100_1_40_6_cci_1_2000_1000_1_2_1_atr_1_3000_3000_boll_1_3000_100_1_50_2_rsi_1_1000_500_abs_1_100_100_40_100_1_macd_300_1000_50_macross_1_3000_100_1_3000_100__0_False_stats_debug.parquet'
+            stat_df_file = f'temp/2024_1m_5000000_BTC_donchian_1_20_1_relate_400_1000_100_1_40_6_cci_1_2000_1000_1_2_1_atr_1_3000_3000_boll_1_3000_100_1_50_2_rsi_1_1000_500_abs_1_100_100_40_100_1_macd_300_1000_50_macross_1_3000_100_1_3000_100__0_False_stats_debug.parquet'
 
             # 1. 加载 stat_df 文件（只读取必要的两列）
             stat_df = pd.read_parquet(stat_df_file, columns=["kai_column", "pin_column"])
@@ -920,7 +944,7 @@ def validation(market_data_file):
 
             # 根据内存限制调整进程数
             max_memory = 50  # 单位：GB
-            pool_processes = min(20, int(max_memory * 1024 * 1024 * 1024 / total_size) if total_size > 0 else 1)
+            pool_processes = min(25, int(max_memory * 1024 * 1024 * 1024 / total_size) if total_size > 0 else 1)
             print(f"进程数限制为 {pool_processes}，根据内存限制调整。")
 
             # 定义每个批次处理的 pair 数量
@@ -1249,7 +1273,7 @@ if __name__ == "__main__":
         # "kline_data/origin_data_1m_10000_XRP-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_10000_PEPE-USDT-SWAP.csv",
 
-        "kline_data/origin_data_1m_500000_BTC-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
 
         # "kline_data/origin_data_1m_200000_BTC-USDT-SWAP_2025-05-01.csv",
         # "kline_data/origin_data_1m_200000_SOL-USDT-SWAP_2025-05-01.csv",
