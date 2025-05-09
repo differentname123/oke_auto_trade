@@ -22,6 +22,8 @@ import multiprocessing
 import numpy as np
 import pandas as pd
 from numba import njit
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from itertools import chain
 
 import warnings
 import pandas as pd
@@ -219,14 +221,14 @@ def op_signal(df, sig):
     if p_np.dtype == np.float64:
         p_np = p_np.astype(np.float32)
     indices = np.nonzero(s_np)[0]
-    if indices.size < 100:
-        return None
-    # 判断最大idx和最小idx的差值是否大于0.1 * len(df)
-    if len(df) > 0:
-        max_idx = indices.max()
-        min_idx = indices.min()
-        if max_idx - min_idx < 0.1 * len(df):
-            return None
+    # if indices.size < 100:
+    #     return None
+    # # 判断最大idx和最小idx的差值是否大于0.1 * len(df)
+    # if len(df) > 0:
+    #     max_idx = indices.max()
+    #     min_idx = indices.min()
+    #     if max_idx - min_idx < 0.1 * len(df):
+    #         return None
     return (indices.astype(np.int32), p_np[indices])
 
 
@@ -575,7 +577,7 @@ def evaluate_candidate(candidate):
     return None
 
 
-def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, key_name="brute_force_results"):
+def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, key_name="brute_force_results",all_files_df=None):
     """
     穷举遍历所有 (长信号, 短信号) 组合，每 batch_size 个组合为一个批次，
     使用多进程并行计算每个候选组合的回测结果，保存每个批次的有效回测结果到文件。
@@ -585,9 +587,25 @@ def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, 
       1. 在整个遍历过程中只创建一次进程池，避免每个批次中频繁创建/销毁进程导致的长尾问题。
       2. 根据当前批次任务数量动态设置 chunksize，降低进程间切换的消耗。
     """
-    total_pairs = len(long_signals) * len(short_signals)
-    print(f"候选组合总数: {total_pairs} 预计批次数: {total_pairs // batch_size + 1}")
-    candidate_gen = candidate_pairs_generator(long_signals, short_signals)
+    if all_files_df is None:
+        total_pairs = len(long_signals) * len(short_signals)
+        predict_batch_number = total_pairs // batch_size + 1
+        files = [f for f in os.listdir(checkpoint_dir) if key_name in f]
+        if len(files) >= predict_batch_number:
+            print(f"已存在 {len(files)} 个批次的回测结果，跳过。")
+            return
+
+        print(f"候选组合总数: {total_pairs} 预计批次数: {total_pairs // batch_size + 1}")
+        candidate_gen = candidate_pairs_generator(long_signals, short_signals)
+    else:
+        # 直接从 all_files_df 中获取所有信号对
+        candidate_gen = zip(all_files_df["kai_column"].to_numpy(), all_files_df["pin_column"].to_numpy())
+        predict_batch_number = len(all_files_df) // batch_size + 1
+        files = [f for f in os.listdir(checkpoint_dir) if key_name in f]
+        if len(files) >= predict_batch_number:
+            print(f"已存在 {len(files)} 个批次的回测结果，跳过。")
+            return
+        print(f"候选组合总数: {len(files)} 预计批次数: {predict_batch_number}")
     batch_index = 0
     start_time = time.time()
     pool_processes = 30
@@ -595,7 +613,7 @@ def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, 
 
     print(f"开始穷举回测，批次大小: {batch_size}，进程池大小: {pool_processes}，chunk_size: {chunk_size}。时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
     # 创建持久进程池，避免多个批次中重复创建/销毁进程的开销
-    pool = multiprocessing.Pool(processes=pool_processes,
+    pool = multiprocessing.Pool(processes=1,
                                 initializer=init_worker_brute,
                                 initargs=(GLOBAL_SIGNALS, df))
     print(f"进程池已创建，共 {pool._processes} 个进程。耗时 {time.time() - start_time:.2f} 秒")
@@ -605,6 +623,7 @@ def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, 
             batch = list(itertools.islice(candidate_gen, batch_size))
             if not batch:
                 break
+            print(f"开始处理批次 {batch_index}，当前时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
             stats_file_name = os.path.join(checkpoint_dir, f"{key_name}_{batch_index}_{IS_REVERSE}_stats_debug.parquet")
             if os.path.exists(stats_file_name):
                 print(f"批次 {batch_index} 的统计文件已存在，跳过。")
@@ -624,12 +643,47 @@ def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, 
         pool.close()
         pool.join()
 
+
+def load_file(file_path):
+    try:
+        temp_df = pd.read_parquet(file_path)
+        return temp_df
+    except Exception as e:
+        print(f"加载 {file_path} 时出错：{e}")
+        return None
+
+
+def load_files_in_parallel(checkpoint_dir, pre_key_name):
+    all_files = []
+
+    if pre_key_name is not None:
+        files = [f for f in os.listdir(checkpoint_dir) if pre_key_name in f]
+        print(f"加载 {len(files)} 个数据文件 ...")
+        file_paths = [os.path.join(checkpoint_dir, file) for file in files]
+        for file_path in file_paths:
+            result = load_file(file_path)
+            all_files.append(result)
+
+        if all_files:
+            # 合并所有 DataFrame（避免不必要的复制）
+            all_files_df = pd.concat(all_files, ignore_index=True, copy=False)
+
+            # 精准内存占用
+            mem_usage_mb = all_files_df.memory_usage(deep=True).sum() / (1024 * 1024)
+            print(f"all_files_df 内存占用: {mem_usage_mb:.2f} MB")
+
+            # 更快的方式统计信号集合
+            all_signals = set(chain(all_files_df["kai_column"], all_files_df["pin_column"]))
+            print(f'加载 {len(all_files)} 个数据，当前信号数量: {len(all_signals)}。 信号对个数: {len(all_files_df)}')
+        return all_files_df, all_signals
+
 def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
     """
     加载数据后直接对所有 (长信号, 短信号) 组合进行回测，
     每一定数量的组合为一个批次，保存回测结果。
     """
     os.makedirs("temp", exist_ok=True)
+    pre_key_name = None
     base_name = os.path.basename(data_path).replace("-USDT-SWAP.csv", "").replace("origin_data_", "")
     base_name = base_name.split("-")[0]
     df_local = pd.read_csv(data_path)
@@ -646,6 +700,7 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
     year_list = df_local["year"].unique()
     # 生成所有候选信号
     all_signals, key_name = generate_all_signals()
+    all_files_df = None
     # 对预计算使用所有信号（长短信号均在 all_signals 内）
     print(f"生成 {len(all_signals)} 候选信号。")
     for year in year_list:
@@ -668,11 +723,15 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
         # temp_df_local.to_csv("kline_data/origin_data_1m_500000_BTC-USDT-SWAP_2025-05-06.csv")
         global df
         df = temp_df_local.copy()
+
+        if pre_key_name is not None:
+            all_files_df, all_signals = load_files_in_parallel(checkpoint_dir, pre_key_name)
+
         # 预计算所有候选信号数据
         precomputed = load_or_compute_precomputed_signals(df, all_signals, f'{year}_{base_name}_{key_name}')
         total_size = sys.getsizeof(precomputed) + sum(
             sys.getsizeof(sig) + s.nbytes + p.nbytes for sig, (s, p) in precomputed.items())
-        print(f"预计算信号内存大小: {total_size / (1024 * 1024):.2f} MB")
+        print(f"预计算信号内存大小: {total_size / (1024 * 1024):.2f} MB 信号数量: {len(precomputed)} 总体信号个数: {len(all_signals)}")
 
         global GLOBAL_SIGNALS
         GLOBAL_SIGNALS = precomputed
@@ -682,8 +741,8 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
 
         # 穷举回测所有候选组合，每一批次计算并保存结果
         brute_force_backtesting(df, candidate_signals, candidate_signals, batch_size=10000000,
-                                                key_name=f'{year}_{base_name}_{key_name}')
-        break
+                                                key_name=f'{year}_{base_name}_{key_name}', all_files_df=all_files_df)
+        pre_key_name = f'{year}_{base_name}_{key_name}'
 
 def example():
     """
