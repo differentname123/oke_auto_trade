@@ -181,36 +181,6 @@ def compute_signal(df, col_name):
         raise ValueError(f"未知信号类型: {signal_type}")
 
 
-@njit
-def calculate_max_sequence_numba(series):
-    """
-    利用 numba 加速计算连续亏损（最小累计收益）及对应的交易数量与区间。
-    """
-    n = series.shape[0]
-    min_sum = 0.0
-    cur_sum = 0.0
-    start_idx = 0
-    min_start = 0
-    min_end = 0
-    trade_count = 0
-    max_trade_count = 0
-    for i in range(n):
-        if cur_sum == 0:
-            start_idx = i
-            trade_count = 0
-        cur_sum += series[i]
-        trade_count += 1
-        if cur_sum < min_sum:
-            min_sum = cur_sum
-            min_start = start_idx
-            min_end = i
-            max_trade_count = trade_count
-        if cur_sum > 0:
-            cur_sum = 0
-            trade_count = 0
-    return min_sum, min_start, min_end, max_trade_count
-
-
 def op_signal(df, sig):
     """
     计算单个信号，并筛选出交易次数大于 100 的稀疏信号。
@@ -247,9 +217,9 @@ def fast_check(k_idx, k_price, p_idx, p_price, min_trades=10, loss_th=-30.0, is_
     n_k = k_idx.shape[0]
     n_p = p_idx.shape[0]
 
-    # 如果任一信号触发次数少于最小交易次数，直接返回 False
-    if n_k < min_trades or n_p < min_trades:
-        return False
+    # # 如果任一信号触发次数少于最小交易次数，直接返回 False
+    # if n_k < min_trades or n_p < min_trades:
+    #     return False
 
     trades = 0
     cur_sum = 0.0
@@ -591,21 +561,25 @@ def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, 
         total_pairs = len(long_signals) * len(short_signals)
         predict_batch_number = total_pairs // batch_size + 1
         files = [f for f in os.listdir(checkpoint_dir) if key_name in f]
+        print(f"候选组合总数: {total_pairs} 预计批次数: {total_pairs // batch_size + 1}")
+        print(f"已存在 {len(files)} 个批次的回测结果")
         if len(files) >= predict_batch_number:
             print(f"已存在 {len(files)} 个批次的回测结果，跳过。")
             return
 
-        print(f"候选组合总数: {total_pairs} 预计批次数: {total_pairs // batch_size + 1}")
         candidate_gen = candidate_pairs_generator(long_signals, short_signals)
     else:
+        # 只保留all_files_df信号在long_signals和short_signals中的组合
+        all_files_df = all_files_df[all_files_df["kai_column"].isin(long_signals) & all_files_df["pin_column"].isin(short_signals)]
         # 直接从 all_files_df 中获取所有信号对
         candidate_gen = zip(all_files_df["kai_column"].to_numpy(), all_files_df["pin_column"].to_numpy())
         predict_batch_number = len(all_files_df) // batch_size + 1
         files = [f for f in os.listdir(checkpoint_dir) if key_name in f]
+        print(f"候选组合总数: {len(all_files_df)} 预计批次数: {predict_batch_number}")
+        print(f"已存在 {len(files)} 个批次的回测结果")
         if len(files) >= predict_batch_number:
             print(f"已存在 {len(files)} 个批次的回测结果，跳过。")
             return
-        print(f"候选组合总数: {len(all_files_df)} 预计批次数: {predict_batch_number}")
     batch_index = 0
     start_time = time.time()
     pool_processes = 30
