@@ -605,7 +605,7 @@ def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, 
         if len(files) >= predict_batch_number:
             print(f"已存在 {len(files)} 个批次的回测结果，跳过。")
             return
-        print(f"候选组合总数: {len(files)} 预计批次数: {predict_batch_number}")
+        print(f"候选组合总数: {len(all_files_df)} 预计批次数: {predict_batch_number}")
     batch_index = 0
     start_time = time.time()
     pool_processes = 30
@@ -613,7 +613,7 @@ def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, 
 
     print(f"开始穷举回测，批次大小: {batch_size}，进程池大小: {pool_processes}，chunk_size: {chunk_size}。时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
     # 创建持久进程池，避免多个批次中重复创建/销毁进程的开销
-    pool = multiprocessing.Pool(processes=1,
+    pool = multiprocessing.Pool(processes=pool_processes,
                                 initializer=init_worker_brute,
                                 initargs=(GLOBAL_SIGNALS, df))
     print(f"进程池已创建，共 {pool._processes} 个进程。耗时 {time.time() - start_time:.2f} 秒")
