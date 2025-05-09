@@ -633,7 +633,7 @@ def load_files_in_parallel(checkpoint_dir, pre_key_name):
     all_files = []
 
     if pre_key_name is not None:
-        files = [f for f in os.listdir(checkpoint_dir) if pre_key_name in f]
+        files = [f for f in os.listdir(checkpoint_dir) if pre_key_name in f and str(IS_REVERSE) in f]
         print(f"加载 {len(files)} 个数据文件 ...")
         file_paths = [os.path.join(checkpoint_dir, file) for file in files]
         for file_path in file_paths:

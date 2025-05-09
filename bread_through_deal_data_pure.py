@@ -491,9 +491,12 @@ def get_common_data():
             df['inst_id'] = inst_id
             df = compute_rewarded_penalty_from_flat_df(df)
 
-            df = df[df['max_consecutive_loss'] > -30]
+            # df = df[df['max_consecutive_loss'] > -30]
             combinations_list.append(df)
     all_df = pd.concat(combinations_list, ignore_index=True)
+    # 将all_df按照['kai_column', 'pin_column']分组，删除只有一行的组
+    group_sizes = all_df.groupby(['kai_column', 'pin_column'])['kai_column'].transform('size')
+    all_df = all_df[group_sizes > 1]
     result = group_statistics_and_inst_details(
         all_df,
         group_cols=['kai_column', 'pin_column'],
