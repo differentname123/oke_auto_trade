@@ -950,8 +950,8 @@ def validation(market_data_file):
             del stat_df
 
             # 根据内存限制调整进程数
-            max_memory = 50  # 单位：GB
-            pool_processes = min(10, int(max_memory * 1024 * 1024 * 1024 / total_size) if total_size > 0 else 1)
+            max_memory = 40  # 单位：GB
+            pool_processes = min(20, int(max_memory * 1024 * 1024 * 1024 / total_size) if total_size > 0 else 1)
             print(f"进程数限制为 {pool_processes}，根据内存限制调整。")
 
             # 定义每个批次处理的 pair 数量
@@ -1281,10 +1281,10 @@ if __name__ == "__main__":
 
         # "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
-        "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_DOGE-USDT-SWAP_2025-05-06.csv",
-        # "kline_data/origin_data_1m_5000000_XRP-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_XRP-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_200000_PEPE-USDT-SWAP_2025-05-01.csv",
         # "kline_data/origin_data_1m_10000_ETH-USDT-SWAP_2025-04-07.csv",
         # "kline_data/origin_data_1m_10000_SOL-USDT-SWAP_2025-04-07.csv",
