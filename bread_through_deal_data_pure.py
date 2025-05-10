@@ -481,7 +481,7 @@ def group_statistics_and_inst_details(df: pd.DataFrame,
 
 
 def get_common_data():
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
     combinations_list = []
 
     for inst_id in inst_id_list:
@@ -512,7 +512,7 @@ def get_common_data():
 
 def example():
     get_common_data()
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
     is_reverse = False
     # pd.read_parquet(f'temp/final_good_BTC_True_filter_all.parquet')
 

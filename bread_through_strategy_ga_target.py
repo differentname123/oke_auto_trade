@@ -878,7 +878,7 @@ def load_or_compute_precomputed_signals(df, signals, key_name):
 def validation(market_data_file):
     base_name = os.path.basename(market_data_file)
     base_name = base_name.replace("-USDT-SWAP.csv", "").replace("origin_data_", "")
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
     for inst_id in inst_id_list:
         if inst_id in base_name:
             break
@@ -1284,7 +1284,8 @@ if __name__ == "__main__":
         # "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_DOGE-USDT-SWAP_2025-05-06.csv",
-        "kline_data/origin_data_1m_5000000_XRP-USDT-SWAP_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_XRP-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_OKB-USDT_2025-05-06.csv",
         # "kline_data/origin_data_1m_200000_PEPE-USDT-SWAP_2025-05-01.csv",
         # "kline_data/origin_data_1m_10000_ETH-USDT-SWAP_2025-04-07.csv",
         # "kline_data/origin_data_1m_10000_SOL-USDT-SWAP_2025-04-07.csv",
