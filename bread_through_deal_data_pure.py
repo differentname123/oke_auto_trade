@@ -481,9 +481,17 @@ def group_statistics_and_inst_details(df: pd.DataFrame,
 
 
 def get_common_data():
-    # df = pd.read_parquet('temp_back/temp.parquet')
+    exclude_str = ['macross', 'rsi', 'macd', 'cci', 'atr']
+    final_good_df = pd.read_parquet('temp_back/temp.parquet')
+    for exclude in exclude_str:
+        final_good_df = final_good_df[~final_good_df['kai_column'].str.contains(exclude)]
+        final_good_df = final_good_df[~final_good_df['pin_column'].str.contains(exclude)]
+
+
+
+    # df = pd.read_parquet('temp_back/statistic_results_final_BTC_True.parquet')
     # # 获取kai_column和pin_column的所有唯一值
-    # kai_column = df['kai_column'].unique().tolist()
+    kai_column = df['kai_column'].unique().tolist()
     # pin_column = df['pin_column'].unique().tolist()
     # all_column = kai_column + pin_column
     # # 去重
@@ -509,7 +517,7 @@ def get_common_data():
             df['inst_id'] = inst_id
             df = compute_rewarded_penalty_from_flat_df(df)
 
-            df = df[df['max_consecutive_loss'] > -30]
+            # df = df[df['max_consecutive_loss'] > -30]
             combinations_list.append(df)
     all_df = pd.concat(combinations_list, ignore_index=True)
     # 将all_df按照['kai_column', 'pin_column']分组，删除只有一行的组
@@ -525,6 +533,7 @@ def get_common_data():
             'score_final'
         ]
     )
+    result.to_parquet(f'temp_back/temp.parquet', index=False)
     return result
 
 

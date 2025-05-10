@@ -820,7 +820,7 @@ def process_signal_pair(pair):
     kai_column, pin_column = pair
     try:
         _, stat = get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is_detail=False,
-                                                is_reverse=False)
+                                                is_reverse=True)
     except Exception as e:
         print(f"Error processing pair ({kai_column}, {pin_column}): {e}")
         stat = None
@@ -837,7 +837,7 @@ def precompute_signals(df, signals):
     对传入的 signals 列表（信号名称）采用多进程进行预计算，返回 dict 格式数据
     """
     num_workers = multiprocessing.cpu_count()
-    pool = multiprocessing.Pool(processes=20, initializer=init_worker1, initargs=(df,))
+    pool = multiprocessing.Pool(processes=30, initializer=init_worker1, initargs=(df,))
     results = pool.map(process_signal, signals)
     pool.close()
     pool.join()
@@ -907,7 +907,7 @@ def validation(market_data_file):
     df_local["timestamp"] = pd.to_datetime(df_local["timestamp"])
 
     print(f"Loaded market data: 共 {df_local.shape[0]} 行")
-    is_reverse = False
+    is_reverse = True
 
     # 3. 设置主进程全局变量，用于预计算
     global df
@@ -1280,12 +1280,12 @@ if __name__ == "__main__":
         # "kline_data/origin_data_1m_10000_PEPE-USDT-SWAP.csv",
 
         # "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
-        # "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_DOGE-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_XRP-USDT-SWAP_2025-05-06.csv",
-        "kline_data/origin_data_1m_5000000_OKB-USDT_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_OKB-USDT_2025-05-06.csv",
         # "kline_data/origin_data_1m_200000_PEPE-USDT-SWAP_2025-05-01.csv",
         # "kline_data/origin_data_1m_10000_ETH-USDT-SWAP_2025-04-07.csv",
         # "kline_data/origin_data_1m_10000_SOL-USDT-SWAP_2025-04-07.csv",

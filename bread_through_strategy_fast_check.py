@@ -576,7 +576,7 @@ def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, 
         # 直接从 all_files_df 中获取所有信号对
         candidate_gen = zip(all_files_df["kai_column"].to_numpy(), all_files_df["pin_column"].to_numpy())
         predict_batch_number = len(all_files_df) // batch_size + 1
-        files = [f for f in os.listdir(checkpoint_dir) if key_name in f]
+        files = [f for f in os.listdir(checkpoint_dir) if key_name in f and str(IS_REVERSE) in f]
         print(f"候选组合总数: {len(all_files_df)} 预计批次数: {predict_batch_number}")
         print(f"已存在 {len(files)} 个批次的回测结果")
         if len(files) >= predict_batch_number:
