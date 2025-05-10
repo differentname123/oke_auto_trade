@@ -246,6 +246,7 @@ def find_all_valid_groups(file_path):
     origin_good_df = pd.read_parquet(file_path)
 
     origin_good_df = origin_good_df[origin_good_df['max_consecutive_loss'] > -30]
+    origin_good_df = origin_good_df[origin_good_df['max_consecutive_loss'] > -30]
     good_df = pd.read_parquet(f'temp_back/temp.parquet')
     # 只保留good_df的kai_column和pin_column
     good_df = good_df[['kai_column', 'pin_column', 'group_count']]
@@ -711,22 +712,27 @@ def filter_similar_strategy():
     过滤掉太过于相似的策略。
     :return:
     """
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
-    required_columns = ['kai_count', 'net_profit_rate', 'weekly_net_profit_detail', 'max_hold_time', 'kai_column', 'pin_column', 'score_final']
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
     is_reverse_list = [False, True]
     for is_reverse in is_reverse_list:
         for inst_id in inst_id_list:
-            data_file = f'temp_back/{inst_id}_{is_reverse}_pure_data_with_future.parquet'
+            data_file = f'temp_back\statistic_results_final_{inst_id}_{is_reverse}.parquet'
+            if not os.path.exists(data_file):
+                print(f'文件不存在，跳过处理：{data_file}')
+                continue
 
             output_path = f'temp_back/{inst_id}_{is_reverse}_pure_data_with_future_filter_similar_strategy.parquet'
-            # if os.path.exists(output_path):
-            #     filtered_df = pd.read_parquet(output_path,columns=['kai_column', 'pin_column'])
-            #     data_df = pd.read_parquet(data_file)
-            #     merged_df = pd.merge(data_df, filtered_df, on=['kai_column', 'pin_column'], how='inner')
-            #     merged_df.to_parquet(f'temp/final_good_{inst_id}_false_filter_all.parquet', index=False)
-            #     print(f'文件已存在，跳过处理：{output_path}')
-            #     continue
-            data_df = pd.read_parquet(data_file, columns=required_columns)
+            data_df = pd.read_parquet(data_file)
+            origin_good_df = data_df
+            origin_good_df = origin_good_df[origin_good_df['max_consecutive_loss'] > -30]
+            good_df = pd.read_parquet(f'temp_back/temp.parquet')
+            # 只保留good_df的kai_column和pin_column
+            good_df = good_df[['kai_column', 'pin_column', 'group_count']]
+            # 将origin_good_df和good_df进行内连接，保留origin_good_df的所有列
+            origin_good_df = pd.merge(origin_good_df, good_df, on=['kai_column', 'pin_column'], how='inner')
+            compute_rewarded_penalty_from_flat_df(origin_good_df)
+
+            data_df = origin_good_df
             # data_df = data_df[data_df['max_hold_time'] < 5000]
             data_df = data_df[data_df['kai_count'] > 50]
             # data_df = data_df[data_df['kai_column'].str.contains('long', na=False)]
@@ -742,10 +748,6 @@ def filter_similar_strategy():
 
 
             filtered_df.to_parquet(output_path, index=False)
-            filtered_df = pd.read_parquet(output_path,columns=['kai_column', 'pin_column'])
-            data_df = pd.read_parquet(data_file)
-            merged_df = pd.merge(data_df, filtered_df, on=['kai_column', 'pin_column'], how='inner')
-            merged_df.to_parquet(f'temp/final_good_{inst_id}_{is_reverse}_filter_all.parquet', index=False)
             print(f'保存过滤后的数据：{output_path} 长度：{len(filtered_df)}')
 
 def count_pairs_to_df(df_list):
@@ -847,9 +849,9 @@ def get_statistic_data():
 
 def example():
     # get_statistic_data()
-    # filter_similar_strategy()
+    filter_similar_strategy()
     # final_compute_corr()
-    debug()
+    # debug()
 
 
 
