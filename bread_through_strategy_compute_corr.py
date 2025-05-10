@@ -188,6 +188,48 @@ def gen_statistic_data(origin_good_df, removal_threshold=99):
                                               redundant_pairs_df['Row2'].isin(indices_to_remove))]
     return redundant_pairs_df, filtered_origin_good_df
 
+def compute_rewarded_penalty_from_flat_df(df: pd.DataFrame) -> pd.Series:
+    """
+    向量化地计算每行的(奖励 - 惩罚*100)得分，返回一个 pd.Series，可直接赋值给 df["score"]。
+    """
+    # 1. 初始化 penalty 和 reward
+    idx = df.index
+    penalty = pd.Series(0.0, index=idx)
+    reward = pd.Series(0.0, index=idx)
+
+    features = [
+        dict(col='max_consecutive_loss', thr=-20, sign=1, pf=10, power=2, rf=1, na=-10000),
+        dict(col='net_profit_rate', thr=50, sign=1, pf=10, power=2, rf=1 / 100, na=-10000),
+        dict(col='kai_count', thr=50, sign=1, pf=10, power=2, rf=1 / 100, na=-10000),
+        dict(col='active_month_ratio', thr=0.8, sign=1, pf=10000, power=2, rf=2, na=-10000),
+        dict(col='weekly_loss_rate', thr=0.2, sign=-1, pf=1000, power=2, rf=5, na=10000),
+        dict(col='monthly_loss_rate', thr=0.2, sign=-1, pf=1000, power=2, rf=5, na=10000),
+        dict(col='top_profit_ratio', thr=0.5, sign=-1, pf=1000, power=2, rf=2, na=10000),
+        dict(col='hold_time_mean', thr=3000, sign=-1, pf=1 / 10000, power=2, rf=1 / 3000, na=100000),
+        dict(col='max_hold_time', thr=10000, sign=-1, pf=1 / 10000, power=2, rf=1 / 10000, na=100000),
+        dict(col='avg_profit_rate', thr=10, sign=1, pf=1, power=2, rf=1 / 100, na=-10000),
+    ]
+
+    # 3. 逐特征向量化累加
+    for f in features:
+        # 批量取值、填缺失、转浮点
+        vals = df[f['col']].fillna(f['na']).astype(float)
+
+        if f['sign'] == 1:
+            diff_pen = (f['thr'] - vals).clip(lower=0)
+            diff_rev = (vals - f['thr']).clip(lower=0)
+        else:
+            diff_pen = (vals - f['thr']).clip(lower=0)
+            diff_rev = (f['thr'] - vals).clip(lower=0)
+
+        penalty += diff_pen.pow(f['power']) * f['pf']
+        reward += diff_rev * f['rf']
+
+    # 4. 合成最终得分
+    score = reward - penalty * 100
+    df['score_final'] = score
+    return df
+
 
 def find_all_valid_groups(file_path):
     """
@@ -202,9 +244,17 @@ def find_all_valid_groups(file_path):
     #     print(f'文件已存在，跳过处理：{output_path}')
     #     return
     origin_good_df = pd.read_parquet(file_path)
-    if len(origin_good_df) > 20000:
-        print(f'数据量过大，跳过处理：{len(origin_good_df)}')
-        return
+
+    origin_good_df = origin_good_df[origin_good_df['max_consecutive_loss'] > -30]
+    good_df = pd.read_parquet(f'temp_back/temp.parquet')
+    # 只保留good_df的kai_column和pin_column
+    good_df = good_df[['kai_column', 'pin_column', 'group_count']]
+    # 将origin_good_df和good_df进行内连接，保留origin_good_df的所有列
+    origin_good_df = pd.merge(origin_good_df, good_df, on=['kai_column', 'pin_column'], how='inner')
+    compute_rewarded_penalty_from_flat_df(origin_good_df)
+    # if len(origin_good_df) > 20000:
+    #     print(f'数据量过大，跳过处理：{len(origin_good_df)}')
+    #     return
     redundant_pairs_df, filtered_origin_good_df = gen_statistic_data(origin_good_df)
     os.makedirs('temp/corr', exist_ok=True)
     redundant_pairs_df.to_parquet(f'temp/corr/{base_name}_corr_{correlation_field}.parquet', index=False)
@@ -220,11 +270,12 @@ def debug():
       遍历 temp/corr 目录下符合条件的文件，调用 find_all_valid_groups 进行处理。
     """
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
-    is_reverse_list = [True, False]
+    is_reverse_list = [False, True]
     for inst_id in inst_id_list:
         for is_reverse in is_reverse_list:
-            file_path = f'temp/final_good_{inst_id}_{is_reverse}_filter_all.parquet'
-            find_all_valid_groups(file_path)
+            file_path = f'temp_back\statistic_results_final_{inst_id}_{is_reverse}.parquet'
+            if os.path.exists(file_path):
+                find_all_valid_groups(file_path)
 
 
 def select_strategies_optimized(
@@ -797,7 +848,7 @@ def get_statistic_data():
 def example():
     # get_statistic_data()
     # filter_similar_strategy()
-    final_compute_corr()
+    # final_compute_corr()
     debug()
 
 
