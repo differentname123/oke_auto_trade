@@ -35,7 +35,7 @@ warnings.filterwarnings(
 )
 
 # 全局参数及变量
-IS_REVERSE = False  # 是否反向操作
+IS_REVERSE = True  # 是否反向操作
 checkpoint_dir = 'temp'
 GLOBAL_SIGNALS = {}
 df = None  # 回测数据，在子进程中通过初始化传入
@@ -562,7 +562,7 @@ def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, 
     if all_files_df is None:
         total_pairs = len(long_signals) * len(short_signals)
         predict_batch_number = total_pairs // batch_size + 1
-        files = [f for f in os.listdir(checkpoint_dir) if key_name in f]
+        files = [f for f in os.listdir(checkpoint_dir) if key_name in f and str(IS_REVERSE) in f]
         print(f"候选组合总数: {total_pairs} 预计批次数: {total_pairs // batch_size + 1}")
         print(f"已存在 {len(files)} 个批次的回测结果")
         if len(files) >= predict_batch_number:
@@ -726,12 +726,12 @@ def example():
     """
     start_time = time.time()
     data_path_list = [
-        # "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
-        # "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
-        # "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
-        # "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
-        # "kline_data/origin_data_1m_5000000_DOGE-USDT-SWAP_2025-05-06.csv",
-        # "kline_data/origin_data_1m_5000000_XRP-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_DOGE-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_XRP-USDT-SWAP_2025-05-06.csv",
         "kline_data/origin_data_1m_5000000_OKB-USDT_2025-05-06.csv",
     ]
     for data_path in data_path_list:

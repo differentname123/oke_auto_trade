@@ -481,6 +481,24 @@ def group_statistics_and_inst_details(df: pd.DataFrame,
 
 
 def get_common_data():
+    # df = pd.read_parquet('temp_back/temp.parquet')
+    # # 获取kai_column和pin_column的所有唯一值
+    # kai_column = df['kai_column'].unique().tolist()
+    # pin_column = df['pin_column'].unique().tolist()
+    # all_column = kai_column + pin_column
+    # # 去重
+    # all_column = list(set(all_column))
+    # print(f"所有的组合数：{len(all_column)}")
+    # key_set = set()
+    # for column in all_column:
+    #     key_name = column.split('_')[0]
+    #     key_set.add(key_name)
+    # "{'atr', 'boll', 'cci', 'macd', 'macross', 'rsi'}"
+    # print(f"所有的key数：{len(key_set)}")
+
+
+
+
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
     combinations_list = []
 
@@ -496,7 +514,7 @@ def get_common_data():
     all_df = pd.concat(combinations_list, ignore_index=True)
     # 将all_df按照['kai_column', 'pin_column']分组，删除只有一行的组
     group_sizes = all_df.groupby(['kai_column', 'pin_column'])['kai_column'].transform('size')
-    all_df = all_df[group_sizes > 2]
+    all_df = all_df[group_sizes > 1]
     result = group_statistics_and_inst_details(
         all_df,
         group_cols=['kai_column', 'pin_column'],
