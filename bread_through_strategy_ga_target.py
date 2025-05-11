@@ -971,7 +971,7 @@ def validation(market_data_file):
     df = df_local
 
     # 注意：这里只读取需要的列： kai_column 和 pin_column
-    stat_df_file_list = [f'temp/20242_1m_5000000_{inst_id}_donchian_1_20_1_relate_400_1000_100_1_40_6_cci_1_2000_1000_1_2_1_atr_1_3000_3000_boll_1_3000_100_1_50_2_rsi_1_1000_500_abs_1_100_100_40_100_1_macd_300_1000_50_macross_1_3000_100_1_3000_100__0_{is_reverse}_stats_debug.parquet']
+    stat_df_file_list = [f'temp/20251_1m_5000000_{inst_id}_donchian_1_20_1_relate_400_1000_100_1_40_6_cci_1_2000_1000_1_2_1_atr_1_3000_3000_boll_1_3000_100_1_50_2_rsi_1_1000_500_abs_1_100_100_40_100_1_macd_300_1000_50_macross_1_3000_100_1_3000_100__0_{is_reverse}_stats_debug.parquet']
     for stat_df_file in stat_df_file_list:
         try:
             # 1. 加载 stat_df 文件（只读取必要的两列）
