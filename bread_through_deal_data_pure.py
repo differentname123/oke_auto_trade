@@ -547,7 +547,7 @@ def example():
         output_path = f'temp_back/{inst_id}_{is_reverse}_pure_data.parquet'
         if os.path.exists(output_path):
             result_df = pd.read_parquet(output_path)
-            df = pd.read_parquet(f'temp_back\statistic_results_final_{inst_id}_False.parquet')
+            df = pd.read_parquet(f'temp_back\statistic_results_final_{inst_id}_True.parquet')
             df = compute_rewarded_penalty_from_flat_df(df)
 
             result_df = add_raw_diff_columns(result_df)

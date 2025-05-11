@@ -460,7 +460,7 @@ def process_signal(sig):
         if p_np.dtype == np.float64:
             p_np = p_np.astype(np.float32)
         indices = np.nonzero(s_np)[0]
-        if indices.size < 100:
+        if indices.size < 10:
             return None
         return (sig, (indices.astype(np.int32), p_np[indices]))
     except Exception as e:
@@ -670,7 +670,7 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
     df_local["timestamp"] = pd.to_datetime(df_local["timestamp"])
     # 过滤掉首尾月数据（避免数据不完整问题），可根据实际情况调整
     df_monthly = df_local["timestamp"].dt.to_period("Y")
-    df_local = df_local[(df_monthly != df_monthly.min()) & (df_monthly != df_monthly.max())]
+    df_local = df_local[(df_monthly != df_monthly.min())]
     # 添加年份列，按照年份分段回测
     df_local["year"] = df_local["timestamp"].dt.year
     year_list = df_local["year"].unique()
@@ -693,8 +693,8 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
         temp_df_local["low"] = temp_df_local["low"].astype(jingdu)
         temp_df_local["close"] = temp_df_local["close"].astype(jingdu)
         temp_df_local["timestamp"] = pd.to_datetime(temp_df_local["timestamp"])
-        df_monthly = temp_df_local["timestamp"].dt.to_period("M")
-        temp_df_local = temp_df_local[(df_monthly != df_monthly.min()) & (df_monthly != df_monthly.max())]
+        # df_monthly = temp_df_local["timestamp"].dt.to_period("M")
+        # temp_df_local = temp_df_local[(df_monthly != df_monthly.min()) & (df_monthly != df_monthly.max())]
         print(f"\n开始基于暴力穷举回测 {base_name} ... 数据长度 {temp_df_local.shape[0]} 时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
         # temp_df_local.to_csv("kline_data/origin_data_1m_500000_BTC-USDT-SWAP_2025-05-06.csv")
         global df
