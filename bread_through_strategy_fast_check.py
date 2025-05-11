@@ -631,27 +631,29 @@ def load_file(file_path):
 
 def load_files_in_parallel(checkpoint_dir, pre_key_name):
     all_files = []
+    output_file_path = os.path.join('temp_back', f"all_files_{pre_key_name}_{IS_REVERSE}.parquet")
 
-    if pre_key_name is not None:
-        files = [f for f in os.listdir(checkpoint_dir) if pre_key_name in f and str(IS_REVERSE) in f]
-        print(f"加载 {len(files)} 个数据文件 ...")
-        file_paths = [os.path.join(checkpoint_dir, file) for file in files]
-        for file_path in file_paths:
-            result = load_file(file_path)
-            all_files.append(result)
+    if not os.path.exists(output_file_path):
+        if pre_key_name is not None:
+            files = [f for f in os.listdir(checkpoint_dir) if pre_key_name in f and str(IS_REVERSE) in f]
+            print(f"加载 {len(files)} 个数据文件 ...")
+            file_paths = [os.path.join(checkpoint_dir, file) for file in files]
+            for file_path in file_paths:
+                result = load_file(file_path)
+                all_files.append(result)
 
-        if all_files:
-            # 合并所有 DataFrame（避免不必要的复制）
-            all_files_df = pd.concat(all_files, ignore_index=True, copy=False)
+            if all_files:
+                # 合并所有 DataFrame（避免不必要的复制）
+                all_files_df = pd.concat(all_files, ignore_index=True, copy=False)
+                all_files_df.to_parquet(output_file_path, index=False)
+    else:
+        all_files_df = pd.read_parquet(output_file_path)
+        print(f"从 {output_file_path} 加载数据，共 {len(all_files_df)} 条记录。")
 
-            # 精准内存占用
-            mem_usage_mb = all_files_df.memory_usage(deep=True).sum() / (1024 * 1024)
-            print(f"all_files_df 内存占用: {mem_usage_mb:.2f} MB")
-
-            # 更快的方式统计信号集合
-            all_signals = set(chain(all_files_df["kai_column"], all_files_df["pin_column"]))
-            print(f'加载 {len(all_files)} 个数据，当前信号数量: {len(all_signals)}。 信号对个数: {len(all_files_df)}')
-        return all_files_df, all_signals
+    # 更快的方式统计信号集合
+    all_signals = set(chain(all_files_df["kai_column"], all_files_df["pin_column"]))
+    print(f'加载 {len(all_files)} 个数据，当前信号数量: {len(all_signals)}。 信号对个数: {len(all_files_df)}')
+    return all_files_df, all_signals
 
 def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
     """
@@ -729,6 +731,7 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
         brute_force_backtesting(df, candidate_signals, candidate_signals, batch_size=10000000,
                                                 key_name=f'{year}_{base_name}_{key_name}', all_files_df=all_files_df)
         pre_key_name = f'{year}_{base_name}_{key_name}'
+        load_files_in_parallel(checkpoint_dir, f'{year}_{base_name}_{key_name}')
 
 def example():
     """
@@ -736,9 +739,9 @@ def example():
     """
     start_time = time.time()
     data_path_list = [
-        # "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
-        # "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
-        # "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
         "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
         "kline_data/origin_data_1m_5000000_DOGE-USDT-SWAP_2025-05-06.csv",
         "kline_data/origin_data_1m_5000000_XRP-USDT-SWAP_2025-05-06.csv",
