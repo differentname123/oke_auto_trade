@@ -673,6 +673,16 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
     df_local = df_local[(df_monthly != df_monthly.min())]
     # 添加年份列，按照年份分段回测
     df_local["year"] = df_local["timestamp"].dt.year
+
+    # 根据月份判断所属半年度（1：上半年，2：下半年）
+    df_local["half"] = df_local["timestamp"].dt.month.apply(lambda m: 1 if m <= 6 else 2)
+
+    # 拼接年份和半年度标识，例如 2024 年的上半年为 "20241"，下半年为 "20242"
+    df_local["year_half"] = df_local["timestamp"].dt.year.astype(str) + df_local["half"].astype(str)
+    df_local["year"] = df_local["year_half"]
+    # 如果不再需要单独的 half 列，可以选择删除
+    df_local.drop(columns=["half"], inplace=True)
+
     year_list = df_local["year"].unique()
     # 生成所有候选信号
     all_signals, key_name = generate_all_signals()
