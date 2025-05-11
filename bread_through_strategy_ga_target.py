@@ -301,6 +301,58 @@ def optimize_detail(detail):
     # 对其他类型的数据，返回默认数组 [0]
     return np.array([0], dtype=np.float32)
 
+
+def find_optimal_leverage(df):
+    """
+    根据df中每笔交易的百分比收益（字段 true_profit），返回三个值：
+    1. 最佳整数杠杆
+    2. 在该杠杆下的累计收益率（假设初始本金为1）
+    3. 不加杠杆时的累计收益率（即每笔交易收益率直接相乘）
+
+    其中：
+      - 当按杠杆计算时，每笔交易的本金变化为：
+          capital *= 1 + (true_profit/100) * leverage
+      - 为确保安全，要求任一交易后本金大于0。
+      - 自适应确定最大可用杠杆：根据所有交易中最亏的一笔计算允许的最大杠杆，
+        即满足：1 + (true_profit/100)*杠杆 > 0。
+    """
+
+    # 1. 计算不加杠杆的累计收益率
+    capital_no_leverage = 1.0
+    for profit in df['true_profit']:
+        capital_no_leverage *= (1 + profit / 100)
+
+    # 2. 自适应确定最大可用杠杆
+    min_profit = df['true_profit'].min()  # 取最小值（亏损最大的那一笔，注意亏损值为负）
+    if min_profit >= 0:
+        # 如果没有亏损，则理论上可用杠杆无限大，此处设定一个默认上限
+        max_possible_leverage = 10
+    else:
+        # 对于亏损交易，需要保证：1 + (min_profit/100)*L > 0
+        # 解得 L < 1 / (abs(min_profit)/100)
+        max_possible_leverage = int(1 / (abs(min_profit) / 100))
+
+    # 3. 遍历寻找最佳整数杠杆
+    optimal_leverage = None
+    optimal_capital = -float('inf')
+
+    for L in range(1, max_possible_leverage + 1):
+        current_capital = 1.0
+        safe = True
+        for profit in df['true_profit']:
+            factor = 1 + (profit / 100) * L
+            # 如果这笔交易导致资本为0或负数，则杠杆L不安全
+            if factor <= 0:
+                safe = False
+                break
+            current_capital *= factor
+        # 在安全的杠杆下，选择累计收益率最高的杠杆
+        if safe and current_capital > optimal_capital:
+            optimal_capital = current_capital
+            optimal_leverage = L
+
+    return optimal_leverage, optimal_capital, capital_no_leverage
+
 def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is_detail=False, is_reverse=False):
     """
     根据预计算的稀疏信号数据获取回测数据和统计指标。
@@ -527,6 +579,8 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     same_count_rate = safe_round(
         100 * len(common_index) / min(len(kai_data_df), len(pin_data_df)) if trade_count else 0, 4)
 
+    optimal_leverage, optimal_capital, capital_no_leverage = find_optimal_leverage(kai_data_df)
+
     statistic_dict = {
         "kai_column": kai_column,
         "pin_column": pin_column,
@@ -582,6 +636,9 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
         "weekly_kai_count_std": weekly_kai_count_std,
         "top_profit_ratio": safe_round(top_profit_ratio, 4),
         "top_loss_ratio": safe_round(top_loss_ratio, 4),
+        "optimal_leverage": optimal_leverage,
+        "optimal_capital": safe_round(optimal_capital, 4),
+        "capital_no_leverage": safe_round(capital_no_leverage, 4),
         "is_reverse": is_reverse,
     }
     return None, statistic_dict
@@ -837,7 +894,7 @@ def precompute_signals(df, signals):
     对传入的 signals 列表（信号名称）采用多进程进行预计算，返回 dict 格式数据
     """
     num_workers = multiprocessing.cpu_count()
-    pool = multiprocessing.Pool(processes=30, initializer=init_worker1, initargs=(df,))
+    pool = multiprocessing.Pool(processes=20, initializer=init_worker1, initargs=(df,))
     results = pool.map(process_signal, signals)
     pool.close()
     pool.join()
@@ -914,7 +971,7 @@ def validation(market_data_file):
     df = df_local
 
     # 注意：这里只读取需要的列： kai_column 和 pin_column
-    stat_df_file_list = [f'temp/2024_1m_5000000_{inst_id}_donchian_1_20_1_relate_400_1000_100_1_40_6_cci_1_2000_1000_1_2_1_atr_1_3000_3000_boll_1_3000_100_1_50_2_rsi_1_1000_500_abs_1_100_100_40_100_1_macd_300_1000_50_macross_1_3000_100_1_3000_100__0_{is_reverse}_stats_debug.parquet']
+    stat_df_file_list = [f'temp/20242_1m_5000000_{inst_id}_donchian_1_20_1_relate_400_1000_100_1_40_6_cci_1_2000_1000_1_2_1_atr_1_3000_3000_boll_1_3000_100_1_50_2_rsi_1_1000_500_abs_1_100_100_40_100_1_macd_300_1000_50_macross_1_3000_100_1_3000_100__0_{is_reverse}_stats_debug.parquet']
     for stat_df_file in stat_df_file_list:
         try:
             # 1. 加载 stat_df 文件（只读取必要的两列）
@@ -1280,8 +1337,8 @@ if __name__ == "__main__":
         # "kline_data/origin_data_1m_10000_PEPE-USDT-SWAP.csv",
 
         # "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
-        "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
-        # "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_DOGE-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_XRP-USDT-SWAP_2025-05-06.csv",

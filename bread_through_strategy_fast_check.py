@@ -736,9 +736,9 @@ def example():
     """
     start_time = time.time()
     data_path_list = [
-        "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
-        "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
-        "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
         "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
         "kline_data/origin_data_1m_5000000_DOGE-USDT-SWAP_2025-05-06.csv",
         "kline_data/origin_data_1m_5000000_XRP-USDT-SWAP_2025-05-06.csv",
