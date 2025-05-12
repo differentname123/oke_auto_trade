@@ -539,7 +539,7 @@ def get_common_data():
 
 def example():
     # get_common_data()
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
+    inst_id_list = ['SOL', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
     is_reverse = True
     # pd.read_parquet(f'temp/final_good_BTC_True_filter_all.parquet')
 
