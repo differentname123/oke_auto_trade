@@ -670,9 +670,6 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
 
     # 将时间列转换为 datetime 类型
     df_local["timestamp"] = pd.to_datetime(df_local["timestamp"])
-    # 过滤掉首尾月数据（避免数据不完整问题），可根据实际情况调整
-    df_monthly = df_local["timestamp"].dt.to_period("Y")
-    df_local = df_local[(df_monthly != df_monthly.min())]
     # 添加年份列，按照年份分段回测
     df_local["year"] = df_local["timestamp"].dt.year
 
@@ -684,7 +681,7 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
     df_local["year"] = df_local["year_half"]
     # 如果不再需要单独的 half 列，可以选择删除
     df_local.drop(columns=["half"], inplace=True)
-
+    # df_local = df_local[(df_local["year"] != df_local["year"].min())]
     year_list = df_local["year"].unique()
     # 生成所有候选信号
     all_signals, key_name = generate_all_signals()
@@ -695,6 +692,9 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
         print(f"数据 {base_name} 的第一年: {year}")
         temp_df_local = df_local[df_local["year"] == year]
         temp_df_local.drop(columns=["year"], inplace=True)
+        if temp_df_local.shape[0] < 200000:
+            print(f"数据 {base_name} 的 {year} 年数据长度不足，跳过。")
+            continue
 
         # 保证数值合理，若最低价小于1则扩大价格
         while temp_df_local["low"].min() < 1:
@@ -739,8 +739,8 @@ def example():
     """
     start_time = time.time()
     data_path_list = [
-        "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
-        "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
         "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
         "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
         "kline_data/origin_data_1m_5000000_DOGE-USDT-SWAP_2025-05-06.csv",

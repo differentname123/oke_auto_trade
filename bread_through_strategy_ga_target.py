@@ -894,7 +894,7 @@ def precompute_signals(df, signals):
     对传入的 signals 列表（信号名称）采用多进程进行预计算，返回 dict 格式数据
     """
     num_workers = multiprocessing.cpu_count()
-    pool = multiprocessing.Pool(processes=20, initializer=init_worker1, initargs=(df,))
+    pool = multiprocessing.Pool(processes=num_workers, initializer=init_worker1, initargs=(df,))
     results = pool.map(process_signal, signals)
     pool.close()
     pool.join()
@@ -1008,7 +1008,7 @@ def validation(market_data_file):
 
             # 根据内存限制调整进程数
             max_memory = 40  # 单位：GB
-            pool_processes = min(20, int(max_memory * 1024 * 1024 * 1024 / total_size) if total_size > 0 else 1)
+            pool_processes = min(30, int(max_memory * 1024 * 1024 * 1024 / total_size) if total_size > 0 else 1)
             print(f"进程数限制为 {pool_processes}，根据内存限制调整。")
 
             # 定义每个批次处理的 pair 数量
@@ -1337,9 +1337,9 @@ if __name__ == "__main__":
         # "kline_data/origin_data_1m_10000_PEPE-USDT-SWAP.csv",
 
         # "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
-        "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
-        # "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_DOGE-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_XRP-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_OKB-USDT_2025-05-06.csv",
