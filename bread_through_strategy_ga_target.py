@@ -375,21 +375,6 @@ def get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is
     kai_data_df["kai_price"] = kai_prices
     pin_data_df["pin_price"] = pin_prices
 
-    ############################################################################
-    # 修改后的信号匹配逻辑：确保一个 idx 不能既作为平仓又作为开仓信号
-    #
-    # 说明：
-    # 1. 先获取已排序的开仓（kai）和平仓（pin）的索引列表。
-    # 2. 遍历开仓信号，对于每个开仓信号，找到第一个严格大于当前开仓信号的平仓信号，
-    #    并且该平仓信号未被使用过。
-    # 3. 一旦成功匹配，将平仓信号记录下来，并更新“最后平仓信号”，后续的开仓信号必须大于此值。
-    #
-    # 在给定的例子中，会匹配为：
-    #    (1,2)  → 平仓2使用后，不再允许2作为后续开仓信号
-    #    (3,5)
-    #    (6,10)
-    ############################################################################
-
     # 取出开仓信号和平仓信号的索引（假定 DataFrame 的索引已经排序）
     kai_idx_sorted = list(kai_data_df.index)
     pin_idx_sorted = list(pin_data_df.index)
@@ -1336,8 +1321,8 @@ if __name__ == "__main__":
         # "kline_data/origin_data_1m_10000_XRP-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_10000_PEPE-USDT-SWAP.csv",
 
-        # "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
-        "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_DOGE-USDT-SWAP_2025-05-06.csv",

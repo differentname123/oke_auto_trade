@@ -124,7 +124,7 @@ def filtering(origin_good_df, grouping_column, sort_key, _unused_threshold):
     if start < n:
         groups.append(df_sorted.iloc[start:n])
     # 根据组的数量动态计算组内相关性过滤阈值
-    group_threshold = max(50, 90 - int(0.1 * len(groups)))
+    group_threshold = max(50, 95 - int(0.01 * len(groups)))
     print(f"总分组数量：{len(groups)} ，组内相关性阈值：{group_threshold}")
 
     filtered_dfs = []
@@ -227,7 +227,7 @@ def compute_rewarded_penalty_from_flat_df(df: pd.DataFrame) -> pd.Series:
 
     # 4. 合成最终得分
     score = reward - penalty * 100
-    df['score_final'] = score
+    df['capital_no_leverage'] = score
     return df
 
 
@@ -284,7 +284,7 @@ def select_strategies_optimized(
     correlation_df: pd.DataFrame,
     k: int,
     strategy_id_col: str = 'index', # 新增参数：指定包含策略ID的列名
-    count_col: str = 'score_final',       # 新增参数：指定包含计数的列名
+    count_col: str = 'capital_no_leverage',       # 新增参数：指定包含计数的列名
     penalty_scaler: float = 1.0,
     use_absolute_correlation: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -723,23 +723,13 @@ def filter_similar_strategy():
 
             output_path = f'temp_back/{inst_id}_{is_reverse}_pure_data_with_future_filter_similar_strategy.parquet'
             data_df = pd.read_parquet(data_file)
-            origin_good_df = data_df
-            origin_good_df = origin_good_df[origin_good_df['max_consecutive_loss'] > -30]
-            good_df = pd.read_parquet(f'temp_back/temp.parquet')
-            # 只保留good_df的kai_column和pin_column
-            good_df = good_df[['kai_column', 'pin_column', 'group_count']]
-            # 将origin_good_df和good_df进行内连接，保留origin_good_df的所有列
-            origin_good_df = pd.merge(origin_good_df, good_df, on=['kai_column', 'pin_column'], how='inner')
-            compute_rewarded_penalty_from_flat_df(origin_good_df)
-
-            data_df = origin_good_df
             # data_df = data_df[data_df['max_hold_time'] < 5000]
             data_df = data_df[data_df['kai_count'] > 50]
             # data_df = data_df[data_df['kai_column'].str.contains('long', na=False)]
             # data_df = data_df.head(10000)
             print(f'处理 {inst_id} 的数据，数据量：{len(data_df)}')
             while True:
-                filtered_df = filtering(data_df, grouping_column='kai_count', sort_key='score_final', _unused_threshold=None)
+                filtered_df = filtering(data_df, grouping_column='kai_count', sort_key='capital_no_leverage', _unused_threshold=None)
                 print(f'{inst_id} 过滤后的数据量：{len(filtered_df)} 过滤前数据量：{len(data_df)}')
                 if filtered_df.shape[0] == data_df.shape[0]:
                     break
