@@ -692,8 +692,8 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
         print(f"数据 {base_name} 的第一年: {year}")
         temp_df_local = df_local[df_local["year"] == year]
         temp_df_local.drop(columns=["year"], inplace=True)
-        if temp_df_local.shape[0] < 200000:
-            print(f"数据 {base_name} 的 {year} 年数据长度不足，跳过。")
+        if temp_df_local.shape[0] < 150000:
+            print(f"数据 {base_name} 的 {year} 年数据长度 {temp_df_local.shape[0]}不足，跳过。")
             continue
 
         # 保证数值合理，若最低价小于1则扩大价格
