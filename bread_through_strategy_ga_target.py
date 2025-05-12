@@ -1337,9 +1337,9 @@ if __name__ == "__main__":
         # "kline_data/origin_data_1m_10000_PEPE-USDT-SWAP.csv",
 
         # "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
-        # "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
-        "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_DOGE-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_XRP-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_OKB-USDT_2025-05-06.csv",
