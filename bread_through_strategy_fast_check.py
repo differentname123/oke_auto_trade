@@ -35,7 +35,7 @@ warnings.filterwarnings(
 )
 
 # 全局参数及变量
-IS_REVERSE = True  # 是否反向操作
+IS_REVERSE = False  # 是否反向操作
 checkpoint_dir = 'temp'
 GLOBAL_SIGNALS = {}
 df = None  # 回测数据，在子进程中通过初始化传入
@@ -571,6 +571,7 @@ def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, 
 
         candidate_gen = candidate_pairs_generator(long_signals, short_signals)
     else:
+
         # 只保留all_files_df信号在long_signals和short_signals中的组合
         all_files_df = all_files_df[all_files_df["kai_column"].isin(long_signals) & all_files_df["pin_column"].isin(short_signals)]
         # 直接从 all_files_df 中获取所有信号对
@@ -582,6 +583,8 @@ def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, 
         if len(files) >= predict_batch_number:
             print(f"已存在 {len(files)} 个批次的回测结果，跳过。")
             return
+        batch_size = min(batch_size, len(all_files_df))
+
     batch_index = 0
     start_time = time.time()
     pool_processes = 32
@@ -739,7 +742,7 @@ def example():
     """
     start_time = time.time()
     data_path_list = [
-        "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
         "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
         "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
         "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",

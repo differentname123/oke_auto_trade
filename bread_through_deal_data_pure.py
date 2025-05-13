@@ -481,17 +481,17 @@ def group_statistics_and_inst_details(df: pd.DataFrame,
 
 
 def get_common_data():
-    exclude_str = ['macross', 'rsi', 'macd', 'cci', 'atr']
-    final_good_df = pd.read_parquet('temp_back/temp.parquet')
-    for exclude in exclude_str:
-        final_good_df = final_good_df[~final_good_df['kai_column'].str.contains(exclude)]
-        final_good_df = final_good_df[~final_good_df['pin_column'].str.contains(exclude)]
+    # exclude_str = ['macross', 'rsi', 'macd', 'cci', 'atr']
+    # final_good_df = pd.read_parquet('temp_back/temp.parquet')
+    # for exclude in exclude_str:
+    #     final_good_df = final_good_df[~final_good_df['kai_column'].str.contains(exclude)]
+    #     final_good_df = final_good_df[~final_good_df['pin_column'].str.contains(exclude)]
 
 
 
     # df = pd.read_parquet('temp_back/statistic_results_final_BTC_True.parquet')
     # # 获取kai_column和pin_column的所有唯一值
-    kai_column = df['kai_column'].unique().tolist()
+    # kai_column = df['kai_column'].unique().tolist()
     # pin_column = df['pin_column'].unique().tolist()
     # all_column = kai_column + pin_column
     # # 去重
@@ -511,7 +511,7 @@ def get_common_data():
     combinations_list = []
 
     for inst_id in inst_id_list:
-        file_path = f'temp_back\statistic_results_final_{inst_id}_False.parquet'
+        file_path = f'temp_back\statistic_results_final_{inst_id}_True.parquet'
         if os.path.exists(file_path):
             df = pd.read_parquet(file_path)
             df['inst_id'] = inst_id
@@ -539,8 +539,8 @@ def get_common_data():
 
 def example():
     # get_common_data()
-    inst_id_list = ['SOL', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
-    is_reverse = True
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
+    is_reverse = False
     # pd.read_parquet(f'temp/final_good_BTC_True_filter_all.parquet')
 
     for inst_id in inst_id_list:
