@@ -3663,7 +3663,7 @@ def debug():
     range_size = 10
     # sort_key = 'max_consecutive_loss_score'
     # origin_good_df = choose_good_strategy_debug('')
-    inst_id_list =  ['BTC','ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
+    inst_id_list =  ['SOL','ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
     for inst_id in inst_id_list:
         # df = pd.read_csv('temp/origin_good_reverse.csv')
         # print()

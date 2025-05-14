@@ -14,7 +14,8 @@ from trade_common import LatestDataManager, place_order
 # WebSocket 服务器地址
 OKX_WS_URL = "wss://ws.okx.com:8443/ws/v5/public"
 # 定义需要操作的多个交易对
-INSTRUMENT_LIST = ["SOL-USDT-SWAP", "BTC-USDT-SWAP", "ETH-USDT-SWAP", "TON-USDT-SWAP", "DOGE-USDT-SWAP", "XRP-USDT-SWAP"]
+# INSTRUMENT_LIST = ["SOL-USDT-SWAP", "BTC-USDT-SWAP", "ETH-USDT-SWAP", "TON-USDT-SWAP", "DOGE-USDT-SWAP", "XRP-USDT-SWAP"]
+INSTRUMENT_LIST = [ "BTC-USDT-SWAP"]
 
 # 各交易对最小下单量映射
 min_count_map = {"BTC-USDT-SWAP": 0.01, "ETH-USDT-SWAP": 0.01, "SOL-USDT-SWAP": 0.01, "TON-USDT-SWAP": 1, "DOGE-USDT-SWAP": 0.01, "XRP-USDT-SWAP": 0.01, "PEPE-USDT-SWAP": 0.1}
@@ -33,6 +34,7 @@ pin_target_price_info_map = {}  # 平仓目标价格映射
 kai_pin_map = {}            # 开仓信号与平仓信号映射
 kai_reverse_map = {}        # 记录每个开仓信号是否反向
 strategy_df = None          # 当前交易对的策略数据 DataFrame
+is_new_minute = True        # 表示是否是新的一分钟
 
 ##############################################
 # 信号计算函数（与之前一致）
@@ -197,7 +199,7 @@ def update_price_map(strategy_df, df, target_column='kai_column'):
 # 异步任务：数据更新
 ##############################################
 async def fetch_new_data(max_period):
-    global kai_target_price_info_map, pin_target_price_info_map, current_minute, price, price_list, strategy_df, INSTRUMENT
+    global kai_target_price_info_map, pin_target_price_info_map, current_minute, price, price_list, strategy_df, INSTRUMENT, is_new_minute
     newest_data = LatestDataManager(max_period, INSTRUMENT)
     max_attempts = 200
     previous_timestamp = None
@@ -235,6 +237,7 @@ async def fetch_new_data(max_period):
                             }
 
                         print(f"{INSTRUMENT} 开仓信号个数 {len(kai_target_price_info_map)} 平仓信号个数{len(pin_target_price_info_map)}  详细结果：{result}")
+                        is_new_minute = True
                         previous_timestamp = latest_timestamp
                         current_minute = now.minute
                         break
@@ -247,6 +250,7 @@ async def fetch_new_data(max_period):
         except Exception as e:
             pin_target_price_info_map = {}
             kai_target_price_info_map = {}
+            is_new_minute = True
             traceback.print_exc()
 
 ##############################################
@@ -261,7 +265,9 @@ async def subscribe_channel(ws):
     print(f"📡 {INSTRUMENT} 已订阅实时数据")
 
 async def websocket_listener():
-    global price, price_list
+    global price, price_list, is_new_minute
+    current_high = 0
+    current_low = 0
     while True:
         try:
             async with websockets.connect(OKX_WS_URL) as ws:
@@ -276,12 +282,22 @@ async def websocket_listener():
                         for trade in data["data"]:
                             price_val = float(trade["px"])
                             # 去重处理
+                            if is_new_minute:
+                                print(f"🕐 {INSTRUMENT} 新的一分钟，当前价格: {price_val}上一分钟最高价: {current_high}上一分钟最低价: {current_low}")
+                                current_high = 0
+                                current_low = 0
+                                is_new_minute = False
                             if price_val in price_list:
                                 continue
+                            if current_high == 0 or current_high < price_val:
+                                current_high = price_val
+                            if current_low == 0 or current_low > price_val:
+                                current_low = price_val
+
                             price_list.append(price_val)
                             price = price_val
-                            process_open_orders(price_val)
-                            process_close_orders(price_val)
+                            # process_open_orders(price_val)
+                            # process_close_orders(price_val)
                     except websockets.exceptions.ConnectionClosed:
                         print(f"🔴 {INSTRUMENT} WebSocket 连接断开，重连中...")
                         break
@@ -398,17 +414,16 @@ async def main_instrument():
     # 加载策略数据（例如 parquet 文件）
     inst_id = INSTRUMENT.split('-')[0]
     all_df = []
-    exclude_str = ['macross', 'rsi', 'macd', 'cci', 'atr']
+    exclude_str = [ 'atr']
     for is_reverse in [True, False]:
-        # file_path = f'temp/final_good_{inst_id}_{is_reverse}_filter_all.parquet'
-        file_path = f'temp/corr/final_good_{inst_id}_{is_reverse}_filter_all.parquet_origin_good_weekly_net_profit_detail.parquet'
+        file_path = f'temp_back\statistic_results_final_{inst_id}_{is_reverse}.parquet'
 
         if os.path.exists(file_path):
             final_good_df = pd.read_parquet(file_path)
             for exclude in exclude_str:
                 final_good_df = final_good_df[~final_good_df['kai_column'].str.contains(exclude)]
                 final_good_df = final_good_df[~final_good_df['pin_column'].str.contains(exclude)]
-            final_good_df = final_good_df.sort_values(by='score_final', ascending=False).head(10)
+            final_good_df = final_good_df.sort_values(by='capital_no_leverage', ascending=False).head(10)
             all_df.append(final_good_df)
             print(f'{INSTRUMENT} final_good_df shape: {final_good_df.shape[0]} 来自 {file_path}')
     if all_df:
@@ -431,6 +446,8 @@ async def main_instrument():
         period_list.append(int(kai.split('_')[1]))
         period_list.append(int(pin.split('_')[1]))
     max_period = int(np.ceil(max(period_list) / 100) * 100) if period_list else 100
+    max_period = max_period * 2
+    print(f"【{INSTRUMENT}】最大周期: {max_period}")
 
     # 设置当前交易对的最小下单量
     global MIN_COUNT
