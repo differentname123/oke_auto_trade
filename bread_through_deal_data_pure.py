@@ -647,8 +647,8 @@ def compute_scores_v2(df_raw: pd.DataFrame) -> pd.DataFrame:
 
 def example():
     # get_common_data()
-    inst_id_list = ['ETH', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
-    is_reverse = True
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
+    is_reverse = False
     all_list = []
     # pd.read_parquet(f'temp/final_good_BTC_True_filter_all.parquet')
 
@@ -657,7 +657,7 @@ def example():
         best_df = pd.read_parquet(file_path)
         best_df['year'] = 20251
         output_path = f'temp_back/{inst_id}_{is_reverse}_pure_data.parquet'
-        df = pd.read_parquet(f'temp_back\statistic_results_final_{inst_id}_{is_reverse}_debug.parquet')
+        df = pd.read_parquet( f'temp_back/{inst_id}_{is_reverse}_filter_similar_strategy.parquet')
         df = compute_rewarded_penalty_from_flat_df(df)
         df['inst_id'] = inst_id
         # 合并df和best_df

@@ -124,7 +124,7 @@ def filtering(origin_good_df, grouping_column, sort_key, _unused_threshold):
     if start < n:
         groups.append(df_sorted.iloc[start:n])
     # 根据组的数量动态计算组内相关性过滤阈值
-    group_threshold = max(50, 95 - int(0.01 * len(groups)))
+    group_threshold = max(50, 80 - int(0.01 * len(groups)))
     print(f"总分组数量：{len(groups)} ，组内相关性阈值：{group_threshold}")
 
     filtered_dfs = []
@@ -246,13 +246,8 @@ def find_all_valid_groups(file_path):
     origin_good_df = pd.read_parquet(file_path)
 
     origin_good_df = origin_good_df[origin_good_df['max_consecutive_loss'] > -30]
-    origin_good_df = origin_good_df[origin_good_df['max_consecutive_loss'] > -30]
-    good_df = pd.read_parquet(f'temp_back/temp.parquet')
-    # 只保留good_df的kai_column和pin_column
-    good_df = good_df[['kai_column', 'pin_column', 'group_count']]
-    # 将origin_good_df和good_df进行内连接，保留origin_good_df的所有列
-    origin_good_df = pd.merge(origin_good_df, good_df, on=['kai_column', 'pin_column'], how='inner')
-    compute_rewarded_penalty_from_flat_df(origin_good_df)
+
+    # compute_rewarded_penalty_from_flat_df(origin_good_df)
     # if len(origin_good_df) > 20000:
     #     print(f'数据量过大，跳过处理：{len(origin_good_df)}')
     #     return
@@ -270,11 +265,11 @@ def debug():
     调试入口函数：
       遍历 temp/corr 目录下符合条件的文件，调用 find_all_valid_groups 进行处理。
     """
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
+    inst_id_list = ['BTC']
     is_reverse_list = [False, True]
     for inst_id in inst_id_list:
         for is_reverse in is_reverse_list:
-            file_path = f'temp_back\statistic_results_final_{inst_id}_{is_reverse}.parquet'
+            file_path = f'temp_back/{inst_id}_{is_reverse}_filter_similar_strategy.parquet'
             if os.path.exists(file_path):
                 find_all_valid_groups(file_path)
 
@@ -683,11 +678,12 @@ def process_df(df):
     return df
 
 def final_compute_corr():
-    inst_id_list = [ 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list = [ 'BTC', 'TON', 'DOGE', 'XRP', 'PEPE']
+    is_reverse = False
 
     for inst_id in inst_id_list:
-        corr_path = f'temp/corr/final_good_{inst_id}_False_filter_all.parquet_corr_weekly_net_profit_detail.parquet'
-        origin_good_path = f'temp/corr/final_good_{inst_id}_False_filter_all.parquet_origin_good_weekly_net_profit_detail.parquet'
+        corr_path = f'temp/corr/{inst_id}_{is_reverse}_filter_similar_strategy.parquet_corr_weekly_net_profit_detail.parquet'
+        origin_good_path = f'temp/corr/{inst_id}_{is_reverse}_filter_similar_strategy.parquet_origin_good_weekly_net_profit_detail.parquet'
         strategy_df = pd.read_parquet(origin_good_path)
         # 计算score，逻辑为对kai_count取对数，然后除以max_consecutive_loss
         # strategy_df['score666'] = strategy_df['kai_count'].apply(lambda x: np.log(x) if x > 0 else 0) / strategy_df['max_consecutive_loss']
@@ -695,8 +691,8 @@ def final_compute_corr():
         # strategy_df = filter_good_df(inst_id)
 
         correlation_df = pd.read_parquet(corr_path)
-        selected_strategies, selected_correlation_df = select_strategies_optimized(strategy_df, correlation_df, k=5,
-                                    penalty_scaler=1, use_absolute_correlation=True)
+        selected_strategies, selected_correlation_df = select_strategies_optimized(strategy_df, correlation_df, k=10,
+                                    penalty_scaler=0.1, use_absolute_correlation=True)
 
 
         filter_df = final_df[final_df['inst_id'] == inst_id]
@@ -722,6 +718,9 @@ def filter_similar_strategy():
                 continue
 
             output_path = f'temp_back/{inst_id}_{is_reverse}_filter_similar_strategy.parquet'
+            if os.path.exists(output_path):
+                print(f'文件已存在，跳过处理：{output_path}')
+                continue
             data_df = pd.read_parquet(data_file)
             # data_df = data_df[data_df['max_hold_time'] < 5000]
             data_df = data_df[data_df['kai_count'] > 50]
@@ -841,8 +840,8 @@ def get_statistic_data():
 
 def example():
     # get_statistic_data()
-    filter_similar_strategy()
-    # final_compute_corr()
+    # filter_similar_strategy()
+    final_compute_corr()
     # debug()
 
 

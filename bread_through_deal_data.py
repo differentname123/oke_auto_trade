@@ -3592,7 +3592,7 @@ def auto_reduce_precision(df, verbose=True, column_list=None):
 
 
 def add_column(inst_id):
-    is_reverse = False
+    is_reverse = True
     # 定义目录
     back_dir = "temp_back"
     # 定义需要使用的列
@@ -3663,7 +3663,7 @@ def debug():
     range_size = 10
     # sort_key = 'max_consecutive_loss_score'
     # origin_good_df = choose_good_strategy_debug('')
-    inst_id_list =  ['SOL','ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
+    inst_id_list =  ['BTC','ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
     for inst_id in inst_id_list:
         # df = pd.read_csv('temp/origin_good_reverse.csv')
         # print()
