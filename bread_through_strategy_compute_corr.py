@@ -721,10 +721,11 @@ def filter_similar_strategy():
                 print(f'文件不存在，跳过处理：{data_file}')
                 continue
 
-            output_path = f'temp_back/{inst_id}_{is_reverse}_pure_data_with_future_filter_similar_strategy.parquet'
+            output_path = f'temp_back/{inst_id}_{is_reverse}_filter_similar_strategy.parquet'
             data_df = pd.read_parquet(data_file)
             # data_df = data_df[data_df['max_hold_time'] < 5000]
             data_df = data_df[data_df['kai_count'] > 50]
+            data_df = data_df[data_df['max_consecutive_loss'] > -30]
             # data_df = data_df[data_df['kai_column'].str.contains('long', na=False)]
             # data_df = data_df.head(10000)
             print(f'处理 {inst_id} 的数据，数据量：{len(data_df)}')

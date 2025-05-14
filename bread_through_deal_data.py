@@ -3592,15 +3592,9 @@ def auto_reduce_precision(df, verbose=True, column_list=None):
 
 
 def add_column(inst_id):
+    is_reverse = False
     # 定义目录
-    corr_dir = "temp/corr"
     back_dir = "temp_back"
-
-    # 遍历 temp/corr 目录，找到文件名中包含 inst_id 且包含 "feature" 的文件
-    files = os.listdir(corr_dir)
-    filter_files = [filename for filename in files if inst_id in filename and "feature" in filename]
-    print(f"找到 {inst_id} 的文件个数: {len(filter_files)}")
-
     # 定义需要使用的列
     merge_columns = ["kai_column", "pin_column"]
     target_columns = [
@@ -3611,8 +3605,7 @@ def add_column(inst_id):
     columns_to_read = merge_columns + target_columns
 
     # 构造读取的新数据文件路径
-    source_filename = f'final_good_{inst_id}_false_filter.parquet_1m_15000_{inst_id}-USDT-SWAP_2025-04-20.csvstatistic_results_final.parquet'
-    source_filepath = os.path.join(back_dir, source_filename)
+    source_filepath = f'temp_back\statistic_results_final_{inst_id}_{is_reverse}_debug.parquet'
     # 读取指定列
     new_df = pd.read_parquet(source_filepath, columns=columns_to_read)
 
@@ -3620,21 +3613,18 @@ def add_column(inst_id):
     rename_dict = {col: f"{col}_new20" for col in target_columns}
     new_df_renamed = new_df.rename(columns=rename_dict).set_index(merge_columns)
 
-    # 遍历每个文件，读取、合并后重新写回
-    for file in filter_files:
-        print(f"正在处理文件: {file}")
-        corr_filepath = os.path.join(corr_dir, file)
-        # 读取文件
-        origin_good_df = pd.read_parquet(corr_filepath)
-        # 删除包含_new20的列
-        columns_to_drop = [col for col in origin_good_df.columns if "_new20" in col]
-        origin_good_df = origin_good_df.drop(columns=columns_to_drop, errors='ignore')
-        # 设置 merge_columns 为索引，加快 join 操作
-        origin_good_df = origin_good_df.set_index(merge_columns)
-        # 左连接合并数据，然后重置索引
-        merged_df = origin_good_df.join(new_df_renamed, how="left").reset_index()
-        # 将合并后的数据写回去，采用 snappy 压缩
-        merged_df.to_parquet(corr_filepath, index=False, compression="snappy")
+    corr_filepath = f'temp_back/{inst_id}_{is_reverse}_filter_similar_strategy.parquet'
+    # 读取文件
+    origin_good_df = pd.read_parquet(corr_filepath)
+    # 删除包含_new20的列
+    columns_to_drop = [col for col in origin_good_df.columns if "_new20" in col]
+    origin_good_df = origin_good_df.drop(columns=columns_to_drop, errors='ignore')
+    # 设置 merge_columns 为索引，加快 join 操作
+    origin_good_df = origin_good_df.set_index(merge_columns)
+    # 左连接合并数据，然后重置索引
+    merged_df = origin_good_df.join(new_df_renamed, how="left").reset_index()
+    # 将合并后的数据写回去，采用 snappy 压缩
+    merged_df.to_parquet(corr_filepath, index=False, compression="snappy")
 
 def debug():
     # good_df = pd.read_csv('temp/final_good.csv')
@@ -3673,7 +3663,7 @@ def debug():
     range_size = 10
     # sort_key = 'max_consecutive_loss_score'
     # origin_good_df = choose_good_strategy_debug('')
-    inst_id_list =  ['BTC','ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
+    inst_id_list =  ['BTC','ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
     for inst_id in inst_id_list:
         # df = pd.read_csv('temp/origin_good_reverse.csv')
         # print()
@@ -3690,7 +3680,7 @@ def debug():
         # pairs = list(filtered_df[['kai_column', 'pin_column']].itertuples(index=False, name=None))
 
         add_column(inst_id)
-        origin_good_df = choose_good_strategy_detail(inst_id)
+        # origin_good_df = choose_good_strategy_detail(inst_id)
         # origin_good_df.to_parquet(f'temp/{inst_id}_target.parquet', index=False, compression='snappy')
         continue
 
