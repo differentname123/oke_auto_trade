@@ -535,20 +535,139 @@ def get_common_data():
     )
     result.to_parquet(f'temp_back/temp.parquet', index=False)
     return result
+def _z(s: pd.Series) -> pd.Series:
+    std = s.std()
+    return (s - s.mean()) / std if std > 0 else pd.Series(0, index=s.index)
 
+
+# -----------------------------------------------------------------
+# 1. 硬性过滤
+# -----------------------------------------------------------------
+FILTERS = {
+    "min_trades": 30,
+    "min_active_month_ratio": 0.50,
+    "max_monthly_loss_rate": 0.40,
+    "min_single_profit": -10.0,
+    "max_consecutive_loss": -15.0,
+    "min_eff_ratio": 1.0,
+}
+
+def _pass_filter(df: pd.DataFrame, p=FILTERS) -> pd.Series:
+    eff = df["optimal_capital"] / df["capital_no_leverage"]
+    return (
+        (df["kai_count"]            >= p["min_trades"]) &
+        (df["active_month_ratio"]   >= p["min_active_month_ratio"]) &
+        (df["monthly_loss_rate"]    <= p["max_monthly_loss_rate"]) &
+        (df["min_profit"]           >  p["min_single_profit"]) &
+        (df["max_consecutive_loss"] >  p["max_consecutive_loss"]) &
+        (eff                        >= p["min_eff_ratio"])
+    )
+
+
+# -----------------------------------------------------------------
+# 2. 维度配置
+# -----------------------------------------------------------------
+RETURN = [
+    ("net_profit_rate", 0.6, True),
+    ("avg_profit_rate", 0.4, True),
+]
+
+RISK = [
+    ("sharpe_like",      0.70, True),   # Sharpe 越高越好
+    ("drawdown_ratio",   0.30, False),  # 越小越好
+]
+
+CONSISTENCY = [
+    ("monthly_cv", 0.50, False),  # 变异系数越小越佳
+    ("weekly_cv",  0.50, False),
+]
+
+EFFICIENCY = [
+    ("eff_ratio",     0.60, True),   # 杠杆收益提升倍数
+    ("profit_per_day",0.40, True),
+]
+
+DIM_W = {"return":0.4,"risk":0.3,"cons":0.2,"eff":0.1}
+
+
+# -----------------------------------------------------------------
+# 3. 打分主函数
+# -----------------------------------------------------------------
+def _dim_score(df: pd.DataFrame, cfg) -> pd.Series:
+    s = pd.Series(0.0, index=df.index)
+    for col, w, pos in cfg:
+        z = _z(df[col])
+        s += w * (z if pos else -z)
+    return s
+
+def compute_scores_v2(df_raw: pd.DataFrame) -> pd.DataFrame:
+    df = df_raw.copy()
+
+    # 预计算相对化指标 ------------------------------------------
+    df["eff_ratio"]     = df["optimal_capital"] / df["capital_no_leverage"]
+    df["sharpe_like"]   = df["net_profit_rate"] / df["true_profit_std"].replace(0,np.nan)
+    df["monthly_cv"]    = df["monthly_net_profit_std"] / df["net_profit_rate"].abs().replace(0,np.nan)
+    df["weekly_cv"]     = df["weekly_net_profit_std"] / df["net_profit_rate"].abs().replace(0,np.nan)
+    df["drawdown_ratio"]= df["max_consecutive_loss"].abs() / df["net_profit_rate"].replace(0,np.nan)
+    df["profit_per_day"]= df["profit_rate"] / df["max_hold_time"].replace(0,np.nan)
+
+    # 硬性过滤 ----------------------------------------------------
+    df["passed_filter"] = _pass_filter(df)
+
+    # 各维度得分 -----------------------------------------------
+    rtn  = _dim_score(df, RETURN)
+    rsk  = _dim_score(df, RISK)
+    cns  = _dim_score(df, CONSISTENCY)
+    eff  = _dim_score(df, EFFICIENCY)
+
+    df["score"] = (
+        DIM_W["return"] * rtn +
+        DIM_W["risk"]   * rsk +
+        DIM_W["cons"]   * cns +
+        DIM_W["eff"]    * eff
+    )
+
+    # 过滤不合格策略（得分置 NaN，排在后面）
+    df.loc[~df["passed_filter"], "score"] = np.nan
+
+    # 排名与分档 -------------------------------------------------
+    df["rank"] = df["score"].rank(method="min", ascending=False)
+
+    mu, sigma = df["score"].mean(skipna=True), df["score"].std(skipna=True)
+    upper, lower = mu + 0.5*sigma, mu - 0.5*sigma
+
+    def _grade(x):
+        if np.isnan(x): return "F"
+        if x >= upper:  return "A"
+        if x <= lower:  return "C"
+        return "B"
+    df["grade"] = df["score"].apply(_grade)
+
+    return df.sort_values("rank")
 
 def example():
     # get_common_data()
-    inst_id_list = ['ETH', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
     is_reverse = False
+    all_list = []
     # pd.read_parquet(f'temp/final_good_BTC_True_filter_all.parquet')
 
     for inst_id in inst_id_list:
+        file_path = f'temp_back/all_files_{20251}_1m_5000000_{inst_id}_donchian_1_20_1_relate_400_1000_100_1_40_6_cci_1_2000_1000_1_2_1_atr_1_3000_3000_boll_1_3000_100_1_50_2_rsi_1_1000_500_abs_1_100_100_40_100_1_macd_300_1000_50_macross_1_3000_100_1_3000_100__{is_reverse}.parquet'
+        best_df = pd.read_parquet(file_path)
+        best_df['year'] = 20251
         output_path = f'temp_back/{inst_id}_{is_reverse}_pure_data.parquet'
         df = pd.read_parquet(f'temp_back\statistic_results_final_{inst_id}_{is_reverse}.parquet')
         df = compute_rewarded_penalty_from_flat_df(df)
+        df['inst_id'] = inst_id
+        # 合并df和best_df
+        temp_df = df.merge(best_df, on=['kai_column', 'pin_column'], how='left')
+        temp_df = compute_scores_v2(temp_df)
+        all_list.append(temp_df)
         if os.path.exists(output_path):
             result_df = pd.read_parquet(output_path)
+    all_df = pd.concat(all_list, ignore_index=True)
+    print(f"所有的组合数：{len(all_df)}")
 
         #
         #     result_df = add_raw_diff_columns(result_df)

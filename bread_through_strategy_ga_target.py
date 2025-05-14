@@ -862,7 +862,7 @@ def process_signal_pair(pair):
     kai_column, pin_column = pair
     try:
         _, stat = get_detail_backtest_result_op(df, kai_column, pin_column, is_filter=True, is_detail=False,
-                                                is_reverse=False)
+                                                is_reverse=True)
     except Exception as e:
         print(f"Error processing pair ({kai_column}, {pin_column}): {e}")
         stat = None
@@ -916,6 +916,15 @@ def load_or_compute_precomputed_signals(df, signals, key_name):
         print(f"Error saving precomputed signals: {e}")
     return precomputed
 
+def get_property_name(inst_id, is_reverse):
+    year_list = [20231,20232,20241,20242,20251]
+    for year in year_list:
+        file_path = f'temp_back/all_files_{year}_1m_5000000_{inst_id}_donchian_1_20_1_relate_400_1000_100_1_40_6_cci_1_2000_1000_1_2_1_atr_1_3000_3000_boll_1_3000_100_1_50_2_rsi_1_1000_500_abs_1_100_100_40_100_1_macd_300_1000_50_macross_1_3000_100_1_3000_100__{is_reverse}.parquet'
+        if os.path.exists(file_path):
+            df = pd.read_parquet(file_path)
+            if len(df) < 200000:
+                return file_path
+    return file_path
 
 def validation(market_data_file):
     base_name = os.path.basename(market_data_file)
@@ -949,21 +958,21 @@ def validation(market_data_file):
     df_local["timestamp"] = pd.to_datetime(df_local["timestamp"])
 
     print(f"Loaded market data: 共 {df_local.shape[0]} 行")
-    is_reverse = False
+    is_reverse = True
 
     # 3. 设置主进程全局变量，用于预计算
     global df
     df = df_local
 
     # 注意：这里只读取需要的列： kai_column 和 pin_column
-    stat_df_file_list = [f'temp_back/all_files_20251_1m_5000000_{inst_id}_donchian_1_20_1_relate_400_1000_100_1_40_6_cci_1_2000_1000_1_2_1_atr_1_3000_3000_boll_1_3000_100_1_50_2_rsi_1_1000_500_abs_1_100_100_40_100_1_macd_300_1000_50_macross_1_3000_100_1_3000_100__{is_reverse}.parquet']
+    stat_df_file_list = [get_property_name(inst_id, is_reverse)]
     for stat_df_file in stat_df_file_list:
         try:
             # 1. 加载 stat_df 文件（只读取必要的两列）
             stat_df = pd.read_parquet(stat_df_file, columns=["kai_column", "pin_column"])
             # 去重
             stat_df = stat_df.drop_duplicates(subset=["kai_column", "pin_column"])
-            stat_df_base_name = os.path.basename(stat_df_file)
+            print(f"Loaded stat_df: 共 {stat_df.shape[0]} 行 {stat_df_file}")
             if "kai_column" not in stat_df.columns or "pin_column" not in stat_df.columns:
                 print("输入的 stat_df 文件中必须包含 'kai_column' 和 'pin_column' 两列")
                 sys.exit(1)
@@ -1020,7 +1029,7 @@ def validation(market_data_file):
                 with multiprocessing.Pool(processes=pool_processes,
                                           initializer=init_worker_with_signals,
                                           initargs=(GLOBAL_SIGNALS, df)) as pool:
-                    results = pool.map(process_signal_pair, batch_pairs, chunksize=1000)
+                    results = pool.map(process_signal_pair, batch_pairs, chunksize=10)
 
                 # 过滤掉返回 None 的结果
                 results_filtered = [r for r in results if r[2] is not None]
@@ -1321,10 +1330,10 @@ if __name__ == "__main__":
         # "kline_data/origin_data_1m_10000_XRP-USDT-SWAP.csv",
         # "kline_data/origin_data_1m_10000_PEPE-USDT-SWAP.csv",
 
-        "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
-        # "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_DOGE-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_XRP-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_OKB-USDT_2025-05-06.csv",
