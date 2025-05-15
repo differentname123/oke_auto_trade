@@ -50,7 +50,7 @@ def get_newest_threshold_price(
       2. 再对首片段下边界、末片段上边界做二分细化。
     若区间内无 True，返回 (None, None)。
     """
-
+    print(f"【{INSTRUMENT}】信号 {signal_name} 计算目标价格范围")
     # ---------- 预处理 ----------
     idx = df.index[-1]                      # 最后一根 bar 的行号
     orig_high: float = df.at[idx, "high"]
@@ -160,151 +160,24 @@ def get_newest_threshold_price(
 
     return refined_lower, refined_upper
 
-##############################################
-# 信号计算函数（与之前一致）
-##############################################
-def compute_threshold_direction(df, col_name):
-    parts = col_name.split("_")
-    signal_type = parts[0]
-    direction = parts[-1]  # long 或 short
-
-    if signal_type == "abs":
-        period = int(parts[1])
-        abs_value = float(parts[2]) / 100.0
-        if direction == "long":
-            threshold_series = (df["low"].shift(1).rolling(period).min() * (1 + abs_value)).round(4)
-            op = ">"
-        else:
-            threshold_series = (df["high"].shift(1).rolling(period).max() * (1 - abs_value)).round(4)
-            op = "<"
-        direction_series = pd.Series([op] * len(df), index=df.index)
-        return threshold_series, direction_series
-
-    elif signal_type == "relate":
-        period = int(parts[1])
-        percent = float(parts[2]) / 100.0
-        min_low = df["low"].shift(1).rolling(period).min()
-        max_high = df["high"].shift(1).rolling(period).max()
-        if direction == "long":
-            threshold_series = (min_low + percent * (max_high - min_low)).round(4)
-            op = ">"
-        else:
-            threshold_series = (max_high - percent * (max_high - min_low)).round(4)
-            op = "<"
-        direction_series = pd.Series([op] * len(df), index=df.index)
-        return threshold_series, direction_series
-
-    elif signal_type == "donchian":
-        period = int(parts[1])
-        if direction == "long":
-            threshold_series = df["high"].shift(1).rolling(period).max().round(4)
-            op = ">"
-        else:
-            threshold_series = df["low"].shift(1).rolling(period).min().round(4)
-            op = "<"
-        direction_series = pd.Series([op] * len(df), index=df.index)
-        return threshold_series, direction_series
-
-    elif signal_type == "boll":
-        period = int(parts[1])
-        std_multiplier = float(parts[2])
-        ma = df["close"].rolling(window=period, min_periods=period).mean()
-        std_dev = df["close"].rolling(window=period, min_periods=period).std()
-        upper_band = (ma + std_multiplier * std_dev).round(4)
-        lower_band = (ma - std_multiplier * std_dev).round(4)
-        if direction == "long":
-            threshold_series = lower_band
-            op = ">"
-            if df["close"].iloc[-1] > lower_band.iloc[-1]:
-                op = None
-        else:
-            threshold_series = upper_band
-            op = "<"
-            if df["close"].iloc[-1] < upper_band.iloc[-1]:
-                op = None
-        direction_series = pd.Series([op] * len(df), index=df.index)
-        return threshold_series, direction_series
-
-    elif signal_type == "macross":
-        fast_period = int(parts[1])
-        slow_period = int(parts[2])
-        fast_ma = df["close"].rolling(window=fast_period, min_periods=fast_period).mean().round(4)
-        slow_ma = df["close"].rolling(window=slow_period, min_periods=slow_period).mean().round(4)
-        threshold_series = slow_ma
-        op = ">" if direction == "long" else "<"
-        direction_series = pd.Series([op] * len(df), index=df.index)
-        return threshold_series, direction_series
-
-    elif signal_type == "rsi":
-        period = int(parts[1])
-        overbought = int(parts[2])
-        oversold = int(parts[3])
-        delta = df["close"].diff(1).astype(np.float32)
-        gain = delta.clip(lower=0)
-        loss = -delta.clip(upper=0)
-        avg_gain = gain.rolling(window=period, min_periods=period).mean()
-        avg_loss = loss.rolling(window=period, min_periods=period).mean()
-        rs = avg_gain / (avg_loss.replace(0, np.nan))
-        rsi = 100 - (100 / (1 + rs))
-        if direction == "long":
-            threshold_series = pd.Series([oversold] * len(df), index=df.index)
-            op = ">"
-        else:
-            threshold_series = pd.Series([overbought] * len(df), index=df.index)
-            op = "<"
-        direction_series = pd.Series([op] * len(df), index=df.index)
-        return threshold_series, direction_series
-
-    elif signal_type == "macd":
-        fast_period, slow_period, signal_period = map(int, parts[1:4])
-        fast_ema = df["close"].ewm(span=fast_period, adjust=False).mean()
-        slow_ema = df["close"].ewm(span=slow_period, adjust=False).mean()
-        macd_line = fast_ema - slow_ema
-        signal_line = macd_line.ewm(span=signal_period, adjust=False).mean()
-        threshold_series = signal_line.round(4)
-        op = ">" if direction == "long" else "<"
-        direction_series = pd.Series([op] * len(df), index=df.index)
-        return threshold_series, direction_series
-
-    elif signal_type == "cci":
-        period = int(parts[1])
-        tp = (df["high"] + df["low"] + df["close"]) / 3
-        ma = tp.rolling(period).mean()
-        md = tp.rolling(period).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
-        cci = (tp - ma) / (0.015 * md)
-        if direction == "long":
-            threshold_series = pd.Series([-100] * len(df), index=df.index)
-            op = ">"
-        else:
-            threshold_series = pd.Series([100] * len(df), index=df.index)
-            op = "<"
-        direction_series = pd.Series([op] * len(df), index=df.index)
-        return threshold_series, direction_series
-
-    elif signal_type == "atr":
-        period = int(parts[1])
-        tr = pd.concat([
-            df["high"] - df["low"],
-            abs(df["high"] - df["close"].shift(1)),
-            abs(df["low"] - df["close"].shift(1))
-        ], axis=1).max(axis=1)
-        atr = tr.rolling(period).mean()
-        atr_ma = atr.rolling(period).mean()
-        threshold_series = atr_ma.round(4)
-        op = ">" if direction == "long" else "<"
-        direction_series = pd.Series([op] * len(df), index=df.index)
-        return threshold_series, direction_series
-
-    else:
-        raise ValueError(f"未知或不支持的信号类型: {signal_type}")
-
-def update_price_map(strategy_df, df, target_column='kai_column'):
+def update_price_map(strategy_df, df, target_column='kai_column', is_close=False, target_price_info_map={}):
     """
     根据策略 DataFrame 中的信号，对最新行情数据生成目标价格映射
     """
     kai_column_list = strategy_df[target_column].unique().tolist()
-    target_price_info_map = {}
+    key_list = ['abs', 'relate', 'donchian']
+    print(f'{INSTRUMENT} 策略信号列表: 已有信号{len(target_price_info_map)} is_close {is_close}')
     for kai_column in kai_column_list:
+        if not is_close:
+            # kai_column必须包含key_list
+            if not any(k in kai_column for k in key_list):
+                print(f"❌ {kai_column} 不支持开仓信号")
+                continue
+        else:
+            # kai_column不能包含key_list
+            if any(k in kai_column for k in key_list):
+                print(f"❌ {kai_column} 不支持平仓信号")
+                continue
         try:
             min_price, max_price = get_newest_threshold_price(df, kai_column)
         except Exception as e:
@@ -314,6 +187,7 @@ def update_price_map(strategy_df, df, target_column='kai_column'):
             print(f"❌ {kai_column} 的目标价格计算失败")
             continue
         target_price_info_map[kai_column] = (min_price, max_price)
+    print(f"【{INSTRUMENT}】{target_column} 目标价格映射: {len(target_price_info_map)}")
     return target_price_info_map
 
 ##############################################
@@ -333,6 +207,26 @@ async def fetch_new_data(max_period):
     while True:
         try:
             now = datetime.datetime.now()
+            current_seconds = datetime.datetime.now().second
+            if current_seconds > 50:
+                price_list.clear()
+                df = newest_data.get_newnewest_data()
+                kai_target_price_info_map = update_price_map(strategy_df, df, target_column='kai_column', is_close=True, target_price_info_map=kai_target_price_info_map)
+                pin_target_price_info_map = update_price_map(strategy_df, df, target_column='pin_column', is_close=True, target_price_info_map=pin_target_price_info_map)
+                for kai in kai_column_list:
+                    kai_value = kai_target_price_info_map.get(kai)
+                    pin = kai_pin_map.get(kai)
+                    pin_value = pin_target_price_info_map.get(pin)
+
+                    # 使用 kai 作为 key 存储对应信号的数据
+                    result["signals"][kai] = {
+                        "open_target_price": kai_value,  # 开仓目标价格
+                        "close_signal": pin,  # 平仓信号
+                        "close_target_price": pin_value  # 平仓目标价格
+                    }
+
+                print(f"close 之后{INSTRUMENT} 开仓信号个数 {len(kai_target_price_info_map)} 平仓信号个数{len(pin_target_price_info_map)}  详细结果：{result}")
+
             if current_minute is None or now.minute != current_minute:
                 print(f"🕐 {now.strftime('%H:%M')} {INSTRUMENT} 触发数据更新...")
                 attempt = 0
@@ -387,8 +281,6 @@ async def subscribe_channel(ws):
 
 async def websocket_listener():
     global price, price_list, is_new_minute
-    current_high = 0
-    current_low = 0
     while True:
         try:
             async with websockets.connect(OKX_WS_URL) as ws:
@@ -404,21 +296,13 @@ async def websocket_listener():
                             price_val = float(trade["px"])
                             # 去重处理
                             if is_new_minute:
-                                print(f"🕐 {INSTRUMENT} 新的一分钟，当前价格: {price_val}上一分钟最高价: {current_high}上一分钟最低价: {current_low}")
-                                current_high = 0
-                                current_low = 0
                                 is_new_minute = False
                             if price_val in price_list:
                                 continue
-                            if current_high == 0 or current_high < price_val:
-                                current_high = price_val
-                            if current_low == 0 or current_low > price_val:
-                                current_low = price_val
-
                             price_list.append(price_val)
                             price = price_val
-                            process_open_orders(price_val)
-                            process_close_orders(price_val)
+                            # process_open_orders(price_val)
+                            # process_close_orders(price_val)
                     except websockets.exceptions.ConnectionClosed:
                         print(f"🔴 {INSTRUMENT} WebSocket 连接断开，重连中...")
                         break
@@ -527,7 +411,7 @@ async def main_instrument():
         if os.path.exists(origin_good_path):
             temp_strategy_df = pd.read_parquet(origin_good_path)
             correlation_df = pd.read_parquet(corr_path)
-            selected_strategies, selected_correlation_df = select_strategies_optimized(temp_strategy_df, correlation_df,k=10, penalty_scaler=0.1, use_absolute_correlation=True)
+            selected_strategies, selected_correlation_df = select_strategies_optimized(temp_strategy_df, correlation_df,k=2, penalty_scaler=0.1, use_absolute_correlation=True)
             all_df.append(selected_strategies)
             print(f'{INSTRUMENT} final_good_df shape: {selected_strategies.shape[0]} 来自 {origin_good_path}')
     if all_df:

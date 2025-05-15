@@ -128,7 +128,7 @@ def filtering(origin_good_df, grouping_column, sort_key, _unused_threshold):
     print(f"总分组数量：{len(groups)} ，组内相关性阈值：{group_threshold}")
 
     filtered_dfs = []
-    with ProcessPoolExecutor(max_workers=3) as executor:
+    with ProcessPoolExecutor(max_workers=5) as executor:
         futures = [executor.submit(process_group, group, sort_key, group_threshold) for group in groups]
         for future in futures:
             result = future.result()
@@ -265,7 +265,7 @@ def debug():
     调试入口函数：
       遍历 temp/corr 目录下符合条件的文件，调用 find_all_valid_groups 进行处理。
     """
-    inst_id_list = ['BTC']
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
     is_reverse_list = [False, True]
     for inst_id in inst_id_list:
         for is_reverse in is_reverse_list:
@@ -841,8 +841,8 @@ def get_statistic_data():
 def example():
     # get_statistic_data()
     # filter_similar_strategy()
-    final_compute_corr()
-    # debug()
+    # final_compute_corr()
+    debug()
 
 
 

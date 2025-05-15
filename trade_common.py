@@ -48,6 +48,32 @@ class LatestDataManager:
             self.data_df.drop_duplicates(subset=['timestamp'], keep='first', inplace=True)
             # 排序
             self.data_df.sort_values(by='timestamp', ascending=True, inplace=True)
+            self.data_df = self.data_df[self.data_df['confirm'] == '1']  # 只保留confirm为1的数据
+
+            # 保留最新的capacity条数据
+            self.data_df = self.data_df.iloc[-self.capacity:]
+            return self.data_df
+
+        else:
+            print('历史数据不在最新数据中，重新获取数据')
+            self.data_df = get_train_data(max_candles=self.capacity)
+            self.data_df = self.data_df[self.data_df['confirm'] == '1']  # 只保留confirm为1的数据
+            return self.data_df
+
+    def get_newnewest_data(self):
+        recent_data_df = get_train_data(max_candles=self.max_single_size, is_newest=True, inst_id=self.inst_id)
+        if recent_data_df.empty:
+            print("获取最新数据失败，返回空数据")
+            return self.data_df
+        # 判断recent_data_df第一个时间戳（timestamp）是否在data_df中
+        if recent_data_df['timestamp'].iloc[0] in self.data_df['timestamp'].values:
+            print('历史数据在最新数据中，更新数据')
+            # 合并两个df
+            self.data_df = pd.concat([recent_data_df, self.data_df], ignore_index=True)
+            # 去重
+            self.data_df.drop_duplicates(subset=['timestamp'], keep='first', inplace=True)
+            # 排序
+            self.data_df.sort_values(by='timestamp', ascending=True, inplace=True)
             # 保留最新的capacity条数据
             self.data_df = self.data_df.iloc[-self.capacity:]
             return self.data_df
