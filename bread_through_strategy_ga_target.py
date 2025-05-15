@@ -919,7 +919,7 @@ def load_or_compute_precomputed_signals(df, signals, key_name):
 def get_property_name(inst_id, is_reverse):
     year_list = [20231,20232,20241,20242,20251]
     for year in year_list:
-        file_path = f'temp_back/all_files_{year}_1m_5000000_{inst_id}_donchian_1_20_1_relate_400_1000_100_1_40_6_cci_1_2000_1000_1_2_1_atr_1_3000_3000_boll_1_3000_100_1_50_2_rsi_1_1000_500_abs_1_100_100_40_100_1_macd_300_1000_50_macross_1_3000_100_1_3000_100__{is_reverse}.parquet'
+        file_path = f'temp_back/all_files_{year}_1m_5000000_{inst_id}_short_donchian_1_20_1_relate_400_1000_100_1_40_6_cci_1_2000_1000_1_2_1_atr_1_3000_3000_boll_1_3000_100_1_50_2_rsi_1_1000_500_abs_1_100_100_40_100_1_macd_300_1000_50_macross_1_3000_100_1_3000_100__{is_reverse}.parquet'
         if os.path.exists(file_path):
             df = pd.read_parquet(file_path)
             if len(df) < 200000:
@@ -1331,9 +1331,9 @@ if __name__ == "__main__":
         # "kline_data/origin_data_1m_10000_PEPE-USDT-SWAP.csv",
 
         # "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
-        # "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
-        "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_DOGE-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_XRP-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_OKB-USDT_2025-05-06.csv",

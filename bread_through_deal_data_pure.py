@@ -511,7 +511,7 @@ def get_common_data():
     combinations_list = []
 
     for inst_id in inst_id_list:
-        file_path = f'temp_back\statistic_results_final_{inst_id}_True.parquet'
+        file_path = f'temp_back\statistic_results_final_{inst_id}_False.parquet'
         if os.path.exists(file_path):
             df = pd.read_parquet(file_path)
             df['inst_id'] = inst_id
@@ -530,7 +530,8 @@ def get_common_data():
             'max_consecutive_loss',
             'net_profit_rate',
             'kai_count',
-            'score_final'
+            'score_final',
+            'capital_no_leverage'
         ]
     )
     result.to_parquet(f'temp_back/temp.parquet', index=False)
@@ -646,7 +647,7 @@ def compute_scores_v2(df_raw: pd.DataFrame) -> pd.DataFrame:
     return df.sort_values("rank")
 
 def example():
-    # get_common_data()
+    get_common_data()
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
     is_reverse = False
     all_list = []
