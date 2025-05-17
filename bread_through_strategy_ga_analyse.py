@@ -3,18 +3,69 @@ import time
 
 import numpy as np
 import pandas as pd
-from functools import lru_cache
-
-# from bread_through_deal_data import compute_signal
 
 def compute_signal(df, col_name):
     """
     根据历史行情数据(df)和指定信号名称(col_name)生成交易信号。
+    支持的信号类型包括：abs, relate, donchian, boll, macross, rsi, macd, cci, atr。
     """
     parts = col_name.split("_")
     signal_type = parts[0]
     direction = parts[-1]
-    if signal_type == "boll":
+
+    if signal_type == "abs":
+        period = int(parts[1])
+        abs_value = float(parts[2]) / 100
+        if direction == "long":
+            min_low = df["low"].shift(1).rolling(period).min()
+            target_price = (min_low * (1 + abs_value)).round(4)
+            signal_series = df["high"] > target_price
+        else:
+            max_high = df["high"].shift(1).rolling(period).max()
+            target_price = (max_high * (1 - abs_value)).round(4)
+            signal_series = df["low"] < target_price
+
+        valid_trade = (target_price >= df["low"]) & (target_price <= df["high"])
+        signal_series = signal_series & valid_trade
+        trade_price_series = target_price
+        # 可选记录调试数据
+        df["target_price"] = target_price
+        df["signal_series"] = signal_series
+        df["trade_price_series"] = trade_price_series
+        return signal_series, trade_price_series
+
+    elif signal_type == "relate":
+        period = int(parts[1])
+        percent = float(parts[2]) / 100
+        min_low = df["low"].shift(1).rolling(period).min()
+        max_high = df["high"].shift(1).rolling(period).max()
+        if direction == "long":
+            target_price = (min_low + percent * (max_high - min_low)).round(4)
+            signal_series = df["high"] > target_price
+        else:
+            target_price = (max_high - percent * (max_high - min_low)).round(4)
+            signal_series = df["low"] < target_price
+
+        valid_trade = (target_price >= df["low"]) & (target_price <= df["high"])
+        signal_series = signal_series & valid_trade
+        return signal_series, target_price
+
+    elif signal_type == "donchian":
+        period = int(parts[1])
+        if direction == "long":
+            highest_high = df["high"].shift(1).rolling(period).max()
+            signal_series = df["high"] > highest_high
+            target_price = highest_high
+        else:
+            lowest_low = df["low"].shift(1).rolling(period).min()
+            signal_series = df["low"] < lowest_low
+            target_price = lowest_low
+        valid_trade = (target_price >= df["low"]) & (target_price <= df["high"])
+        signal_series = signal_series & valid_trade
+        trade_price_series = target_price.round(4)
+        return signal_series, trade_price_series
+
+    elif signal_type == "boll":
         period = int(parts[1])
         std_multiplier = float(parts[2])
         ma = df["close"].rolling(window=period, min_periods=period).mean()
@@ -26,7 +77,8 @@ def compute_signal(df, col_name):
         else:
             signal_series = (df["close"].shift(1) > upper_band.shift(1)) & (df["close"] <= upper_band)
         return signal_series, df["close"]
-    if signal_type == "macross":
+
+    elif signal_type == "macross":
         fast_period = int(parts[1])
         slow_period = int(parts[2])
         fast_ma = df["close"].rolling(window=fast_period, min_periods=fast_period).mean().round(4)
@@ -37,456 +89,476 @@ def compute_signal(df, col_name):
             signal_series = (fast_ma.shift(1) > slow_ma.shift(1)) & (fast_ma <= slow_ma)
         return signal_series, df["close"]
 
-def compute_live_signal_price_range_boll(df, col_name):
-    """
-    在实盘中，根据历史数据(df)提前计算出让最新数据满足信号要求的价格范围。
-    对于Bollinger信号：
-      - 多头信号返回：只要最新价格 >= X_min，则满足条件。
-      - 空头信号返回：只要最新价格 <= X_max，则满足条件。
-
-    注意：此处使用的滚动窗口构造为最新窗口，由最近 period-1 根已知收盘价和未来未知价格组成，
-    需提前满足前一根bar的信号条件才能计算出有效的价格水平。
-    """
-    parts = col_name.split("_")
-    signal_type = parts[0]
-    direction = parts[-1]
-
-    if signal_type != "boll":
-        raise NotImplementedError("目前仅支持boll信号类型")
-
-    period = int(parts[1])
-    std_multiplier = float(parts[2])
-
-    # 保证历史数据足够构造新的窗口（需要 period-1 个历史收盘价）
-    if len(df) < period - 1:
-        raise ValueError("历史数据不足，至少需要 {} 个数据点".format(period - 1))
-
-    # 计算历史的滚动Bollinger带（用于验证前一根bar的条件）
-    ma = df["close"].rolling(window=period, min_periods=period).mean()
-    std_dev = df["close"].rolling(window=period, min_periods=period).std()
-    upper_band = (ma + std_multiplier * std_dev).round(4)
-    lower_band = (ma - std_multiplier * std_dev).round(4)
-
-    # 检查上一根bar是否满足信号条件
-    if len(df) < 2:
-        raise ValueError("至少需要2根数据才能验证前一根bar的信号条件")
-
-    if direction == "long":
-        # 前一根bar的条件：收盘价 < 下轨
-        if not (df["close"].iloc[-2] < lower_band.iloc[-2]):
-            # 如果不满足，说明当前时刻不满足生成信号的条件，返回None
-            return None
-    else:  # short
-        # 前一根bar的条件：收盘价 > 上轨
-        if not (df["close"].iloc[-2] > upper_band.iloc[-2]):
-            return None
-
-    # 取最近 period-1 根已知的收盘价组成新的滚动窗口数据
-    historical_prices = df["close"].iloc[-(period - 1):]
-    S1 = historical_prices.sum()  # sum(x_i)
-    S2 = (historical_prices ** 2).sum()  # sum(x_i^2)
-    n = period  # 窗口长度(历史期数 + 新价格 X)
-
-    # 定义用于求根的函数
-    if direction == "long":
-        def f_long(X):
-            mean = (S1 + X) / n
-            # 计算加入X后的样本方差（ddof=1）
-            variance = (S2 + X ** 2 - (S1 + X) ** 2 / n) / (n - 1)
-            sigma = math.sqrt(variance) if variance > 0 else 0
-            lower = mean - std_multiplier * sigma
-            return X - lower  # 当 X - lower == 0 时，即为临界价格
-
-        # 找到 f_long(X)=0 的根，即最低价格要求 X_min
-        # 采用二分法。首先构造一个区间保证 f_long(lower_bound) <= 0， f_long(upper_bound) >= 0
-        low = 0.0
-        # 初始取当前最后一根bar的价格作为高估计，也可以根据实际情况调整
-        high = float(df["close"].iloc[-1])
-        # 如果 high 处 f_long 函数仍小于 0，则不断扩大 high
-        while f_long(high) < 0:
-            high *= 2
-
-        tol = 1e-6
-        max_iter = 100
-        for i in range(max_iter):
-            mid = (low + high) / 2
-            f_mid = f_long(mid)
-            if abs(f_mid) < tol:
-                break
-            if f_long(low) * f_mid < 0:
-                high = mid
-            else:
-                low = mid
-        price_threshold = mid
-        # 对多头来说，只要未来价格 >= price_threshold 即可触发信号
-        return {"long": {"min_price": round(price_threshold, 4)}}
-
-    else:  # direction == "short"
-        def f_short(X):
-            mean = (S1 + X) / n
-            variance = (S2 + X ** 2 - (S1 + X) ** 2 / n) / (n - 1)
-            sigma = math.sqrt(variance) if variance > 0 else 0
-            upper = mean + std_multiplier * sigma
-            return upper - X  # 当 upper - X == 0 时，即为临界价格
-
-        # 同样采用二分法求解 f_short(X)=0，此处希望找到 X_max，使得价格必须 <= X_max 才能触发信号
-        low = 0.0
-        high = float(df["close"].iloc[-1])
-        # 需要保证 low 处 f_short >= 0，而 high 处 f_short <= 0
-        while f_short(low) < 0:
-            low = max(low - 10, 0)
-        while f_short(high) > 0:
-            high *= 2
-
-        tol = 1e-6
-        max_iter = 100
-        for i in range(max_iter):
-            mid = (low + high) / 2
-            f_mid = f_short(mid)
-            if abs(f_mid) < tol:
-                break
-            if f_short(low) * f_mid < 0:
-                high = mid
-            else:
-                low = mid
-        price_threshold = mid
-        # 对空头来说，只要未来价格 <= price_threshold 即可触发信号
-        return {"short": {"max_price": round(price_threshold, 4)}}
-
-
-
-def validate_live_signal_threshold_all_boll(df, signal_name, max_false_samples=5):
-    """
-    验证历史信号和实时计算阈值的一致性：
-
-    步骤：
-      1. 使用 compute_signal 得到所有历史行的信号（True/False）。
-      2. 对于满足滚动窗口要求的数据（至少 period 个数据），逐行模拟实时数据（df[0:idx+1]），
-         调用 compute_live_signal_price_range_boll 得到实时阈值。
-      3. 如果生成信号 (True)：
-             long: 要求 close >= min_price；
-             short: 要求 close <= max_price。
-         如果未生成信号 (False)：
-             long: 要求 close < min_price；
-             short: 要求 close > max_price。
-      4. 如果 compute_live_signal_price_range_boll 返回 None，
-         表示前一根bar条件不满足，此时只要 signal_generated 为 False 就认为验证成功。
-
-    为了减少对 False 情况的计算，当 False 的验证超过 max_false_samples 后，后续 False 不再验证。
-
-    返回一个列表，每个元素为一个字典，包含：
-      - index：行索引
-      - signal_generated：compute_signal生成的信号 (True/False)
-      - close：当时的收盘价
-      - threshold：计算得到的价格阈值（如果有）
-      - valid：该行是否满足阈值要求 (True/False)
-      - difference：（对于 long 为 close - threshold，对于 short 为 threshold - close）
-      - note：其他说明信息
-    """
-    signal_series, _ = compute_signal(df, signal_name)
-    results = []
-    period = int(signal_name.split("_")[1])
-    direction = signal_name.split("_")[-1]
-
-    false_count = 0  # 用于采样 False 的计数
-    for idx in range(len(df)):
-        # 如果数据不足以构成滚动窗口，则跳过
-        if idx + 1 < period:
-            continue
-
-        signal_flag = signal_series.iloc[idx]
-        # 如果当前信号为 False 且 False 验证样本数量超过上限，则跳过
-        if not signal_flag and false_count >= max_false_samples:
-            continue
-
-        df_sub = df.iloc[:idx + 1].copy()  # 模拟"实时"数据
-        try:
-            threshold_result = compute_live_signal_price_range_boll(df_sub, signal_name)
-        except Exception as e:
-            threshold_result = None
-            note = f"计算阈值出错: {e}"
+    elif signal_type == "rsi":
+        period = int(parts[1])
+        overbought = int(parts[2])
+        oversold = int(parts[3])
+        delta = df["close"].diff(1).astype(np.float32)
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        avg_gain = gain.rolling(window=period, min_periods=period).mean()
+        avg_loss = loss.rolling(window=period, min_periods=period).mean()
+        rs = avg_gain / (avg_loss.replace(0, np.nan))
+        rsi = 100 - (100 / (1 + rs))
+        if direction == "long":
+            signal_series = (rsi.shift(1) < oversold) & (rsi >= oversold)
         else:
-            note = ""
+            signal_series = (rsi.shift(1) > overbought) & (rsi <= overbought)
+        return signal_series, df["close"]
 
-        row_close = df.iloc[idx]["close"]
-
-        # 当返回 threshold_result 为 None 时，
-        # 如果 signal_generated 为 False，我们认为验证成功
-        if threshold_result is None:
-            if not signal_flag:
-                valid = True
-                note += " (前一根bar条件不满足，因此未生成信号, 验证成功)"
-            else:
-                valid = False
-                note += " (前一根bar条件不满足，但信号仍为True)"
-            result = {
-                "index": idx,
-                "signal_generated": signal_flag,
-                "close": row_close,
-                "threshold": None,
-                "valid": valid,
-                "difference": None,
-                "note": note
-            }
+    elif signal_type == "macd":
+        fast_period, slow_period, signal_period = map(int, parts[1:4])
+        fast_ema = df["close"].ewm(span=fast_period, adjust=False).mean()
+        slow_ema = df["close"].ewm(span=slow_period, adjust=False).mean()
+        macd_line = fast_ema - slow_ema
+        signal_line = macd_line.ewm(span=signal_period, adjust=False).mean()
+        if direction == "long":
+            signal_series = (macd_line.shift(1) < signal_line.shift(1)) & (macd_line >= signal_line)
         else:
-            if direction == "long":
-                threshold = threshold_result["long"]["min_price"]
-                if signal_flag:
-                    valid = row_close >= threshold
-                    diff = row_close - threshold
-                else:
-                    valid = row_close < threshold
-                    diff = row_close - threshold
-                result = {
-                    "index": idx,
-                    "signal_generated": signal_flag,
-                    "close": row_close,
-                    "threshold": threshold,
-                    "valid": valid,
-                    "difference": diff,
-                    "note": note
-                }
-            else:  # short
-                threshold = threshold_result["short"]["max_price"]
-                if signal_flag:
-                    valid = row_close <= threshold
-                    diff = threshold - row_close
-                else:
-                    valid = row_close > threshold
-                    diff = threshold - row_close
-                result = {
-                    "index": idx,
-                    "signal_generated": signal_flag,
-                    "close": row_close,
-                    "threshold": threshold,
-                    "valid": valid,
-                    "difference": diff,
-                    "note": note
-                }
-        if not signal_flag:
-            false_count += 1
-        results.append(result)
-    return results
+            signal_series = (macd_line.shift(1) > signal_line.shift(1)) & (macd_line <= signal_line)
+        return signal_series, df["close"]
+
+    elif signal_type == "cci":
+        period = int(parts[1])
+        tp = (df["high"] + df["low"] + df["close"]) / 3
+        ma = tp.rolling(period).mean()
+        md = tp.rolling(period).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+        cci = (tp - ma) / (0.015 * md)
+        if direction == "long":
+            signal_series = (cci.shift(1) < -100) & (cci >= -100)
+        else:
+            signal_series = (cci.shift(1) > 100) & (cci <= 100)
+        return signal_series, df["close"]
+
+    elif signal_type == "atr":
+        period = int(parts[1])
+        tr = pd.concat([
+            df["high"] - df["low"],
+            abs(df["high"] - df["close"].shift(1)),
+            abs(df["low"] - df["close"].shift(1))
+        ], axis=1).max(axis=1)
+        atr = tr.rolling(period).mean()
+        atr_ma = atr.rolling(period).mean()
+        if direction == "long":
+            signal_series = (atr.shift(1) < atr_ma.shift(1)) & (atr >= atr_ma)
+        else:
+            signal_series = (atr.shift(1) > atr_ma.shift(1)) & (atr <= atr_ma)
+        return signal_series, df["close"]
+
+    else:
+        raise ValueError(f"未知信号类型: {signal_type}")
 
 
-def compute_next_signal_price_range(df, col_name):
-    """
-    根据历史行情数据(df)和信号名称(col_name)计算使下一个数据满足信号条件的价格范围。
-    如果数据不足或无法计算，也返回 None。
-    """
+def compute_price_range_abs(df, col_name):
+
     parts = col_name.split("_")
-    if len(parts) < 2:
+    if len(parts) < 4:
         return None
 
     signal_type = parts[0]
+    try:
+        period = int(parts[1])
+        abs_value = float(parts[2]) / 100
+    except Exception:
+        return None
+
     direction = parts[-1]
+    if signal_type != "abs":
+        return None  # 目前只支持 abs 类型
 
-    # ---------- abs 信号 -----------
-    if signal_type == "abs":
-        try:
-            period = int(parts[1])
-            abs_value = float(parts[2]) / 100
-        except (IndexError, ValueError):
-            return None
-        if direction == "long":
-            # 使用前一根K线数据计算 rolling 的最小值
-            historical_min_low = df["low"].rolling(period).min().iloc[-1]
-            if np.isnan(historical_min_low):
-                return None
-            target = round(historical_min_low * (1 + abs_value), 4)
-            # 对于下根K线，条件为：low <= target <= high 且 high > target
-            return (target, 10000000)
-        else:  # direction == "short"
-            historical_max_high = df["high"].rolling(period).max().iloc[-1]
-            if np.isnan(historical_max_high):
-                return None
-            target = round(historical_max_high * (1 - abs_value), 4)
-            return (0, target)
+    # 对下一根K线计算使用历史数据窗口：最近 period 行
+    if len(df) < period:
+        return None
+    latest_close = df.iloc[-1]["close"]
 
-    # ---------- relate 信号 -----------
-    elif signal_type == "relate":
-        try:
-            period = int(parts[1])
-            percent = float(parts[2]) / 100
-        except (IndexError, ValueError):
-            return None
-        historical_min = df["low"].rolling(period).min().iloc[-1]
-        historical_max = df["high"].rolling(period).max().iloc[-1]
-        if np.isnan(historical_min) or np.isnan(historical_max):
-            return None
-        if direction == "long":
-            target = round(historical_min + percent * (historical_max - historical_min), 4)
-            return (target, 10000000)
-        else:
-            target = round(historical_max - percent * (historical_max - historical_min), 4)
-            return (0, target)
-
-    # ---------- donchian 信号 -----------
-    elif signal_type == "donchian":
-        try:
-            period = int(parts[1])
-        except (IndexError, ValueError):
-            return None
-        if direction == "long":
-            historical_highest = df["high"].rolling(period).max().iloc[-1]
-            if np.isnan(historical_highest):
-                return None
-            target = round(historical_highest, 4)
-            return (target, 10000000)
-        else:
-            historical_lowest = df["low"].rolling(period).min().iloc[-1]
-            if np.isnan(historical_lowest):
-                return None
-            target = round(historical_lowest, 4)
-            return (0, target)
-
-    elif signal_type == "macross":
-        try:
-            fast_period = int(parts[1])
-            slow_period = int(parts[2])
-        except (IndexError, ValueError):
-            return None
-
-        closes = df["close"]
-        if len(closes) < max(fast_period, slow_period):
-            return None
-        if (fast_period - 1) <= 0 or (slow_period - 1) <= 0:
-            return None
-
-        S_f = closes.iloc[-(fast_period - 1):].sum()
-        S_s = closes.iloc[-(slow_period - 1):].sum()
-        try:
-            threshold = (fast_period * S_s - slow_period * S_f) / (slow_period - fast_period)
-        except ZeroDivisionError:
-            return None
-        threshold = round(threshold, 4)
-        if direction == "long":
-            return (threshold, 1000000)
-        else:
-            return (0, threshold)
-
-
-
-
-def validate_compute_next_signal_price_range(df, col_name):
-    """
-    验证 compute_next_signal_price_range 的计算是否正确。
-
-    验证逻辑：
-    1. 使用 compute_signal 计算整个历史数据的信号。
-    2. 对于每个信号触发的行（True），取该行之前的历史数据（df.iloc[:i]），
-       计算出使下一个信号触发的价格范围 predicted_range，
-       并验证新行是否满足条件（abs/relate/donchian 类型要求新行价格区间包含目标价，
-       macross 类型要求收盘价达到或不超过阈值）。
-    3. 同时对未触发的（False）信号，也做同样操作，但仅验证最后 100 条 False 信号，
-       并判断其价格是否“不满足”应触发该信号的条件。
-    4. 如果检测到问题，则打印出来，否则说明验证通过。
-    """
-    # 目前只有 abs、relate、donchian、macross 信号支持提前预测验证
-    verifiable_types = ["abs", "relate", "donchian", "macross"]
-    if not any(col_name.startswith(v) for v in verifiable_types):
-        print(f"信号 {col_name} 暂不支持提前预测条件验证。")
-        return
-
-    signal_series, _ = compute_signal(df, col_name)
-    issues = []
-
-    # 验证 True 信号
-    for i in range(1, len(df)):
-        if not signal_series.iloc[i]:
-            continue
-
-        hist_df = df.iloc[:i]
-        predicted_range = compute_next_signal_price_range(hist_df, col_name)
-        if predicted_range is None:
-            issues.append(f"索引 {i} (True): 预测价格范围为 None，但信号触发。")
-            continue
-
-        row = df.iloc[i]
-        if col_name.startswith("abs") or col_name.startswith("relate") or col_name.startswith("donchian"):
-            target = predicted_range[0]  # 预测结果为 (target, target)
-            if col_name.endswith("long"):
-                # 多头：应满足 new_row.low <= target <= new_row.high 且 new_row.high > target
-                if not (row["low"] <= target <= row["high"] and row["high"] > target):
-                    issues.append(
-                        f"索引 {i} (True, long): 预测目标 {target} 不在新行价格区间 [{row['low']}, {row['high']}] 内。")
-            else:
-                # 空头：应满足 new_row.low <= target <= new_row.high 且 new_row.low < target
-                if not (row["low"] <= target <= row["high"] and row["low"] < target):
-                    issues.append(
-                        f"索引 {i} (True, short): 预测目标 {target} 不在新行价格区间 [{row['low']}, {row['high']}] 内。")
-        elif col_name.startswith("macross"):
-            new_close = row["close"]
-            if col_name.endswith("long"):
-                if new_close < predicted_range[0]:
-                    issues.append(
-                        f"索引 {i} (True, macross long): 预测阈值 {predicted_range[0]} 未达成，新收盘价 {new_close}。")
-            else:
-                if new_close > predicted_range[1]:
-                    issues.append(
-                        f"索引 {i} (True, macross short): 预测阈值 {predicted_range[1]} 未满足，新收盘价 {new_close}。")
-
-    # 验证 False 信号，仅验证最后100个 False 的样本
-    false_indices = [i for i in range(1, len(df)) if not signal_series.iloc[i]]
-    false_indices = false_indices[-100:]
-    for i in false_indices:
-        hist_df = df.iloc[:i]
-        predicted_range = compute_next_signal_price_range(hist_df, col_name)
-        if predicted_range is None:
-            issues.append(f"索引 {i} (False): 预测价格范围为 None，但信号为 False。")
-            continue
-
-        row = df.iloc[i]
-        if col_name.startswith("abs") or col_name.startswith("relate") or col_name.startswith("donchian"):
-            target = predicted_range[0]
-            if col_name.endswith("long"):
-                # 若满足条件则应触发信号，但此处 signal 为 False
-                if row["low"] <= target <= row["high"] and row["high"] > target:
-                    issues.append(
-                        f"索引 {i} (False, long): 预测目标 {target} 却满足新行价格区间 [{row['low']}, {row['high']}]。")
-            else:
-                if row["low"] <= target <= row["high"] and row["low"] < target:
-                    issues.append(
-                        f"索引 {i} (False, short): 预测目标 {target} 却满足新行价格区间 [{row['low']}, {row['high']}]。")
-        elif col_name.startswith("macross"):
-            new_close = row["close"]
-            if col_name.endswith("long"):
-                # 对于多头，真信号要求 new_close >= threshold，所以 false 时应满足 new_close < threshold
-                if new_close >= predicted_range[0]:
-                    issues.append(
-                        f"索引 {i} (False, macross long): 预测阈值 {predicted_range[0]} 达成，新收盘价 {new_close}。")
-            else:
-                # 对于空头，真信号要求 new_close <= threshold，所以 false 时应满足 new_close > threshold
-                if new_close <= predicted_range[1]:
-                    issues.append(
-                        f"索引 {i} (False, macross short): 预测阈值 {predicted_range[1]} 满足，新收盘价 {new_close}。")
-
-    if issues:
-        print("验证中发现以下问题：")
-        for issue in issues:
-            print(issue)
+    if direction == "long":
+        window_min = df["low"].tail(period).min()
+        target_price = (window_min * (1 + abs_value))
+        if latest_close < target_price:
+            return (target_price, None)
+    elif direction == "short":
+        window_max = df["high"].tail(period).max()
+        target_price = (window_max * (1 - abs_value))
+        if latest_close > target_price:
+            return (None, target_price)
     else:
-        print("所有触发和未触发的信号均满足提前预测的价格范围条件。")
+        return None
+    return None
 
+
+def validate_signals_abs(
+        df: pd.DataFrame,
+        col_name: str,
+        verbose: bool = True
+    ):
+    max_samples = 10000
+    period = int(col_name.split("_")[1])
+
+    # 1. 得到基准信号
+    sig = compute_signal(df, col_name)[0].fillna(False)
+
+    # 2. 分组取样
+    true_idx  = sig[sig].index
+    false_idx = sig[~sig].index
+
+    rng = np.random.default_rng(42)   # 固定随机种子，方便复现
+    sample_true  = rng.choice(true_idx,  size=min(max_samples,  len(true_idx)),  replace=False) if len(true_idx)  else []
+    sample_false = rng.choice(false_idx, size=min(max_samples,  len(false_idx)), replace=False) if len(false_idx) else []
+    sample_idx   = np.concatenate([sample_true, sample_false])
+
+    mismatch = []
+
+    for i in sample_idx:
+        # compute_price_range_abs 只用到历史数据 => 取 i 之前所有行
+        if i < period:        # 滚动窗口不足，跳过
+            continue
+        hist_df = df.iloc[:i]  # 不含当前行 i
+        res = compute_price_range_abs(hist_df, col_name)
+
+        if res is None:
+            continue  # 理论上不会发生，保险起见
+
+        price_high = df.loc[i, "high"]
+        price_low  = df.loc[i, "low"]
+
+        direction = col_name.split("_")[-1]
+        if direction == "long":
+            match = price_high >= res[0]
+        else:  # short
+            match = price_low  <= res[1]
+
+        if match != sig.loc[i]:
+            mismatch.append(int(i))
+            if verbose:
+                print(f"[Mismatch] idx={i}, "
+                      f"expected {sig.loc[i]}, "
+                      f"price_high={price_high:.4f}, price_low={price_low:.4f}, "
+                      f"threshold={res}")
+
+    total_checked = len(sample_idx)
+    accuracy = 1 - len(mismatch) / total_checked if total_checked else 1.0
+
+    if verbose:
+        print(f"\nChecked {total_checked} samples "
+              f"({len(sample_true)} True, {len(sample_false)} False)")
+        print(f"Accuracy: {accuracy:.2%}  |  mismatches: {len(mismatch)}")
+
+    # 返回结果，True表示验证通过
+    return accuracy == 1.0
+
+
+def validate_signals_relate(
+        df: pd.DataFrame,
+        col_name: str,
+        verbose: bool = True
+    ):
+    max_samples = 10000
+    period = int(col_name.split("_")[1])
+
+    # 1. 得到基准信号
+    sig = compute_signal(df, col_name)[0].fillna(False)
+
+    # 2. 分组取样
+    true_idx  = sig[sig].index
+    false_idx = sig[~sig].index
+
+    rng = np.random.default_rng(42)   # 固定随机种子，方便复现
+    sample_true  = rng.choice(true_idx,  size=min(max_samples,  len(true_idx)),  replace=False) if len(true_idx)  else []
+    sample_false = rng.choice(false_idx, size=min(max_samples,  len(false_idx)), replace=False) if len(false_idx) else []
+    sample_idx   = np.concatenate([sample_true, sample_false])
+
+    mismatch = []
+
+    for i in sample_idx:
+        # compute_price_range_abs 只用到历史数据 => 取 i 之前所有行
+        if i < period:        # 滚动窗口不足，跳过
+            continue
+        hist_df = df.iloc[:i]  # 不含当前行 i
+        res = compute_price_range_abs(hist_df, col_name)
+
+        if res is None:
+            continue  # 理论上不会发生，保险起见
+
+        price_high = df.loc[i, "high"]
+        price_low  = df.loc[i, "low"]
+
+        direction = col_name.split("_")[-1]
+        if direction == "long":
+            match = price_high >= res[0]
+        else:  # short
+            match = price_low  <= res[1]
+
+        if match != sig.loc[i]:
+            mismatch.append(int(i))
+            if verbose:
+                print(f"[Mismatch] idx={i}, "
+                      f"expected {sig.loc[i]}, "
+                      f"price_high={price_high:.4f}, price_low={price_low:.4f}, "
+                      f"threshold={res}")
+
+    total_checked = len(sample_idx)
+    accuracy = 1 - len(mismatch) / total_checked if total_checked else 1.0
+
+    if verbose:
+        print(f"\nChecked {total_checked} samples "
+              f"({len(sample_true)} True, {len(sample_false)} False)")
+        print(f"Accuracy: {accuracy:.2%}  |  mismatches: {len(mismatch)}")
+
+    # 返回结果，True表示验证通过
+    return accuracy == 1.0
+
+def validate_signals_macd(df, col_name):
+    """
+    根据 compute_signal 的结果进行验证，包括：
+      1. 对于所有信号为 True 的行，验证该行的收盘价满足由前一根数据计算得到的价格触发条件，
+      2. 验证最后50行的信号都是 False。
+
+    参数:
+        df: 包含历史数据的 DataFrame，必须包含 'close' 列。
+        col_name: 信号指标名称，例如 "macd_12_26_9_long" 或 "macd_12_26_9_short"。
+
+    返回:
+        如果所有验证均通过，则返回 True；否则返回 False。
+    """
+    # 先计算整个 DataFrame 的信号序列，作为最终的信号标记标准
+    signal_series, _ = compute_signal(df, col_name)
+    count = 0
+    valid = True
+    # 从 col_name 中提取信号方向，用于后续判断
+    direction = col_name.split("_")[-1]
+
+    # 从索引 1 开始遍历（依赖于 shift(1) 的数据，第0行没有前置数据）
+    for i in range(1, len(df)):
+        # 对于第 i 行，模拟“实盘”情况：只有 df.iloc[:i] 的历史数据可用
+        hist_df = df.iloc[:i]
+        # 调用 compute_signal_range 得到下一根 K 线需要满足的价格范围
+
+        current_price = df.iloc[i]["close"]
+
+        if signal_series.iloc[i]:
+            range_result = compute_signal_range(hist_df, col_name)
+
+            # 如果本行信号为 True，意味着历史数据满足前置条件且实际的收盘价应触发信号
+            if range_result is None:
+                print(f"Index {i}: Signal is True but compute_signal_range returned None.")
+                valid = False
+            else:
+                lower, upper = range_result
+                if direction == "long":
+                    # long 信号要求：如果 lower_bound 存在，则收盘价必须 >= lower_bound
+                    if lower is not None and current_price < lower:
+                        print(f"Index {i}: long signal is True but close price {current_price} < lower bound {lower}.")
+                        valid = False
+                elif direction == "short":
+                    # short 信号要求：如果 upper_bound 存在，则收盘价必须 <= upper_bound
+                    if upper is not None and current_price > upper:
+                        print(f"Index {i}: short signal is True but close price {current_price} > upper bound {upper}.")
+                        valid = False
+        else:
+            range_result = compute_signal_range(hist_df, col_name)
+
+            count += 1
+            if count > 50:
+                # 仅验证最后50行中标记为 False 的行
+                continue
+            # 对于信号为 False 的情况：
+            # ① 如果 compute_signal_range 返回 None，则说明历史数据未满足触发条件，此时信号为 False 是合理的；
+            # ② 如果返回了价格区间，说明历史上处于转换前置状态，但新K线未满足价格条件，则要求其不应满足触发要求：
+            if range_result is not None:
+                lower, upper = range_result
+                if direction == "long":
+                    # long 信号触发条件是：close >= lower_bound
+                    if lower is not None and current_price >= lower:
+                        print(
+                            f"Index {i}: long signal is False but close price {current_price} >= lower bound {lower}.")
+                        valid = False
+                elif direction == "short":
+                    # short 信号触发条件是：close <= upper_bound
+                    if upper is not None and current_price <= upper:
+                        print(
+                            f"Index {i}: short signal is False but close price {current_price} <= upper bound {upper}.")
+                        valid = False
+
+    return valid
+
+def compute_price_range_macd(df: pd.DataFrame, col_name: str):
+    """
+    根据 MACD 指标计算使下一个 K 线触发信号的价格范围.
+
+    信号格式: "macd_fast_slow_signal_long" 或 "macd_fast_slow_signal_short"
+
+    对于多头信号:
+      - 要求上一周期 (macd_prev < signal_prev)，并返回 (lower_bound, None)
+        表示只要收盘价 >= lower_bound 就能触发信号.
+    对于空头信号:
+      - 要求上一周期 (macd_prev > signal_prev)，并返回 (None, upper_bound)
+        表示只要收盘价 <= upper_bound 就能触发信号.
+
+    如果条件不满足或者参数错误，则返回 None.
+    """
+    parts = col_name.split("_")
+    if parts[0] != "macd":
+        return None
+
+    direction = parts[-1]
+    try:
+        fast_period, slow_period, signal_period = map(int, parts[1:4])
+    except Exception:
+        return None
+
+    # 计算 EMA 序列
+    fast_ema = df["close"].ewm(span=fast_period, adjust=False).mean()
+    slow_ema = df["close"].ewm(span=slow_period, adjust=False).mean()
+    macd_series = fast_ema - slow_ema
+    signal_series = macd_series.ewm(span=signal_period, adjust=False).mean()
+
+    fast_ema_prev = fast_ema.iloc[-1]
+    slow_ema_prev = slow_ema.iloc[-1]
+    macd_prev = macd_series.iloc[-1]
+    signal_prev = signal_series.iloc[-1]
+
+    # 计算 EMA 平滑系数
+    alpha_fast = 2 / (fast_period + 1)
+    alpha_slow = 2 / (slow_period + 1)
+    # alpha_signal 并非直接用于定价计算，但保留计算记录便于理解
+    alpha_signal = 2 / (signal_period + 1)
+
+    # 对于新数据，假设下一个收盘价为 p，则
+    # new_fast_ema = p * alpha_fast + fast_ema_prev * (1 - alpha_fast)
+    # new_slow_ema = p * alpha_slow + slow_ema_prev * (1 - alpha_slow)
+    # new_macd = new_fast_ema - new_slow_ema = C * p + D
+    C = alpha_fast - alpha_slow
+    D = fast_ema_prev * (1 - alpha_fast) - slow_ema_prev * (1 - alpha_slow)
+
+    if direction == "long":
+        if not (macd_prev < signal_prev):
+            return None
+        if C > 0:
+            lower_bound = (signal_prev - D) / C
+            return (lower_bound, None)
+        elif C < 0:
+            upper_bound = (signal_prev - D) / C
+            return (None, upper_bound)
+        else:  # C == 0
+            if D >= signal_prev:
+                return (None, None)
+            else:
+                return None
+
+    elif direction == "short":
+        if not (macd_prev > signal_prev):
+            return None
+        if C > 0:
+            upper_bound = (signal_prev - D) / C
+            return (None, upper_bound)
+        elif C < 0:
+            lower_bound = (signal_prev - D) / C
+            return (lower_bound, None)
+        else:  # C == 0
+            if D <= signal_prev:
+                return (None, None)
+            else:
+                return None
+    else:
+        return None
+
+
+def compute_price_range_relate(df: pd.DataFrame, col_name: str):
+    """
+    快速给出“下一根 K 线若想触发该信号，可出现的价格区间”。
+
+    返回
+        (lower_bound, upper_bound)
+        - lower_bound 为 None 表示区间下界为 -∞
+        - upper_bound 为 None 表示区间上界为  +∞
+        - 若历史长度不足或无法计算则返回 None
+    """
+    p = col_name.split('_')
+    if p[0] != 'relate':
+        raise ValueError('只支持 relate_*_*_long/short')
+
+    period = int(p[1])
+    percent = float(p[2]) / 100
+    direc = p[-1].lower()
+
+    if len(df) < period:  # 数据不足
+        return None
+
+    # 不再 shift(1) —— 因为要给“下一根”用
+    min_low = df['low'].rolling(period).min().iloc[-1]
+    max_high = df['high'].rolling(period).max().iloc[-1]
+
+    latest_close = df['close'].iloc[-1]
+    if np.isnan(min_low) or np.isnan(max_high):
+        return None
+
+    if direc == 'long':
+        target = round(min_low + percent * (max_high - min_low), 4)
+        if latest_close < target:
+            return (target, None)
+    else:  # short
+        target = round(max_high - percent * (max_high - min_low), 4)
+        if latest_close > target:
+            return (None, target)
+    return None
+
+
+def validate_price_range(df, col_name) -> bool:
+
+    if col_name.startswith("abs_"):
+        return validate_signals_abs(df, col_name)
+    if col_name.startswith("relate_"):
+        return validate_signals_relate(df, col_name)
+    if col_name.startswith("macd_"):
+        return validate_signals_macd(df, col_name)
+    return '不支持'
+
+
+def compute_signal_range(df: pd.DataFrame, signal_name: str):
+    if signal_name.startswith("abs_"):
+        return compute_price_range_abs(df, signal_name)
+    if signal_name.startswith("relate_"):
+        return compute_price_range_relate(df, signal_name)
+    if signal_name.startswith("macd_"):
+        return compute_price_range_macd(df, signal_name)
+    else:
+        return None
 
 # ---------------- demo ----------------
 def example():
-    df = pd.read_csv(
-        "kline_data/origin_data_1m_100000_BTC-USDT-SWAP_2025-05-14.csv"
-    )
-    signal_name = "macross_258_2648_short"
+    key_name = 'donchian'
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
+    is_reverse = True
 
-    df = df.head(1100)
-    # results = validate_live_signal_threshold_all(df, signal_name)
-    # df = df.head(96985)
-    for i in range(10):
-        start_time = time.time()
-        threshold = compute_price_range(df, signal_name)
-        signal_series, price = compute_signal(df, signal_name)
-        df["signal"] = signal_series
-        df["price"] = price
-        print("Elapsed time:", time.time() - start_time)
-        print("Refined threshold:", threshold)
+    for inst_id in inst_id_list:
+        df = pd.read_csv(f"kline_data/origin_data_1m_100000_{inst_id}-USDT-SWAP_2025-05-14.csv")
+        good_df = pd.read_parquet(f'temp_back/{inst_id}_{is_reverse}_filter_similar_strategy.parquet')
+        exist_key = []
+        # 获取good_df中所有的kai_column这列的不重复值
+        kai_column_list = good_df['kai_column'].unique()
+        pin_column_list = good_df['pin_column'].unique()
+        all_column = list(set(kai_column_list) | set(pin_column_list))
+        final_column = []
+        for col in all_column:
+            target_key = col.split("_")[0] + col.split("_")[-1]
+            if target_key not in exist_key:
+                exist_key.append(target_key)
+                final_column.append(col)
+        for signal_name in final_column:
+            if key_name in signal_name:
+                # signal_name = 'boll_1722_0.3_short'
+
+                result = validate_price_range(df, signal_name)
+                print(f"{inst_id} Signal: {signal_name}, Validation Result: {result}")
+
+                # # df = df.head(31000)
+                # start_time = time.time()
+                # threshold = compute_signal_range(df, signal_name)
+                # signal_series, price = compute_signal(df, signal_name)
+                # df["signal"] = signal_series
+                # df["price"] = price
+                # print("Elapsed time:", time.time() - start_time)
+                # print("Refined threshold:", threshold)
 
 
 if __name__ == "__main__":

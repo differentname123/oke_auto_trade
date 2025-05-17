@@ -511,7 +511,7 @@ def get_common_data():
     combinations_list = []
 
     for inst_id in inst_id_list:
-        file_path = f'temp_back\statistic_results_final_{inst_id}_True.parquet'
+        file_path = f'temp_back\statistic_results_final_{inst_id}_False.parquet'
         if os.path.exists(file_path):
             df = pd.read_parquet(file_path)
             df['inst_id'] = inst_id
