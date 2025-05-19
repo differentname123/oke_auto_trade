@@ -73,8 +73,8 @@ def process_pair(pair):
         "Row1": row_a['index'],
         "Row2": row_b['index'],
         "Correlation": corr_val,
-        "Row1_net_profit_rate": row_a.get("net_profit_rate"),
-        "Row2_net_profit_rate": row_b.get("net_profit_rate"),
+        "Row1_net_profit_rate": row_a.get("capital_no_leverage"),
+        "Row2_net_profit_rate": row_b.get("capital_no_leverage"),
     }
 
 
@@ -158,7 +158,7 @@ def gen_statistic_data(origin_good_df, removal_threshold=99):
     print(f'待计算的数据量：{len(origin_good_df)}')
 
     # 使用 'kai_count' 进行分组，'net_profit_rate' 作为组内排序键
-    filtered_df = filtering(origin_good_df, grouping_column='kai_count', sort_key='net_profit_rate',
+    filtered_df = filtering(origin_good_df, grouping_column='kai_count', sort_key='capital_no_leverage',
                             _unused_threshold=None)
     print(f'过滤后的数据量：{len(filtered_df)}')
 
@@ -268,10 +268,25 @@ def debug():
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
     is_reverse_list = [False, True]
     for inst_id in inst_id_list:
-        for is_reverse in is_reverse_list:
-            file_path = f'temp_back/{inst_id}_{is_reverse}_filter_similar_strategy.parquet'
-            if os.path.exists(file_path):
-                find_all_valid_groups(file_path)
+        df_list = []
+        output_path = f'temp_back/{inst_id}_all_short_filter_similar_strategy.parquet'
+        if os.path.exists(output_path):
+            print(f'文件已存在，直接加载：{output_path}')
+        else:
+            for is_reverse in is_reverse_list:
+                file_path = f'temp_back/{inst_id}_{is_reverse}_short_filter_similar_strategy.parquet'
+                df = pd.read_parquet(file_path)
+                df_list.append(df)
+            df = pd.concat(df_list, ignore_index=True)
+            # 将df按照capital_no_leverage降序排序
+            df.sort_values(by='capital_no_leverage', ascending=False, inplace=True)
+            df =df.head(10000)
+            df.to_parquet(output_path, index=False)
+            print(f'合并数据：{output_path} 当前时间: {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}')
+        find_all_valid_groups(output_path)
+
+
+
 
 
 def select_strategies_optimized(
@@ -678,12 +693,12 @@ def process_df(df):
     return df
 
 def final_compute_corr():
-    inst_id_list = [ 'BTC', 'TON', 'DOGE', 'XRP', 'PEPE']
-    is_reverse = False
+    inst_id_list = [ 'TON', 'TON', 'DOGE', 'XRP', 'PEPE']
+    is_reverse = 'all'
 
     for inst_id in inst_id_list:
-        corr_path = f'temp/corr/{inst_id}_{is_reverse}_filter_similar_strategy.parquet_corr_weekly_net_profit_detail.parquet'
-        origin_good_path = f'temp/corr/{inst_id}_{is_reverse}_filter_similar_strategy.parquet_origin_good_weekly_net_profit_detail.parquet'
+        corr_path = f"temp/corr/{inst_id}_{is_reverse}_filter_similar_strategy.parquet_corr_weekly_net_profit_detail.parquet"
+        origin_good_path = f"temp/corr/{inst_id}_{is_reverse}_filter_similar_strategy.parquet_origin_good_weekly_net_profit_detail.parquet"
         strategy_df = pd.read_parquet(origin_good_path)
         # 计算score，逻辑为对kai_count取对数，然后除以max_consecutive_loss
         # strategy_df['score666'] = strategy_df['kai_count'].apply(lambda x: np.log(x) if x > 0 else 0) / strategy_df['max_consecutive_loss']
@@ -717,15 +732,17 @@ def filter_similar_strategy():
                 print(f'文件不存在，跳过处理：{data_file}')
                 continue
 
-            output_path = f'temp_back/{inst_id}_{is_reverse}_filter_similar_strategy.parquet'
-            if os.path.exists(output_path):
-                print(f'文件已存在，跳过处理：{output_path}')
-                continue
+            output_path = f'temp_back/{inst_id}_{is_reverse}_short_filter_similar_strategy.parquet'
+            # if os.path.exists(output_path):
+            #     print(f'文件已存在，跳过处理：{output_path}')
+            #     continue
             data_df = pd.read_parquet(data_file)
             # data_df = data_df[data_df['max_hold_time'] < 5000]
             data_df = data_df[data_df['kai_count'] > 50]
             data_df = data_df[data_df['max_consecutive_loss'] > -30]
             data_df = data_df[data_df['hold_time_mean'] < 3000]
+            # capital_no_leverage
+            data_df = data_df[data_df['capital_no_leverage'] > 1.1]
             # data_df = data_df[data_df['kai_column'].str.contains('long', na=False)]
             # data_df = data_df.head(10000)
             print(f'处理 {inst_id} 的数据，数据量：{len(data_df)}')
@@ -841,8 +858,8 @@ def get_statistic_data():
 def example():
     # get_statistic_data()
     # filter_similar_strategy()
-    # final_compute_corr()
-    debug()
+    final_compute_corr()
+    # debug()
 
 
 

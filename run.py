@@ -258,7 +258,7 @@ class InstrumentTrader:
                 "size": self.min_count,
             }
             print(
-                f"开仓成功 {signal_name} for {self.instrument} 成交, 价格: {price_val}, 时间: {datetime.datetime.now()}"
+                f"开仓成功 {side} {signal_name} for {self.instrument} 成交, 价格: {price_val}, 时间: {datetime.datetime.now()}"
             )
             self.save_order_detail_map()
 
@@ -370,6 +370,8 @@ class InstrumentTrader:
                             )
                             # 处理 close 类型的开仓和平仓
                             exist_kai_keys = list(self.order_detail_map.keys())
+                            exist_pin_keys = [self.kai_pin_map[k] for k in exist_kai_keys]
+                            print(f"【{self.instrument}】当前持仓的开仓信号数量: {len(exist_kai_keys)} 平仓信号数量: {len(exist_pin_keys)}")
                             need_close_kai = []
                             not_need_close_kai = []
                             for kai in kai_column_list:
@@ -380,28 +382,34 @@ class InstrumentTrader:
                                 else:
                                     need_close_kai.append(kai)
                             start_time = datetime.datetime.now()
+                            detail_map = {}
                             for kai in need_close_kai:
                                 signal_flag, target_price = self.compute_last_signal(df, kai)
                                 if signal_flag:
+                                    detail_map[kai] = target_price
                                     self.open_order(kai, target_price)
                             print(
-                                f"【{self.instrument}】  耗时: {datetime.datetime.now() - start_time} 需要close价格开仓的开仓信号:{len(need_close_kai)}  {need_close_kai} 不需要close价格开仓的开仓信号: {len(not_need_close_kai)} {not_need_close_kai}"
+                                f"【{self.instrument}】  耗时: {datetime.datetime.now() - start_time} 需要close价格开仓的开仓信号:{len(need_close_kai)}  {detail_map} 不需要close价格开仓的开仓信号: {len(not_need_close_kai)} {not_need_close_kai}"
                             )
 
                             need_close_pin = []
                             not_need_close_pin = []
-                            for pin in pin_column_list:
+
+                            for pin in exist_pin_keys:
                                 if any(k in pin for k in not_close_signal_key):
                                     not_need_close_pin.append(pin)
                                 else:
                                     need_close_pin.append(pin)
                             start_time = datetime.datetime.now()
+                            detail_map = {}
+
                             for pin in need_close_pin:
                                 signal_flag, target_price = self.compute_last_signal(df, pin)
                                 if signal_flag:
+                                    detail_map[pin] = target_price
                                     self.close_order(pin, target_price)
                             print(
-                                f"【{self.instrument}】  耗时: {datetime.datetime.now() - start_time} 需要close价格开仓的平仓信号:{len(need_close_pin)}  {need_close_pin} 不需要close价格开仓的平仓信号: {len(not_need_close_pin)} {not_need_close_pin}"
+                                f"【{self.instrument}】  耗时: {datetime.datetime.now() - start_time} 需要close价格开仓的平仓信号:{len(need_close_pin)}  {detail_map} 不需要close价格开仓的平仓信号: {len(not_need_close_pin)} {not_need_close_pin}"
                             )
 
                             for kai in not_need_close_kai:
@@ -506,7 +514,8 @@ class InstrumentTrader:
         # 加载策略数据（例如 parquet 文件）
         inst_id = self.instrument.split("-")[0]
         all_dfs = []
-        for is_reverse in [True, False]:
+        min_capital_no_leverage = 0
+        for is_reverse in ['all_short', 'all']:
             corr_path = f"temp/corr/{inst_id}_{is_reverse}_filter_similar_strategy.parquet_corr_weekly_net_profit_detail.parquet"
             origin_good_path = f"temp/corr/{inst_id}_{is_reverse}_filter_similar_strategy.parquet_origin_good_weekly_net_profit_detail.parquet"
             if os.path.exists(origin_good_path):
@@ -515,14 +524,18 @@ class InstrumentTrader:
                 selected_strategies, selected_correlation_df = select_strategies_optimized(
                     temp_strategy_df,
                     correlation_df,
-                    k=20,
+                    k=40,
                     penalty_scaler=0.1,
                     use_absolute_correlation=True,
                 )
+                capital_no_leverage = selected_strategies["capital_no_leverage"].min()
+                min_capital_no_leverage = max(min_capital_no_leverage, capital_no_leverage)
                 all_dfs.append(selected_strategies)
                 print(f"{self.instrument} final_good_df shape: {selected_strategies.shape[0]} 来自 {origin_good_path}")
         if all_dfs:
             self.strategy_df = pd.concat(all_dfs)
+            self.strategy_df = self.strategy_df[self.strategy_df["capital_no_leverage"] >= min_capital_no_leverage]
+
             self.strategy_df = self.strategy_df.drop_duplicates(subset=["kai_column"])
             self.strategy_df = self.strategy_df.drop_duplicates(subset=["pin_column"])
             print(f"【{self.instrument}】策略数据加载成功, 策略数量: {self.strategy_df.shape[0]}")

@@ -292,10 +292,11 @@ def place_order(inst_id, side, size, trade_action="open"):
         if order.get("code") != "0":
             print(f"❌ {trade_action.upper()} {side.upper()} 市价单下单失败，错误信息：", order)
             return False
+        return True
 
     except Exception as e:
         print(f"❌ {trade_action.upper()} {side.upper()} 市价单下单失败，错误信息：", e)
-    return False
+        return False
 
 if __name__ == '__main__':
     # 获取最新数据
