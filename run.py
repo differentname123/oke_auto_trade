@@ -273,14 +273,28 @@ class InstrumentTrader:
             pin_key = self.kai_pin_map.get(kai_key)
             if pin_key == signal_name:
                 kai_price = order["price"]
+                side = order["side"]
                 result = place_order(
                     self.instrument, order["pin_side"], order["size"], trade_action="close"
                 )
                 if result:
                     keys_to_remove.append(kai_key)
                     print(
-                        f"【平仓】 {pin_key} for {self.instrument} {order['pin_side']} 成交, 价格: {price_val}, 开仓价格: {kai_price}, 时间: {datetime.datetime.now()}"
+                        f"【平仓成功】 {pin_key} for {self.instrument} 方向 {side} {order['pin_side']} 成交, 价格: {price_val}, 开仓价格: {kai_price}, 平仓时间: {datetime.datetime.now()} 开仓时间{order['open_time']}"
                     )
+                    # 记录平仓订单详情
+                    close_record = {
+                        "instrument": self.instrument,
+                        "signal": pin_key,
+                        "open_time": order["open_time"],
+                        "close_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "open_price": kai_price,
+                        "close_price": price_val,
+                        "side": side,
+                        "pin_side": order["pin_side"],
+                        "size": order["size"],
+                    }
+                    self.record_closed_order(close_record)
                 else:
                     print(
                         f"❌ {pin_key} for {self.instrument} 平仓失败, 价格: {price_val}, 开仓价格: {kai_price}, 时间: {datetime.datetime.now()}"
@@ -325,6 +339,7 @@ class InstrumentTrader:
             if not pin_key:
                 continue
             kai_price = order["price"]
+            side = order["side"]
             if pin_key in self.pin_target_price_info_map:
                 target_info = self.pin_target_price_info_map[pin_key]
                 if target_info is not None:
@@ -336,8 +351,21 @@ class InstrumentTrader:
                         if result:
                             keys_to_remove.append(kai_key)
                             print(
-                                f"【平仓】 {pin_key} for {self.instrument} {order['pin_side']} 成交, 价格: {price_val}, 开仓价格: {kai_price}, 时间: {datetime.datetime.now()}"
+                                f"【平仓】 {pin_key} for side {side} {self.instrument} {order['pin_side']} 成交, 价格: {price_val}, 开仓价格: {kai_price},平仓时间: {datetime.datetime.now()} 开仓时间{order['open_time']}"
                             )
+                            # 记录平仓订单详情
+                            close_record = {
+                                "instrument": self.instrument,
+                                "signal": pin_key,
+                                "open_time": order["open_time"],
+                                "close_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "open_price": kai_price,
+                                "close_price": price_val,
+                                "side": side,
+                                "pin_side": order["pin_side"],
+                                "size": order["size"],
+                            }
+                            self.record_closed_order(close_record)
                         else:
                             print(
                                 f"❌ {pin_key} for {self.instrument} 平仓失败, 价格: {price_val}, 开仓价格: {kai_price}, 时间: {datetime.datetime.now()}"
@@ -366,12 +394,11 @@ class InstrumentTrader:
                     attempt = 0
                     while attempt < max_attempts:
                         origin_df = newest_data.get_newnewest_data()
-                        # print(f"最新数据的时间{origin_df.iloc[-1]['timestamp']}")
                         df = origin_df[origin_df["confirm"] == "1"]
                         latest_timestamp = df.iloc[-1]["timestamp"] if not df.empty else None
                         if previous_timestamp is None or latest_timestamp != previous_timestamp:
                             print(
-                                f"✅ {self.instrument} 数据已更新, 最新 timestamp: {latest_timestamp} 实时最新价格: {self.price} 最新数据的时间{origin_df.iloc[-1]['timestamp']}"
+                                f"✅ {self.instrument} 数据已更新, 最新 timestamp: {latest_timestamp} 实时最新价格: {self.price} 最新数据的时间: {origin_df.iloc[-1]['timestamp']}"
                             )
                             # 处理 close 类型的开仓和平仓
                             exist_kai_keys = list(self.order_detail_map.keys())
@@ -441,9 +468,6 @@ class InstrumentTrader:
                             self.current_minute = now.minute
                             break
                         else:
-                            # print(
-                            #     f"⚠️ {self.instrument} 数据未变化, 尝试重新获取 ({attempt + 1}/{max_attempts})"
-                            # )
                             attempt += 1
                     if attempt == max_attempts:
                         print(f"❌ {self.instrument} 多次尝试数据仍未更新，跳过本轮更新")
@@ -496,7 +520,7 @@ class InstrumentTrader:
                 os.makedirs("temp")
             file_path = f"temp/order_detail_map_{self.instrument}.json"
             with open(file_path, "w", encoding="utf-8") as f:
-                json.dump(self.order_detail_map, f)
+                json.dump(self.order_detail_map, f, indent=4, ensure_ascii=False)
         except Exception as e:
             traceback.print_exc()
 
@@ -511,6 +535,27 @@ class InstrumentTrader:
                 print(f"❌ {self.instrument} 加载订单信息失败:", e)
         else:
             self.order_detail_map.clear()
+
+    def record_closed_order(self, record):
+        """
+        将平仓订单记录保存到文件中，文件路径 temp/closed_order_record_<instrument>.json
+        """
+        try:
+            if not os.path.exists("temp"):
+                os.makedirs("temp")
+            file_path = f"temp/closed_order_record_{self.instrument}.json"
+            records = []
+            if os.path.exists(file_path):
+                with open(file_path, "r", encoding="utf-8") as f:
+                    try:
+                        records = json.load(f)
+                    except Exception:
+                        records = []
+            records.append(record)
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(records, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            traceback.print_exc()
 
     async def main_trading_loop(self):
         # 加载历史订单记录
@@ -555,10 +600,8 @@ class InstrumentTrader:
             self.strategy_df = self.strategy_df.drop_duplicates(subset=["kai_column"])
             self.strategy_df = self.strategy_df.drop_duplicates(subset=["pin_column"])
             false_df = self.strategy_df[self.strategy_df["is_reverse"] == False]
-            # 统计kai_column包含long的行数
             kai_long_count = false_df["kai_column"].str.contains("long").sum()
             true_df = self.strategy_df[self.strategy_df["is_reverse"] == True]
-            # 统计kai_column包含short的行数
             kai_short_count = true_df["kai_column"].str.contains("short").sum()
 
             buy_count = kai_long_count + kai_short_count
