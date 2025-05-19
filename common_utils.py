@@ -8,8 +8,8 @@ def select_strategies_optimized(
     strategy_df: pd.DataFrame,
     correlation_df: pd.DataFrame,
     k: int,
-    strategy_id_col: str = 'index', # 新增参数：指定包含策略ID的列名
-    count_col: str = 'capital_no_leverage',       # 新增参数：指定包含计数的列名
+    strategy_id_col: str = 'index',  # 新增参数：指定包含策略ID的列名
+    count_col: str = 'capital_no_leverage',  # 新增参数：指定包含计数的列名
     penalty_scaler: float = 1.0,
     use_absolute_correlation: bool = True,
 ):
@@ -25,7 +25,7 @@ def select_strategies_optimized(
                                         'Row1', 'Row2'的值应能匹配 strategy_df 中 strategy_id_col 的值。
         k (int): 希望选出的策略数量。
         strategy_id_col (str): strategy_df 中包含策略ID的列名。默认为 'index'。
-        count_col (str): strategy_df 中包含 count 的列名。默认为 'count'。
+        count_col (str): strategy_df 中包含 count 的列名。默认为 'capital_no_leverage'。
         penalty_scaler (float, optional): 自动计算的惩罚因子的缩放系数。
                                          默认为 1.0。大于1增加惩罚，小于1减少惩罚。
         use_absolute_correlation (bool, optional): 是否在计算惩罚时使用绝对相关性值。
@@ -47,7 +47,7 @@ def select_strategies_optimized(
     if not all(col in correlation_df.columns for col in ['Row1', 'Row2', 'Correlation']):
         raise ValueError("correlation_df 必须包含列: 'Row1', 'Row2', 'Correlation'")
     if k <= 0:
-        empty_strategies = strategy_df.iloc[0:0] # 返回与输入结构相同的空DF
+        empty_strategies = strategy_df.iloc[0:0]  # 返回与输入结构相同的空DF
         empty_correlations = pd.DataFrame(columns=['Row1', 'Row2', 'Correlation'])
         return empty_strategies, empty_correlations
 
@@ -55,24 +55,19 @@ def select_strategies_optimized(
     if strategy_df[strategy_id_col].duplicated().any():
         print(f"警告: 策略ID列 '{strategy_id_col}' 中存在重复值。这可能影响结果的准确性。")
 
-
     # 复制以防修改原始df
     original_strat_df = strategy_df.copy()
-    # 创建内部使用的版本，将策略ID列设为索引，并确保是字符串
     strat_df_internal = strategy_df.copy()
-    # --- 关键改动：使用指定列作为ID ---
     strat_df_internal['_internal_id_str'] = strat_df_internal[strategy_id_col].astype(str).str.strip()
-    strat_df_internal = strat_df_internal.set_index('_internal_id_str', drop=True) # 使用临时字符串ID列作为索引
+    strat_df_internal = strat_df_internal.set_index('_internal_id_str', drop=True)  # 使用临时字符串ID列作为索引
 
     corr_df = correlation_df.copy()
-    # 确保相关性表中的ID也处理为字符串并去除空格
-    # 假设 corr_df 中的 ID 类型与 strategy_df ID 列类型原本一致
+
     corr_df['Row1'] = corr_df['Row1'].astype(str).str.strip()
     corr_df['Row2'] = corr_df['Row2'].astype(str).str.strip()
 
-
     # --- 自动计算 Penalty Factor ---
-    count_series = strat_df_internal[count_col] # 从内部DF获取count列
+    count_series = strat_df_internal[count_col]  # 从内部DF获取count列
     if count_series.empty or count_series.isnull().all():
          print(f"警告: '{count_col}' 列为空或全是 NaN。使用默认 penalty_factor 1.0。")
          auto_penalty_factor = 1.0
@@ -97,28 +92,22 @@ def select_strategies_optimized(
     row2_col = 'Row2'
     # 使用处理过的字符串ID构建字典
     for row in corr_df.itertuples(index=False):
-        s1_str = getattr(row, row1_col) # 已经是 string + stripped
-        s2_str = getattr(row, row2_col) # 已经是 string + stripped
+        s1_str = getattr(row, row1_col)  # 已经是字符串且已去空格
+        s2_str = getattr(row, row2_col)
         corr = getattr(row, correlation_value_col)
         if use_absolute_correlation:
             corr = abs(corr)
         key = tuple(sorted((s1_str, s2_str)))
-        # 如果同一个key存在，后面的会覆盖前面的，这通常没问题，除非你想聚合
         corr_dict[key] = corr
     print("相关性查找字典构建完成。")
-    print(f"字典大小 (corr_dict): {len(corr_dict)}") # 打印大小以供检查
-
+    print(f"字典大小 (corr_dict): {len(corr_dict)}")  # 打印大小以供检查
 
     def get_correlation(s1: str, s2: str, lookup_dict: dict) -> float:
         """辅助函数：从字典中查找相关性 (输入为字符串ID)"""
         if s1 == s2:
             return 1.0
         key = tuple(sorted((s1, s2)))
-        value = lookup_dict.get(key, 0.0) # 缺失相关性默认为0
-        # --- Debug print (可选) ---
-        # if key not in lookup_dict:
-        #      print(f"      DEBUG: Key {key} NOT FOUND in dict during lookup.")
-        # --- End Debug ---
+        value = lookup_dict.get(key, 0.0)  # 缺失相关性默认为0
         return value
 
     # 获取所有有效策略的字符串ID (来自内部DF的索引)
@@ -127,27 +116,22 @@ def select_strategies_optimized(
          print("策略DataFrame内部处理后为空，无法选择。")
          return original_strat_df.iloc[0:0], corr_df.iloc[0:0]
 
-    # 按 count 降序排序 (使用内部的 strat_df_internal)
-    # 确保 count 列是数值类型
     strat_df_internal[count_col] = pd.to_numeric(strat_df_internal[count_col], errors='coerce')
-    # 删除 count 为 NaN 的行，避免排序和选择出错
     strat_df_internal.dropna(subset=[count_col], inplace=True)
-    all_strategies_str = set(strat_df_internal.index) # 更新有效策略集合
+    all_strategies_str = set(strat_df_internal.index)  # 更新有效策略集合
 
     if not all_strategies_str:
          print("在处理 count 列后，没有有效的策略，无法选择。")
          return original_strat_df.iloc[0:0], corr_df.iloc[0:0]
 
-
     sorted_strategies_str = strat_df_internal.sort_values(count_col, ascending=False).index.tolist()
-    # sorted_strategies_str = [s for s in sorted_strategies_str if s in all_strategies_str] # 已通过dropna保证有效性
 
     if not sorted_strategies_str:
          print("排序后无有效策略，无法选择。")
          return original_strat_df.iloc[0:0], corr_df.iloc[0:0]
 
     # --- 2. 贪婪选择 ---
-    selected_strategies_str = [] # 存储选中的策略的字符串ID
+    selected_strategies_str = []  # 存储选中的策略的字符串ID
     candidate_pool_str = set(sorted_strategies_str)
 
     print(f"开始贪婪选择，目标数量 k={k}")
@@ -156,8 +140,9 @@ def select_strategies_optimized(
     first_strategy_str = sorted_strategies_str[0]
     selected_strategies_str.append(first_strategy_str)
     candidate_pool_str.remove(first_strategy_str)
-    # 使用 .loc 基于字符串索引查找 count
-    # print(f"  选择第 1 个策略: {first_strategy_str} (原始ID: {strat_df_internal.loc[first_strategy_str, strategy_id_col]}, Count: {strat_df_internal.loc[first_strategy_str, count_col]})")
+
+    # 设置相关性阈值：如果候选策略与任一已选策略的相关性超过该阈值，则不被考虑。
+    correlation_threshold = 60.0
 
     while len(selected_strategies_str) < k and candidate_pool_str:
         best_candidate_str = None
@@ -165,7 +150,7 @@ def select_strategies_optimized(
 
         # 遍历所有候选策略 (字符串ID)
         for candidate_str in candidate_pool_str:
-            # 计算与已选策略的最大相关性
+            # 计算候选策略与已选策略之间的最大相关性
             max_corr_with_selected = 0.0
             if selected_strategies_str:
                 current_max_corr = 0.0
@@ -174,10 +159,13 @@ def select_strategies_optimized(
                     current_max_corr = max(current_max_corr, corr)
                 max_corr_with_selected = current_max_corr
 
-            # 获取候选策略的 count (使用 .loc 和字符串索引)
+            # 如果候选策略与任一已选策略的相关性超过阈值，则跳过该候选策略
+            if max_corr_with_selected > correlation_threshold:
+                continue
+
             candidate_count = strat_df_internal.loc[candidate_str, count_col]
 
-            # 计算得分
+            # 计算得分：在 count 的基础上扣除相关性惩罚
             score = candidate_count - auto_penalty_factor * max_corr_with_selected
 
             # 更新最佳候选
@@ -186,64 +174,47 @@ def select_strategies_optimized(
                 best_candidate_str = candidate_str
 
         if best_candidate_str is None:
-            print(f"  在第 {len(selected_strategies_str) + 1} 步无法找到合适的候选策略，停止选择。")
+            print(f"  在第 {len(selected_strategies_str) + 1} 步无法找到合适的候选策略（满足相关性阈值要求），停止选择。")
             break
 
         # 添加最佳候选者 (字符串ID)
         selected_strategies_str.append(best_candidate_str)
         candidate_pool_str.remove(best_candidate_str)
         candidate_count = strat_df_internal.loc[best_candidate_str, count_col]
-        original_id = strat_df_internal.loc[best_candidate_str, strategy_id_col] # 获取原始ID用于打印
+        original_id = strat_df_internal.loc[best_candidate_str, strategy_id_col]  # 获取原始ID用于打印
         # 计算并打印相关信息
         final_max_corr = 0.0
         if len(selected_strategies_str) > 1:
-             current_max_corr = 0.0
-             for s_str in selected_strategies_str[:-1]:
-                 corr = get_correlation(best_candidate_str, s_str, corr_dict)
-                 current_max_corr = max(current_max_corr, corr)
-             final_max_corr = current_max_corr
-        # print(f"  选择第 {len(selected_strategies_str)} 个策略: {best_candidate_str} (原始ID: {original_id}, Count: {candidate_count:.2f}, Score: {best_score:.2f}, MaxCorrWithSelected: {final_max_corr:.3f})")
+            current_max_corr = 0.0
+            for s_str in selected_strategies_str[:-1]:
+                corr = get_correlation(best_candidate_str, s_str, corr_dict)
+                current_max_corr = max(current_max_corr, corr)
+            final_max_corr = current_max_corr
 
     # --- 3. 从原始 DataFrame 中提取选定的策略 ---
     print(f"选择完成，共选出 {len(selected_strategies_str)} 个策略。")
 
-    # 使用选定的字符串ID列表，在 *原始* DataFrame (original_strat_df) 中查找
-    # 通过匹配处理过的 strategy_id_col 列来筛选
+    # 根据处理后的字符串ID筛选原始策略
     selected_mask = original_strat_df[strategy_id_col].astype(str).str.strip().isin(selected_strategies_str)
     selected_strategies_df_unordered = original_strat_df[selected_mask].copy()
 
     # 保证输出的顺序与选择顺序一致
     if not selected_strategies_df_unordered.empty and selected_strategies_str:
-         # 创建一个映射，从处理过的字符串ID到原始DataFrame中的行
-         id_map = selected_strategies_df_unordered.set_index(selected_strategies_df_unordered[strategy_id_col].astype(str).str.strip())
-         # 按照 selected_strategies_str 的顺序重新索引
-         # 使用 reindex 并处理可能因重复ID或其他问题导致的缺失
-         selected_strategies_df = id_map.loc[selected_strategies_str].copy()
-         # 注意：如果原始 strategy_id_col 有重复值，loc[selected_strategies_str] 会包含重复行
-         # 如果需要去除因原始重复ID导致的重复行，可以在这里处理
-         # 例如：selected_strategies_df = selected_strategies_df[~selected_strategies_df.index.duplicated(keep='first')]
-         # 或者基于原始ID列去重
-         # selected_strategies_df = selected_strategies_df.drop_duplicates(subset=[strategy_id_col], keep='first')
-
-         # 清理掉临时的索引
-         selected_strategies_df.reset_index(drop=True, inplace=True)
+        id_map = selected_strategies_df_unordered.set_index(selected_strategies_df_unordered[strategy_id_col].astype(str).str.strip())
+        selected_strategies_df = id_map.loc[selected_strategies_str].copy()
+        selected_strategies_df.reset_index(drop=True, inplace=True)
     else:
-         selected_strategies_df = selected_strategies_df_unordered # 如果没选出或为空，直接返回
+        selected_strategies_df = selected_strategies_df_unordered
 
-    # --- 4. 生成选定策略间的相关性 DataFrame ---
-    selected_strategies_set_str = set(selected_strategies_str) # 内部用字符串集合筛选
+    selected_strategies_set_str = set(selected_strategies_str)
 
-    # 筛选原始 correlation_df (其 Row1/Row2 已转为 string + stripped)
     corr_filter_mask = corr_df[row1_col].isin(selected_strategies_set_str) & \
                        corr_df[row2_col].isin(selected_strategies_set_str)
     selected_correlation_df = corr_df[corr_filter_mask].copy()
 
-    # 可选：恢复相关性 DF 中 Row1/Row2 的原始类型（如果需要）
-    # 这需要 strategy_id_col 的原始数据类型信息
+    # 尝试将相关性 DataFrame 中的 Row1/Row2 恢复为原始类型
     original_id_dtype = original_strat_df[strategy_id_col].dtype
     if not pd.api.types.is_string_dtype(original_id_dtype):
-        # 创建从字符串ID映射回原始ID的字典
-        # 需要处理重复ID：如果原始ID有重复，只保留第一个遇到的映射
         id_str_to_original_map = {}
         for _idx, row in original_strat_df.drop_duplicates(subset=[strategy_id_col], keep='first').iterrows():
             id_str = str(row[strategy_id_col]).strip()
@@ -251,18 +222,14 @@ def select_strategies_optimized(
             id_str_to_original_map[id_str] = id_orig
 
         try:
-            # 使用映射转换 Row1 和 Row2
             selected_correlation_df[row1_col] = selected_correlation_df[row1_col].map(id_str_to_original_map)
             selected_correlation_df[row2_col] = selected_correlation_df[row2_col].map(id_str_to_original_map)
-            # 删除可能因映射失败产生的 NaN 行
             selected_correlation_df.dropna(subset=[row1_col, row2_col], inplace=True)
-            # 尝试转换回原始数据类型
             selected_correlation_df[row1_col] = selected_correlation_df[row1_col].astype(original_id_dtype)
             selected_correlation_df[row2_col] = selected_correlation_df[row2_col].astype(original_id_dtype)
             print(f"相关性DataFrame中的ID已尝试恢复为原始类型: {original_id_dtype}")
         except Exception as e:
-             print(f"警告：尝试将相关性DF中的ID转回原始类型时出错: {e}。将返回字符串形式的ID。")
-
+            print(f"警告：尝试将相关性DF中的ID转回原始类型时出错: {e}。将返回字符串形式的ID。")
 
     # --- 5. 返回结果 ---
     return selected_strategies_df, selected_correlation_df

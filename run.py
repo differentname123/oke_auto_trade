@@ -249,8 +249,11 @@ class InstrumentTrader:
             side = "buy" if side == "sell" else "sell"
         pin_side = "sell" if side == "buy" else "buy"
         result = place_order(self.instrument, side, self.min_count)
+        # 获取可读性高的当前时间
+        current_time_human = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if result:
             self.order_detail_map[signal_name] = {
+                "open_time": current_time_human,
                 "price": price_val,
                 "side": side,
                 "pin_side": pin_side,
@@ -298,8 +301,10 @@ class InstrumentTrader:
                 pin_side = "sell" if side == "buy" else "buy"
                 if min_price < price_val < max_price:
                     result = place_order(self.instrument, side, self.min_count)
+                    current_time_human = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     if result:
                         self.order_detail_map[key] = {
+                            "open_time": current_time_human,
                             "price": price_val,
                             "side": side,
                             "pin_side": pin_side,
@@ -389,7 +394,7 @@ class InstrumentTrader:
                                     detail_map[kai] = target_price
                                     self.open_order(kai, target_price)
                             print(
-                                f"【{self.instrument}】  耗时: {datetime.datetime.now() - start_time} 需要close价格开仓的开仓信号:{len(need_close_kai)}  {detail_map} 不需要close价格开仓的开仓信号: {len(not_need_close_kai)} {not_need_close_kai}"
+                                f"【{self.instrument}】  耗时: {int((datetime.datetime.now() - start_time).total_seconds() * 1000)}ms 需要close价格开仓的开仓信号:{len(need_close_kai)}  {detail_map} 不需要close价格开仓的开仓信号: {len(not_need_close_kai)} {not_need_close_kai}"
                             )
 
                             need_close_pin = []
@@ -409,7 +414,7 @@ class InstrumentTrader:
                                     detail_map[pin] = target_price
                                     self.close_order(pin, target_price)
                             print(
-                                f"【{self.instrument}】  耗时: {datetime.datetime.now() - start_time} 需要close价格开仓的平仓信号:{len(need_close_pin)}  {detail_map} 不需要close价格开仓的平仓信号: {len(not_need_close_pin)} {not_need_close_pin}"
+                                f"【{self.instrument}】  耗时: {int((datetime.datetime.now() - start_time).total_seconds() * 1000)} ms 需要close价格开仓的平仓信号:{len(need_close_pin)}  {detail_map} 不需要close价格开仓的平仓信号: {len(not_need_close_pin)} {not_need_close_pin}"
                             )
 
                             for kai in not_need_close_kai:
@@ -516,7 +521,7 @@ class InstrumentTrader:
         all_dfs = []
         min_capital_no_leverage = 0
         max_df_list = []
-
+        max_corr = 0
         for is_reverse in ['all_short', 'all']:
             corr_path = f"temp/corr/{inst_id}_{is_reverse}_filter_similar_strategy.parquet_corr_weekly_net_profit_detail.parquet"
             origin_good_path = f"temp/corr/{inst_id}_{is_reverse}_filter_similar_strategy.parquet_origin_good_weekly_net_profit_detail.parquet"
@@ -530,6 +535,7 @@ class InstrumentTrader:
                     penalty_scaler=0.1,
                     use_absolute_correlation=True,
                 )
+                max_corr = max(max_corr, selected_correlation_df["Correlation"].max())
                 # 将selected_strategies按照capital_no_leverage降序排列
                 selected_strategies = selected_strategies.sort_values(by="capital_no_leverage", ascending=False)
 
@@ -558,7 +564,7 @@ class InstrumentTrader:
             buy_count = kai_long_count + kai_short_count
             sell_count = len(self.strategy_df) - buy_count
 
-            print(f"【{self.instrument}】策略数据加载成功, 策略数量: {self.strategy_df.shape[0]} 做多信号数量: {buy_count} 做空信号数量: {sell_count}")
+            print(f"【{self.instrument}】策略数据加载成功, 策略数量: {self.strategy_df.shape[0]} 做多信号数量: {buy_count} 做空信号数量: {sell_count} 最大相关系数: {max_corr:.4f} 最小利润: {min_capital_no_leverage:.4f}")
         else:
             print(f"❌ {self.instrument} 策略数据不存在!")
             return
