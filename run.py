@@ -280,7 +280,7 @@ class InstrumentTrader:
                 if result:
                     keys_to_remove.append(kai_key)
                     print(
-                        f"【平仓成功】 {pin_key} for {self.instrument} 方向 {side} {order['pin_side']} 成交, 价格: {price_val}, 开仓价格: {kai_price}, 平仓时间: {datetime.datetime.now()} 开仓时间{order['open_time']}"
+                        f"【平仓成功】 {pin_key} for {self.instrument} 开仓方向 {side}成交, , 开仓价格: {kai_price} 平仓价格: {price_val}, 开仓时间{order['open_time']} 平仓时间: {datetime.datetime.now()} "
                     )
                     # 记录平仓订单详情
                     close_record = {
@@ -351,7 +351,7 @@ class InstrumentTrader:
                         if result:
                             keys_to_remove.append(kai_key)
                             print(
-                                f"【平仓】 {pin_key} for side {side} {self.instrument} {order['pin_side']} 成交, 价格: {price_val}, 开仓价格: {kai_price},平仓时间: {datetime.datetime.now()} 开仓时间{order['open_time']}"
+                                f"【平仓成功】 {pin_key} for {self.instrument} 开仓方向 {side}成交, , 开仓价格: {kai_price} 平仓价格: {price_val}, 开仓时间{order['open_time']} 平仓时间: {datetime.datetime.now()} "
                             )
                             # 记录平仓订单详情
                             close_record = {
@@ -576,7 +576,7 @@ class InstrumentTrader:
                 selected_strategies, selected_correlation_df = select_strategies_optimized(
                     temp_strategy_df,
                     correlation_df,
-                    k=40,
+                    k=10,
                     penalty_scaler=0.1,
                     use_absolute_correlation=True,
                 )
