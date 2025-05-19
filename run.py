@@ -606,6 +606,7 @@ class InstrumentTrader:
 
             buy_count = kai_long_count + kai_short_count
             sell_count = len(self.strategy_df) - buy_count
+            self.strategy_df.to_parquet(f"temp/strategy_df_{self.instrument}.parquet", index=False)
 
             print(f"【{self.instrument}】策略数据加载成功, 策略数量: {self.strategy_df.shape[0]} 做多信号数量: {buy_count} 做空信号数量: {sell_count} 最大相关系数: {max_corr:.4f} 最小利润: {min_capital_no_leverage:.4f}")
         else:
