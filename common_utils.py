@@ -157,7 +157,7 @@ def select_strategies_optimized(
     selected_strategies_str.append(first_strategy_str)
     candidate_pool_str.remove(first_strategy_str)
     # 使用 .loc 基于字符串索引查找 count
-    print(f"  选择第 1 个策略: {first_strategy_str} (原始ID: {strat_df_internal.loc[first_strategy_str, strategy_id_col]}, Count: {strat_df_internal.loc[first_strategy_str, count_col]})")
+    # print(f"  选择第 1 个策略: {first_strategy_str} (原始ID: {strat_df_internal.loc[first_strategy_str, strategy_id_col]}, Count: {strat_df_internal.loc[first_strategy_str, count_col]})")
 
     while len(selected_strategies_str) < k and candidate_pool_str:
         best_candidate_str = None
@@ -202,7 +202,7 @@ def select_strategies_optimized(
                  corr = get_correlation(best_candidate_str, s_str, corr_dict)
                  current_max_corr = max(current_max_corr, corr)
              final_max_corr = current_max_corr
-        print(f"  选择第 {len(selected_strategies_str)} 个策略: {best_candidate_str} (原始ID: {original_id}, Count: {candidate_count:.2f}, Score: {best_score:.2f}, MaxCorrWithSelected: {final_max_corr:.3f})")
+        # print(f"  选择第 {len(selected_strategies_str)} 个策略: {best_candidate_str} (原始ID: {original_id}, Count: {candidate_count:.2f}, Score: {best_score:.2f}, MaxCorrWithSelected: {final_max_corr:.3f})")
 
     # --- 3. 从原始 DataFrame 中提取选定的策略 ---
     print(f"选择完成，共选出 {len(selected_strategies_str)} 个策略。")

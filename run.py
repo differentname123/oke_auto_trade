@@ -20,7 +20,7 @@ from trade_common import LatestDataManager, place_order
 OKX_WS_URL = "wss://ws.okx.com:8443/ws/v5/public"
 # 定义需要操作的多个交易对
 INSTRUMENT_LIST = ["SOL-USDT-SWAP", "BTC-USDT-SWAP", "ETH-USDT-SWAP", "TON-USDT-SWAP", "DOGE-USDT-SWAP", "XRP-USDT-SWAP"]
-# INSTRUMENT_LIST = ["BTC-USDT-SWAP"]
+# INSTRUMENT_LIST = ["SOL-USDT-SWAP"]
 
 # 各交易对最小下单量映射
 min_count_map = {
@@ -361,12 +361,12 @@ class InstrumentTrader:
                     attempt = 0
                     while attempt < max_attempts:
                         origin_df = newest_data.get_newnewest_data()
-                        print(f"最新数据的时间{origin_df.iloc[-1]['timestamp']}")
+                        # print(f"最新数据的时间{origin_df.iloc[-1]['timestamp']}")
                         df = origin_df[origin_df["confirm"] == "1"]
                         latest_timestamp = df.iloc[-1]["timestamp"] if not df.empty else None
                         if previous_timestamp is None or latest_timestamp != previous_timestamp:
                             print(
-                                f"✅ {self.instrument} 数据已更新, 最新 timestamp: {latest_timestamp} 实时最新价格: {self.price}"
+                                f"✅ {self.instrument} 数据已更新, 最新 timestamp: {latest_timestamp} 实时最新价格: {self.price} 最新数据的时间{origin_df.iloc[-1]['timestamp']}"
                             )
                             # 处理 close 类型的开仓和平仓
                             exist_kai_keys = list(self.order_detail_map.keys())
@@ -415,14 +415,14 @@ class InstrumentTrader:
                             for kai in not_need_close_kai:
                                 signal_flag, target_price = self.compute_last_signal(origin_df, kai)
                                 if "long" in kai:
-                                    self.kai_target_price_info_map[kai] = (target_price, 100000)
+                                    self.kai_target_price_info_map[kai] = (target_price, 10000000)
                                 else:
                                     self.kai_target_price_info_map[kai] = (0, target_price)
 
                             for pin in not_need_close_pin:
                                 signal_flag, target_price = self.compute_last_signal(origin_df, pin)
                                 if "long" in pin:
-                                    self.pin_target_price_info_map[pin] = (target_price, 100000)
+                                    self.pin_target_price_info_map[pin] = (target_price, 10000000)
                                 else:
                                     self.pin_target_price_info_map[pin] = (0, target_price)
 
@@ -436,9 +436,9 @@ class InstrumentTrader:
                             self.current_minute = now.minute
                             break
                         else:
-                            print(
-                                f"⚠️ {self.instrument} 数据未变化, 尝试重新获取 ({attempt + 1}/{max_attempts})"
-                            )
+                            # print(
+                            #     f"⚠️ {self.instrument} 数据未变化, 尝试重新获取 ({attempt + 1}/{max_attempts})"
+                            # )
                             attempt += 1
                     if attempt == max_attempts:
                         print(f"❌ {self.instrument} 多次尝试数据仍未更新，跳过本轮更新")
@@ -515,6 +515,8 @@ class InstrumentTrader:
         inst_id = self.instrument.split("-")[0]
         all_dfs = []
         min_capital_no_leverage = 0
+        max_df_list = []
+
         for is_reverse in ['all_short', 'all']:
             corr_path = f"temp/corr/{inst_id}_{is_reverse}_filter_similar_strategy.parquet_corr_weekly_net_profit_detail.parquet"
             origin_good_path = f"temp/corr/{inst_id}_{is_reverse}_filter_similar_strategy.parquet_origin_good_weekly_net_profit_detail.parquet"
@@ -528,6 +530,12 @@ class InstrumentTrader:
                     penalty_scaler=0.1,
                     use_absolute_correlation=True,
                 )
+                # 将selected_strategies按照capital_no_leverage降序排列
+                selected_strategies = selected_strategies.sort_values(by="capital_no_leverage", ascending=False)
+
+                # 获取capital_no_leverage最大的一行
+                max_selected_strategies = selected_strategies.head(2)
+                max_df_list.append(max_selected_strategies)
                 capital_no_leverage = selected_strategies["capital_no_leverage"].min()
                 min_capital_no_leverage = max(min_capital_no_leverage, capital_no_leverage)
                 all_dfs.append(selected_strategies)
@@ -535,10 +543,22 @@ class InstrumentTrader:
         if all_dfs:
             self.strategy_df = pd.concat(all_dfs)
             self.strategy_df = self.strategy_df[self.strategy_df["capital_no_leverage"] >= min_capital_no_leverage]
+            max_df = pd.concat(max_df_list)
+            self.strategy_df = pd.concat([self.strategy_df, max_df])
 
             self.strategy_df = self.strategy_df.drop_duplicates(subset=["kai_column"])
             self.strategy_df = self.strategy_df.drop_duplicates(subset=["pin_column"])
-            print(f"【{self.instrument}】策略数据加载成功, 策略数量: {self.strategy_df.shape[0]}")
+            false_df = self.strategy_df[self.strategy_df["is_reverse"] == False]
+            # 统计kai_column包含long的行数
+            kai_long_count = false_df["kai_column"].str.contains("long").sum()
+            true_df = self.strategy_df[self.strategy_df["is_reverse"] == True]
+            # 统计kai_column包含short的行数
+            kai_short_count = true_df["kai_column"].str.contains("short").sum()
+
+            buy_count = kai_long_count + kai_short_count
+            sell_count = len(self.strategy_df) - buy_count
+
+            print(f"【{self.instrument}】策略数据加载成功, 策略数量: {self.strategy_df.shape[0]} 做多信号数量: {buy_count} 做空信号数量: {sell_count}")
         else:
             print(f"❌ {self.instrument} 策略数据不存在!")
             return
