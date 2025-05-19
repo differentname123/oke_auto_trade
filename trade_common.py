@@ -41,7 +41,7 @@ class LatestDataManager:
             return self.data_df
         # 判断recent_data_df第一个时间戳（timestamp）是否在data_df中
         if recent_data_df['timestamp'].iloc[0] in self.data_df['timestamp'].values:
-            print('历史数据在最新数据中，更新数据')
+            # print('历史数据在最新数据中，更新数据')
             # 合并两个df
             self.data_df = pd.concat([recent_data_df, self.data_df], ignore_index=True)
             # 去重
@@ -67,7 +67,7 @@ class LatestDataManager:
             return self.data_df
         # 判断recent_data_df第一个时间戳（timestamp）是否在data_df中
         if recent_data_df['timestamp'].iloc[0] in self.data_df['timestamp'].values:
-            print('历史数据在最新数据中，更新数据')
+            # print('历史数据在最新数据中，更新数据')
             # 合并两个df
             self.data_df = pd.concat([recent_data_df, self.data_df], ignore_index=True)
             # 去重

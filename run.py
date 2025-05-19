@@ -390,7 +390,7 @@ class InstrumentTrader:
             try:
                 now = datetime.datetime.now()
                 if self.current_minute is None or now.minute != self.current_minute:
-                    print(f"🕐 {now.strftime('%H:%M')} {self.instrument} 触发数据更新...")
+                    # print(f"🕐 {now.strftime('%H:%M')} {self.instrument} 触发数据更新...")
                     attempt = 0
                     while attempt < max_attempts:
                         origin_df = newest_data.get_newnewest_data()
