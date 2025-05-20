@@ -1,7 +1,27 @@
+"""
+该代码主要用于对交易策略的性能数据进行去冗余和相似性过滤，其核心目标是筛选出具有差异化且优异表现的策略。主要功能包括：
+
+稳健相关性计算：
+对每条策略数据的盈利明细（字段为 weekly_net_profit_detail）计算稳健相关性，方法结合了 Pearson 与 Spearman 相关系数的均值，保证在数据量不足或标准差为零时返回 0。
+
+行间相关性比较：
+利用前述相关性计算函数，对任意两行数据（代表不同策略）的盈利明细进行比较，并以相关性乘以 100 后取整作为衡量指标。
+
+分组内过滤：
+根据指定分组字段（如 kai_count）对数据进行预分组，并在每个分组内按照指定排序键（如 capital_no_leverage）降序排列。然后，遍历组内数据，对任一行与已保留行计算相关性，若相关性超过动态设定的阈值，则舍弃当前行，从而去除组内高度相似的策略。
+
+全局策略对比与冗余剔除：
+将过滤后的策略数据转换为记录列表，并生成所有可能的策略对，利用多进程并行计算每对策略之间的相关性。对于相关系数超过设定阈值的策略对，根据各策略的净利润率决定删除其中表现较差的一方，进一步精炼策略集。
+
+多阶段数据处理与结果保存：
+代码提供了对单个及多个数据文件（parquet 格式）的处理入口，通过多进程加速的方式完成分组过滤和全局策略对比。处理结果（如策略相关性统计和过滤后的策略数据）最终保存至指定文件夹，便于后续策略选择和优化（借助外部工具函数 select_strategies_optimized）。
+
+总体而言，该代码通过稳健的相关性计算、多层次的分组过滤与并行策略对比，有效剔除过于相似或冗余的策略数据，为进一步选出高效且差异化的交易策略提供了数据支撑。
+"""
+
 import os
 import time
 import itertools
-from collections import Counter, defaultdict
 
 import numpy as np
 import pandas as pd
@@ -9,10 +29,11 @@ from concurrent.futures import ProcessPoolExecutor
 from scipy.stats import spearmanr
 import json
 
+from common_utils import select_strategies_optimized
+
 # 全局变量，用于在多进程中保存解析后的行数据
 GLOBAL_PARSED_ROWS = None
 
-from typing import Tuple, List, Optional # Added Optional for clarity
 
 def compute_robust_correlation(array1, array2):
     """
@@ -188,47 +209,6 @@ def gen_statistic_data(origin_good_df, removal_threshold=99):
                                               redundant_pairs_df['Row2'].isin(indices_to_remove))]
     return redundant_pairs_df, filtered_origin_good_df
 
-def compute_rewarded_penalty_from_flat_df(df: pd.DataFrame) -> pd.Series:
-    """
-    向量化地计算每行的(奖励 - 惩罚*100)得分，返回一个 pd.Series，可直接赋值给 df["score"]。
-    """
-    # 1. 初始化 penalty 和 reward
-    idx = df.index
-    penalty = pd.Series(0.0, index=idx)
-    reward = pd.Series(0.0, index=idx)
-
-    features = [
-        dict(col='max_consecutive_loss', thr=-20, sign=1, pf=10, power=2, rf=1, na=-10000),
-        dict(col='net_profit_rate', thr=50, sign=1, pf=10, power=2, rf=1 / 100, na=-10000),
-        dict(col='kai_count', thr=50, sign=1, pf=10, power=2, rf=1 / 100, na=-10000),
-        dict(col='active_month_ratio', thr=0.8, sign=1, pf=10000, power=2, rf=2, na=-10000),
-        dict(col='weekly_loss_rate', thr=0.2, sign=-1, pf=1000, power=2, rf=5, na=10000),
-        dict(col='monthly_loss_rate', thr=0.2, sign=-1, pf=1000, power=2, rf=5, na=10000),
-        dict(col='top_profit_ratio', thr=0.5, sign=-1, pf=1000, power=2, rf=2, na=10000),
-        dict(col='hold_time_mean', thr=3000, sign=-1, pf=1 / 10000, power=2, rf=1 / 3000, na=100000),
-        dict(col='max_hold_time', thr=10000, sign=-1, pf=1 / 10000, power=2, rf=1 / 10000, na=100000),
-        dict(col='avg_profit_rate', thr=10, sign=1, pf=1, power=2, rf=1 / 100, na=-10000),
-    ]
-
-    # 3. 逐特征向量化累加
-    for f in features:
-        # 批量取值、填缺失、转浮点
-        vals = df[f['col']].fillna(f['na']).astype(float)
-
-        if f['sign'] == 1:
-            diff_pen = (f['thr'] - vals).clip(lower=0)
-            diff_rev = (vals - f['thr']).clip(lower=0)
-        else:
-            diff_pen = (vals - f['thr']).clip(lower=0)
-            diff_rev = (f['thr'] - vals).clip(lower=0)
-
-        penalty += diff_pen.pow(f['power']) * f['pf']
-        reward += diff_rev * f['rf']
-
-    # 4. 合成最终得分
-    score = reward - penalty * 100
-    df['capital_no_leverage'] = score
-    return df
 
 
 def find_all_valid_groups(file_path):
@@ -259,7 +239,7 @@ def find_all_valid_groups(file_path):
     return filtered_origin_good_df, redundant_pairs_df
 
 
-def debug():
+def compute_corr():
     """
     计算所有好分组的相关性
     调试入口函数：
@@ -286,381 +266,6 @@ def debug():
         find_all_valid_groups(output_path)
 
 
-
-
-
-def select_strategies_optimized(
-    strategy_df: pd.DataFrame,
-    correlation_df: pd.DataFrame,
-    k: int,
-    strategy_id_col: str = 'index',  # 新增参数：指定包含策略ID的列名
-    count_col: str = 'capital_no_leverage',  # 新增参数：指定包含计数的列名
-    penalty_scaler: float = 1.0,
-    use_absolute_correlation: bool = True,
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    使用贪婪算法选择一组策略，ID在指定列中，自动调整惩罚因子。
-
-    目标是最大化总count，同时最小化策略间的相关性。
-
-    Args:
-        strategy_df (pd.DataFrame): 包含策略ID列和count列的DataFrame。
-        correlation_df (pd.DataFrame): 包含策略对及其相关性的DataFrame。
-                                        需要有 'Row1', 'Row2', 'Correlation' 列。
-                                        'Row1', 'Row2'的值应能匹配 strategy_df 中 strategy_id_col 的值。
-        k (int): 希望选出的策略数量。
-        strategy_id_col (str): strategy_df 中包含策略ID的列名。默认为 'index'。
-        count_col (str): strategy_df 中包含 count 的列名。默认为 'capital_no_leverage'。
-        penalty_scaler (float, optional): 自动计算的惩罚因子的缩放系数。
-                                         默认为 1.0。大于1增加惩罚，小于1减少惩罚。
-        use_absolute_correlation (bool, optional): 是否在计算惩罚时使用绝对相关性值。
-                                                  默认为 True。
-
-    Returns:
-        Tuple[pd.DataFrame, pd.DataFrame]:
-            - pd.DataFrame: 一个包含被选中策略行的DataFrame (来自原始 strategy_df)。
-                            列和索引与原始 strategy_df 保持一致, 按选择顺序排序。
-            - pd.DataFrame: 只包含选定策略之间相关性的新DataFrame。
-                            列为 ['Row1', 'Row2', 'Correlation']。
-    """
-
-    # --- 1. 输入验证和数据准备 ---
-    if strategy_id_col not in strategy_df.columns:
-        raise ValueError(f"strategy_df 必须包含策略ID列: '{strategy_id_col}'")
-    if count_col not in strategy_df.columns:
-        raise ValueError(f"strategy_df 必须包含列: '{count_col}'")
-    if not all(col in correlation_df.columns for col in ['Row1', 'Row2', 'Correlation']):
-        raise ValueError("correlation_df 必须包含列: 'Row1', 'Row2', 'Correlation'")
-    if k <= 0:
-        empty_strategies = strategy_df.iloc[0:0]  # 返回与输入结构相同的空DF
-        empty_correlations = pd.DataFrame(columns=['Row1', 'Row2', 'Correlation'])
-        return empty_strategies, empty_correlations
-
-    # 检查策略ID列是否有重复值，这可能导致问题
-    if strategy_df[strategy_id_col].duplicated().any():
-        print(f"警告: 策略ID列 '{strategy_id_col}' 中存在重复值。这可能影响结果的准确性。")
-
-    # 复制以防修改原始df
-    original_strat_df = strategy_df.copy()
-    strat_df_internal = strategy_df.copy()
-    strat_df_internal['_internal_id_str'] = strat_df_internal[strategy_id_col].astype(str).str.strip()
-    strat_df_internal = strat_df_internal.set_index('_internal_id_str', drop=True)  # 使用临时字符串ID列作为索引
-
-    corr_df = correlation_df.copy()
-
-    corr_df['Row1'] = corr_df['Row1'].astype(str).str.strip()
-    corr_df['Row2'] = corr_df['Row2'].astype(str).str.strip()
-
-    # --- 自动计算 Penalty Factor ---
-    count_series = strat_df_internal[count_col]  # 从内部DF获取count列
-    if count_series.empty or count_series.isnull().all():
-         print(f"警告: '{count_col}' 列为空或全是 NaN。使用默认 penalty_factor 1.0。")
-         auto_penalty_factor = 1.0
-    else:
-         median_count = count_series.median()
-         if pd.isna(median_count) or median_count == 0:
-             mean_count = count_series.mean()
-             if pd.isna(mean_count) or mean_count == 0:
-                 print(f"警告: '{count_col}' 的中位数和均值都为 0 或 NaN。Penalty factor 可能无效。使用 1.0。")
-                 median_count = 1.0
-             else:
-                 median_count = mean_count
-         auto_penalty_factor = abs(median_count * penalty_scaler)
-         print(f"自动计算 Penalty Factor 基准 (count 中位数/均值): {median_count:.2f}")
-         print(f"使用的 Penalty Factor (基准 * scaler): {auto_penalty_factor:.2f}")
-
-    # --- 构建相关性查找字典 ---
-    print("正在构建相关性查找字典...")
-    corr_dict = {}
-    correlation_value_col = 'Correlation'
-    row1_col = 'Row1'
-    row2_col = 'Row2'
-    # 使用处理过的字符串ID构建字典
-    for row in corr_df.itertuples(index=False):
-        s1_str = getattr(row, row1_col)  # 已经是字符串且已去空格
-        s2_str = getattr(row, row2_col)
-        corr = getattr(row, correlation_value_col)
-        if use_absolute_correlation:
-            corr = abs(corr)
-        key = tuple(sorted((s1_str, s2_str)))
-        corr_dict[key] = corr
-    print("相关性查找字典构建完成。")
-    print(f"字典大小 (corr_dict): {len(corr_dict)}")  # 打印大小以供检查
-
-    def get_correlation(s1: str, s2: str, lookup_dict: dict) -> float:
-        """辅助函数：从字典中查找相关性 (输入为字符串ID)"""
-        if s1 == s2:
-            return 1.0
-        key = tuple(sorted((s1, s2)))
-        value = lookup_dict.get(key, 0.0)  # 缺失相关性默认为0
-        return value
-
-    # 获取所有有效策略的字符串ID (来自内部DF的索引)
-    all_strategies_str = set(strat_df_internal.index)
-    if not all_strategies_str:
-         print("策略DataFrame内部处理后为空，无法选择。")
-         return original_strat_df.iloc[0:0], corr_df.iloc[0:0]
-
-    strat_df_internal[count_col] = pd.to_numeric(strat_df_internal[count_col], errors='coerce')
-    strat_df_internal.dropna(subset=[count_col], inplace=True)
-    all_strategies_str = set(strat_df_internal.index)  # 更新有效策略集合
-
-    if not all_strategies_str:
-         print("在处理 count 列后，没有有效的策略，无法选择。")
-         return original_strat_df.iloc[0:0], corr_df.iloc[0:0]
-
-    sorted_strategies_str = strat_df_internal.sort_values(count_col, ascending=False).index.tolist()
-
-    if not sorted_strategies_str:
-         print("排序后无有效策略，无法选择。")
-         return original_strat_df.iloc[0:0], corr_df.iloc[0:0]
-
-    # --- 2. 贪婪选择 ---
-    selected_strategies_str = []  # 存储选中的策略的字符串ID
-    candidate_pool_str = set(sorted_strategies_str)
-
-    print(f"开始贪婪选择，目标数量 k={k}")
-
-    # 选择第一个策略 (字符串ID)
-    first_strategy_str = sorted_strategies_str[0]
-    selected_strategies_str.append(first_strategy_str)
-    candidate_pool_str.remove(first_strategy_str)
-    print(f"  选择第 1 个策略: {first_strategy_str} (原始ID: {strat_df_internal.loc[first_strategy_str, strategy_id_col]}, Count: {strat_df_internal.loc[first_strategy_str, count_col]})")
-
-    # 设置相关性阈值：如果候选策略与任一已选策略的相关性超过该阈值，则不被考虑。
-    correlation_threshold = 60.0
-
-    while len(selected_strategies_str) < k and candidate_pool_str:
-        best_candidate_str = None
-        best_score = -np.inf
-
-        # 遍历所有候选策略 (字符串ID)
-        for candidate_str in candidate_pool_str:
-            # 计算候选策略与已选策略之间的最大相关性
-            max_corr_with_selected = 0.0
-            if selected_strategies_str:
-                current_max_corr = 0.0
-                for selected_strat_str in selected_strategies_str:
-                    corr = get_correlation(candidate_str, selected_strat_str, corr_dict)
-                    current_max_corr = max(current_max_corr, corr)
-                max_corr_with_selected = current_max_corr
-
-            # 如果候选策略与任一已选策略的相关性超过阈值，则跳过该候选策略
-            if max_corr_with_selected > correlation_threshold:
-                continue
-
-            candidate_count = strat_df_internal.loc[candidate_str, count_col]
-
-            # 计算得分：在 count 的基础上扣除相关性惩罚
-            score = candidate_count - auto_penalty_factor * max_corr_with_selected
-
-            # 更新最佳候选
-            if score > best_score:
-                best_score = score
-                best_candidate_str = candidate_str
-
-        if best_candidate_str is None:
-            print(f"  在第 {len(selected_strategies_str) + 1} 步无法找到合适的候选策略（满足相关性阈值要求），停止选择。")
-            break
-
-        # 添加最佳候选者 (字符串ID)
-        selected_strategies_str.append(best_candidate_str)
-        candidate_pool_str.remove(best_candidate_str)
-        candidate_count = strat_df_internal.loc[best_candidate_str, count_col]
-        original_id = strat_df_internal.loc[best_candidate_str, strategy_id_col]  # 获取原始ID用于打印
-        # 计算并打印相关信息
-        final_max_corr = 0.0
-        if len(selected_strategies_str) > 1:
-            current_max_corr = 0.0
-            for s_str in selected_strategies_str[:-1]:
-                corr = get_correlation(best_candidate_str, s_str, corr_dict)
-                current_max_corr = max(current_max_corr, corr)
-            final_max_corr = current_max_corr
-        print(f"  选择第 {len(selected_strategies_str)} 个策略: {best_candidate_str} (原始ID: {original_id}, Count: {candidate_count:.2f}, Score: {best_score:.2f}, MaxCorrWithSelected: {final_max_corr:.3f})")
-
-    # --- 3. 从原始 DataFrame 中提取选定的策略 ---
-    print(f"选择完成，共选出 {len(selected_strategies_str)} 个策略。")
-
-    # 根据处理后的字符串ID筛选原始策略
-    selected_mask = original_strat_df[strategy_id_col].astype(str).str.strip().isin(selected_strategies_str)
-    selected_strategies_df_unordered = original_strat_df[selected_mask].copy()
-
-    # 保证输出的顺序与选择顺序一致
-    if not selected_strategies_df_unordered.empty and selected_strategies_str:
-        id_map = selected_strategies_df_unordered.set_index(selected_strategies_df_unordered[strategy_id_col].astype(str).str.strip())
-        selected_strategies_df = id_map.loc[selected_strategies_str].copy()
-        selected_strategies_df.reset_index(drop=True, inplace=True)
-    else:
-        selected_strategies_df = selected_strategies_df_unordered
-
-    selected_strategies_set_str = set(selected_strategies_str)
-
-    corr_filter_mask = corr_df[row1_col].isin(selected_strategies_set_str) & \
-                       corr_df[row2_col].isin(selected_strategies_set_str)
-    selected_correlation_df = corr_df[corr_filter_mask].copy()
-
-    # 尝试将相关性 DataFrame 中的 Row1/Row2 恢复为原始类型
-    original_id_dtype = original_strat_df[strategy_id_col].dtype
-    if not pd.api.types.is_string_dtype(original_id_dtype):
-        id_str_to_original_map = {}
-        for _idx, row in original_strat_df.drop_duplicates(subset=[strategy_id_col], keep='first').iterrows():
-            id_str = str(row[strategy_id_col]).strip()
-            id_orig = row[strategy_id_col]
-            id_str_to_original_map[id_str] = id_orig
-
-        try:
-            selected_correlation_df[row1_col] = selected_correlation_df[row1_col].map(id_str_to_original_map)
-            selected_correlation_df[row2_col] = selected_correlation_df[row2_col].map(id_str_to_original_map)
-            selected_correlation_df.dropna(subset=[row1_col, row2_col], inplace=True)
-            selected_correlation_df[row1_col] = selected_correlation_df[row1_col].astype(original_id_dtype)
-            selected_correlation_df[row2_col] = selected_correlation_df[row2_col].astype(original_id_dtype)
-            print(f"相关性DataFrame中的ID已尝试恢复为原始类型: {original_id_dtype}")
-        except Exception as e:
-            print(f"警告：尝试将相关性DF中的ID转回原始类型时出错: {e}。将返回字符串形式的ID。")
-
-    # --- 5. 返回结果 ---
-    return selected_strategies_df, selected_correlation_df
-
-
-def extract_nested_key(df, target_key):
-    """
-    从 DataFrame 中所有以 '_detail' 结尾的列（包含字典或JSON字符串）提取指定 target_key 的值，
-    并将提取的值放入新的列中。
-
-    Args:
-        df (pd.DataFrame): 输入的 Pandas DataFrame。
-        target_key (str): 需要从字典中提取的键名。
-
-    Returns:
-        pd.DataFrame: 包含新增列的 DataFrame 副本。
-                      新列的命名规则是：原始列名去除 '_detail' 后缀，加上 '_<target_key>'。
-    """
-    df_result = df.copy() # 创建副本，避免修改原始 DataFrame
-    detail_columns = [col for col in df.columns if col.endswith('_details')]
-
-    for col_name in detail_columns:
-        # 构建新列的名称
-        base_name = col_name.rsplit('_details', 1)[0] # 去掉末尾的 _detail
-        new_col_name = f"{base_name}_{target_key}"
-
-        # 定义用于提取值的函数
-        def get_value_from_cell(cell_data):
-            if pd.isna(cell_data): # 处理 NaN 或 None 值
-                return None
-
-            data_dict = None
-            # 检查是否已经是字典
-            if isinstance(cell_data, dict):
-                data_dict = cell_data
-            # 检查是否是字符串，尝试解析为 JSON
-            elif isinstance(cell_data, str):
-                try:
-                    parsed_data = json.loads(cell_data.replace("'", "\"")) # 尝试替换单引号以处理非标准JSON
-                    if isinstance(parsed_data, dict):
-                       data_dict = parsed_data
-                    else:
-                        # 解析结果不是字典（可能是列表、字符串、数字等）
-                        return None
-                except json.JSONDecodeError:
-                    # 如果字符串不是有效的 JSON 格式，则认为无法提取
-                    # 可以选择性地添加日志记录或警告
-                    # print(f"Warning: Could not decode JSON in column {col_name}: {cell_data}")
-                    return None
-                except Exception as e:
-                    # 处理其他可能的解析错误
-                    # print(f"Warning: Error processing cell in column {col_name}: {e}")
-                    return None
-
-            # 如果成功获取了字典，则尝试提取 target_key 的值
-            if data_dict is not None:
-                return data_dict.get(target_key) # 使用 .get() 避免 KeyError，如果键不存在则返回 None
-
-            # 如果不是字典也不是可解析的 JSON 字符串，则返回 None
-            return None
-
-        # 应用函数到列，并将结果存入新列
-        df_result[new_col_name] = df_result[col_name].apply(get_value_from_cell)
-
-    return df_result
-
-def filter_good_df(inst_id):
-
-    sort_key = 'avg_net_profit_rate_new_positive_ratio'
-
-    good_feature_df = pd.read_parquet('temp/all_result_df_new_1000.parquet')
-    new_df = extract_nested_key(good_feature_df, inst_id)
-    new_df = new_df[(new_df[f'pos_ratio_{inst_id}'] > 0.5) &
-                    (new_df[f'avg_net_profit_rate_new_{inst_id}'] > 5) &
-                    (new_df['avg_net_profit_rate_new_min'] > -10) &
-                    (new_df[sort_key] > 0.8) &
-                    ((new_df['bin_seq'] > 990) | (new_df['bin_seq'] < 10)) &
-                    (new_df[f'min_net_profit_{inst_id}'] > -20)
-                    ]
-    new_df['count'] = new_df.groupby(['feature'])['bin_seq'].transform('count')
-    new_df = new_df[new_df['count'] > 1]
-    new_df['feature_bin_seq'] = new_df['feature'].astype(str) + '_' + new_df['bin_seq'].astype(str)
-    feature_bin_seq_list = new_df['feature_bin_seq'].tolist()
-    final_df = pd.read_parquet('temp/corr/final_good_df.parquet')
-    # 如果final_df包含value列，则删除
-    if 'index' in final_df.columns:
-        final_df = final_df.drop(columns=['index'])
-    filter_df = final_df[final_df['inst_id'] == inst_id]
-    filter_df = filter_df[filter_df['feature'].isin(feature_bin_seq_list)]
-    # 将filter_df按照kai_column和pin_column分组然后统计相应的数量作为新的一列，叫做count
-    filter_df['count'] = filter_df.groupby(['kai_column', 'pin_column'])['feature'].transform('count')
-    filter_df = filter_df.drop_duplicates(subset=['kai_column', 'pin_column'])
-    origin_good_path = f'temp/corr/{inst_id}_origin_good.parquet'
-    strategy_df = pd.read_parquet(origin_good_path,columns=['kai_column', 'pin_column', 'index'])
-    filter_df = pd.merge(filter_df, strategy_df, on=['kai_column', 'pin_column'], how='inner')
-    return filter_df
-
-
-def find_continuous_min_sum(arr):
-    """
-    计算数组中任意连续子序列的和的最小值
-    使用改进版的 Kadane 算法：
-     - 当前子序列和：current_sum = min(num, current_sum + num)
-     - 全局最小和：min_sum = min(min_sum, current_sum)
-    """
-    # 如果数组为空，直接返回 np.nan（或者你可以选择其他异常处理方式）
-    if len(arr) == 0:
-        return np.nan
-
-    current_sum = arr[0]
-    min_sum = arr[0]
-    for num in arr[1:]:
-        current_sum = min(num, current_sum + num)
-        min_sum = min(min_sum, current_sum)
-    return min_sum
-
-
-def process_df(df):
-    """
-    对 DataFrame 中的 'weekly_net_profit_detail_new20' 列（每行为 np.array）进行处理，
-    添加两列：
-      - 'min_contiguous_sum'：连续子数组的最小和
-      - 'min_value'：数组中的最小值
-    """
-
-    def compute_metrics(arr):
-        # 确保 arr 为 numpy 数组
-        arr = np.array(arr)
-        continuous_min_sum = find_continuous_min_sum(arr)
-        min_value = np.min(arr) if arr.size > 0 else np.nan
-        return pd.Series({
-            'min_contiguous_sum': continuous_min_sum,
-            'min_value': min_value
-        })
-
-    # 使用 apply 逐行处理，并将结果合并到 DataFrame 中
-    df[['min_contiguous_sum', 'min_value']] = df['weekly_net_profit_detail_new20'].apply(compute_metrics)
-    # 删除min_value小于weekly_net_profit_min的行
-    df = df[df['min_value'] > df['weekly_net_profit_min']]
-    # 删除min_contiguous_sum小于max_consecutive_loss的行
-    df = df[df['min_contiguous_sum'] > df['max_consecutive_loss']]
-
-    return df
-
 def final_compute_corr():
     inst_id_list = [ 'SOL', 'TON', 'DOGE', 'XRP', 'PEPE']
     is_reverse = 'all'
@@ -679,13 +284,7 @@ def final_compute_corr():
                                     penalty_scaler=0.1, use_absolute_correlation=True)
 
 
-        filter_df = final_df[final_df['inst_id'] == inst_id]
-        # 按照kai_column和pin_column去重
-        filter_df = filter_df.drop_duplicates(subset=['kai_column', 'pin_column'])
-        print(f'处理 {inst_id} 的数据，数据量：{len(filter_df)}')
-        redundant_pairs_df, filtered_origin_good_df = gen_statistic_data(filter_df)
-        redundant_pairs_df.to_parquet(corr_path, index=False)
-        filtered_origin_good_df.to_parquet(origin_good_path, index=False)
+        print(f'策略数量：{len(selected_strategies)}')
 
 def filter_similar_strategy():
     """
@@ -712,8 +311,6 @@ def filter_similar_strategy():
             data_df = data_df[data_df['hold_time_mean'] < 3000]
             # capital_no_leverage
             data_df = data_df[data_df['capital_no_leverage'] > 1.1]
-            # data_df = data_df[data_df['kai_column'].str.contains('long', na=False)]
-            # data_df = data_df.head(10000)
             print(f'处理 {inst_id} 的数据，数据量：{len(data_df)}')
             while True:
                 filtered_df = filtering(data_df, grouping_column='kai_count', sort_key='capital_no_leverage', _unused_threshold=None)
@@ -727,108 +324,10 @@ def filter_similar_strategy():
             filtered_df.to_parquet(output_path, index=False)
             print(f'保存过滤后的数据：{output_path} 长度：{len(filtered_df)}')
 
-def count_pairs_to_df(df_list):
-    required_columns = ['kai_column', 'pin_column', 'inst_id', 'net_profit_rate_new20']
-    dfs = []
-    # 1. 筛选并拼接所有合法的 DataFrame
-    for i, df in enumerate(df_list):
-        if not all(col in df.columns for col in required_columns):
-            missing = [col for col in required_columns if col not in df.columns]
-            print(f"警告：DataFrame 索引 {i} 缺少列 {missing}，已跳过。")
-            continue
-        dfs.append(df[required_columns])
-    if not dfs:
-        return pd.DataFrame(columns=[
-            'kai_column', 'pin_column', 'count',
-            'detail_info', 'inst_id_list',
-            'profit_mean', 'profit_min', 'profit_max'
-        ])
-
-    all_df = pd.concat(dfs, ignore_index=True)
-
-    # 2. groupby 一次性算出：count, inst_id 列表, 以及 profit 的 mean/min/max
-    grp = all_df.groupby(['kai_column', 'pin_column'], sort=False)
-    stats = grp.agg(
-        count=('inst_id', 'size'),
-        inst_id_list=('inst_id', list),
-        profit_mean=('net_profit_rate_new20', 'mean'),
-        profit_min=('net_profit_rate_new20', 'min'),
-        profit_max=('net_profit_rate_new20', 'max'),
-    )
-
-    # 3. 只保留 count > 1
-    stats = stats[stats['count'] > 1]
-    if stats.empty:
-        return pd.DataFrame(columns=[
-            'kai_column', 'pin_column', 'count',
-            'detail_info', 'inst_id_list',
-            'profit_mean', 'profit_min', 'profit_max'
-        ])
-
-    # 4. 构造 detail_info 字段
-    #    对每个组，用 inst_id_list 与 net_profit_rate_new20 列表一一对应成字典
-    #    我们先拿出每组的 net_profit_rate_new20 列表：
-    profit_lists = grp['net_profit_rate_new20'].agg(list)
-    # 注意：profit_lists 与 stats 索引完全对齐
-    stats = stats.join(profit_lists.rename('profit_list'))
-
-    # zip 成 dict
-    stats['detail_info'] = stats.apply(
-        lambda row: dict(zip(row['inst_id_list'], row['profit_list'])),
-        axis=1
-    )
-
-    # 5. 整理列顺序、重置索引并返回
-    result = stats.reset_index()[[
-        'kai_column', 'pin_column', 'count',
-        'detail_info', 'inst_id_list',
-        'profit_mean', 'profit_min', 'profit_max'
-    ]].sort_values('count', ascending=False).reset_index(drop=True)
-
-    return result
-
-def get_statistic(good_df):
-    """
-    使用 groupby().transform('size') 优化统计函数。
-    """
-    # 1. 使用 transform('size') 直接计算并对齐计数值
-    # 它会按 'kai_column' 分组，计算每组的大小，并将该大小赋给组内所有行
-    good_df['kai_value'] = good_df.groupby('kai_column')['kai_column'].transform('size')
-    good_df['pin_value'] = good_df.groupby('pin_column')['pin_column'].transform('size')
-
-    # 2. 后续计算已经是向量化操作，本身是高效的
-    good_df['value_score'] = good_df['kai_value'] + good_df['pin_value']
-    good_df['value_score1'] = good_df['kai_value'] * good_df['pin_value']
-
-    return good_df
-
-def get_statistic_data():
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
-    all_data_dfs = []  # 用于存储每个文件的 DataFrame
-    is_reverse_list = [False, True]
-    for inst_id in inst_id_list:
-        for is_reverse in is_reverse_list:
-            data_file = f'temp_back/{inst_id}_{is_reverse}_pure_data_with_future.parquet'
-            statistic_df = get_statistic(pd.read_parquet(data_file))
-            # 只保留statistic_df的kai_column和pin_column列还有kai_value和pin_value，value_score和value_score1
-            statistic_df = statistic_df[['kai_column', 'pin_column', 'kai_value', 'pin_value', 'value_score', 'value_score1']]
-
-            data_file = f'temp/corr/final_good_{inst_id}_{is_reverse}_filter_all.parquet_origin_good_weekly_net_profit_detail.parquet'
-            temp_df = pd.read_parquet(data_file)
-            temp_df['inst_id'] = inst_id
-            # 将temp_df按照'kai_column', 'pin_column'和statistic_df进行合并
-            temp_df = pd.merge(temp_df, statistic_df, on=['kai_column', 'pin_column'], how='inner')
-            all_data_dfs.append(temp_df)
-    result_df = count_pairs_to_df(all_data_dfs)
-    filter_result_df = result_df[result_df['count'] > 1]
-    print()
-
-
 def example():
-    # get_statistic_data()
-    # filter_similar_strategy()
+    filter_similar_strategy()
     final_compute_corr()
-    # debug()
+    compute_corr()
 
 
 
