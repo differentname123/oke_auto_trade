@@ -60,7 +60,7 @@ min_count_map = {
 class InstrumentTrader:
     def __init__(self, instrument):
         self.instrument = instrument
-        self.min_count = min_count_map.get(instrument, 0)
+        self.min_count = min_count_map.get(instrument, 0) * 100
         self.order_detail_map = {}
         self.price = 0.0
         self.price_list = []
@@ -533,6 +533,7 @@ class InstrumentTrader:
                                 self.process_close_orders(price_val)
                         except websockets.exceptions.ConnectionClosed:
                             print(f"🔴 {self.instrument} WebSocket 连接断开，重连中...")
+                            await asyncio.sleep(2)  # 休息2秒再尝试连接
                             break
             except Exception as e:
                 traceback.print_exc()

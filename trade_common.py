@@ -1,5 +1,7 @@
+import json
 import os
 import time
+from datetime import datetime
 
 import okx.Trade as Trade
 import okx.MarketData as Market
@@ -253,14 +255,42 @@ def get_train_data(inst_id="BTC-USDT-SWAP", bar="1m", limit=100, max_candles=100
         return pd.DataFrame()
 
 
+def log_order(log_item):
+    """
+    将订单日志追加到temp/all_order.json中，日志以JSON数组的形式保存。
+    """
+    file_path = "temp/all_order.json"
+    # 确保temp目录存在
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+    # 尝试读取已有的日志内容
+    try:
+        if os.path.exists(file_path):
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        else:
+            data = []
+    except Exception:
+        data = []
+
+    # 追加日志
+    data.append(log_item)
+
+    # 写入文件（带缩进，保证JSON格式的可读性）
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+
 def place_order(inst_id, side, size, trade_action="open"):
     """
     以最优价格下单（市价单），支持开仓或平仓（双向持仓模式）。
+    每次调用都会将详细的订单信息保存到 temp/all_order.json 中。
 
     :param inst_id: 交易对 (如 "BTC-USDT-SWAP")
     :param side: 交易方向 ("buy" = 买入 / "sell" = 卖出)
     :param size: 下单数量
     :param trade_action: "open" (开仓) 或 "close" (平仓)
+    :return: 下单成功返回 True，否则返回 False
     """
     try:
         if trade_action not in ["open", "close"]:
@@ -288,14 +318,42 @@ def place_order(inst_id, side, size, trade_action="open"):
         # 调用 OKX 下单 API
         order = tradeAPI.place_order(**order_params)
 
-        # 尝试获取order中的code
+        # 构造日志记录
+        log_entry = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "inst_id": inst_id,
+            "side": side,
+            "size": size,
+            "trade_action": trade_action,
+            "order_params": order_params,
+            "order_response": order,
+        }
+
+        # 判断下单结果
         if order.get("code") != "0":
             print(f"❌ {trade_action.upper()} {side.upper()} 市价单下单失败，错误信息：", order)
+            log_entry["result"] = False
+            log_order(log_entry)
             return False
+
+        log_entry["result"] = True
+        log_order(log_entry)
         return True
 
     except Exception as e:
+        # 在异常时记录详细的错误日志
+        log_entry = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "inst_id": inst_id,
+            "side": side,
+            "size": size,
+            "trade_action": trade_action,
+            "order_params": order_params if 'order_params' in locals() else None,
+            "error": str(e),
+            "result": False
+        }
         print(f"❌ {trade_action.upper()} {side.upper()} 市价单下单失败，错误信息：", e)
+        log_order(log_entry)
         return False
 
 if __name__ == '__main__':
