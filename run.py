@@ -96,7 +96,7 @@ min_count_map = {
 class InstrumentTrader:
     def __init__(self, instrument):
         self.instrument = instrument
-        self.min_count = min_count_map.get(instrument, 0) * 10
+        self.min_count = min_count_map.get(instrument, 0) * 50
         self.order_detail_map = {}
         self.price = 0.0
         self.price_list = []
@@ -614,7 +614,7 @@ class InstrumentTrader:
             origin_good_path = f"temp/corr/{inst_id}_{is_reverse}_filter_similar_strategy.parquet_origin_good_weekly_net_profit_detail.parquet"
             if os.path.exists(origin_good_path):
                 temp_strategy_df = pd.read_parquet(origin_good_path)
-                temp_strategy_df = temp_strategy_df[temp_strategy_df["capital_no_leverage"] > 2]
+                temp_strategy_df = temp_strategy_df[(temp_strategy_df["capital_no_leverage"] > 3) | (temp_strategy_df["optimal_capital"] > 50)]
                 # 删除kai_column包含not_close_signal_key的行
                 temp_strategy_df = temp_strategy_df[~temp_strategy_df["kai_column"].str.contains("|".join(not_close_signal_key))]
                 # 删除pin_column包含not_close_signal_key的行
