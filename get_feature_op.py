@@ -1956,7 +1956,7 @@ def download_data():
     backtest_path = 'kline_data'
     base_file_path = 'origin_data.csv'
     is_reload = True
-    inst_id_list = ['SOL-USDT-SWAP']
+    inst_id_list = ['TON-USDT-SWAP']
     if not os.path.exists(backtest_path):
         os.makedirs(backtest_path)
     bar_list = ['1m']

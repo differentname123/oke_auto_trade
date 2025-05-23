@@ -24,6 +24,7 @@
 动态更新目标价格范围，确保信号判断与交易执行的准确性。
 总体而言，该系统结合了实时 WebSocket 数据、历史行情分析、多种技术指标计算以及自动下单执行，通过异步与多进程协同，实现了多个交易品种的实时自动化交易和订单管理。
 """
+
 import asyncio
 import os
 import time
@@ -38,6 +39,33 @@ import websockets
 
 from common_utils import select_strategies_optimized
 from trade_common import LatestDataManager, place_order
+
+# --------------------
+# 自定义日志函数，仅记录当前代码输出的日志
+# --------------------
+def log_info(message):
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_message = f"{timestamp} [INFO] {message}"
+    print(log_message)
+    with open("trade.log", "a", encoding="utf-8") as f:
+        f.write(log_message + "\n")
+
+def log_warning(message):
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_message = f"{timestamp} [WARNING] {message}"
+    print(log_message)
+    with open("trade.log", "a", encoding="utf-8") as f:
+        f.write(log_message + "\n")
+
+def log_error(message, exc_info=False):
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_message = f"{timestamp} [ERROR] {message}"
+    print(log_message)
+    with open("trade.log", "a", encoding="utf-8") as f:
+        f.write(log_message + "\n")
+        if exc_info:
+            error_trace = traceback.format_exc()
+            f.write(error_trace + "\n")
 
 # WebSocket 服务器地址
 OKX_WS_URL = "wss://ws.okx.com:8443/ws/v5/public"
@@ -60,7 +88,7 @@ min_count_map = {
 class InstrumentTrader:
     def __init__(self, instrument):
         self.instrument = instrument
-        self.min_count = min_count_map.get(instrument, 0) * 100
+        self.min_count = min_count_map.get(instrument, 0) * 10
         self.order_detail_map = {}
         self.price = 0.0
         self.price_list = []
@@ -272,7 +300,7 @@ class InstrumentTrader:
             side = "buy" if side == "sell" else "sell"
         pin_side = "sell" if side == "buy" else "buy"
         result = place_order(self.instrument, side, self.min_count)
-        # 获取可读性高的当前时间
+        # 获取易读的当前时间
         current_time_human = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if result:
             self.order_detail_map[signal_name] = {
@@ -283,15 +311,15 @@ class InstrumentTrader:
                 "time": self.current_minute,
                 "size": self.min_count,
             }
-            print(
-                f"开仓成功 {side} {signal_name} for {self.instrument} 成交, 价格: {price_val}, 时间: {datetime.datetime.now()}"
-            )
+            log_info(f"开仓成功 {side} {signal_name} for {self.instrument} 成交, 价格: {price_val}, 时间: {datetime.datetime.now()}")
             self.save_order_detail_map()
 
     def close_order(self, signal_name, price_val):
         keys_to_remove = []
         for kai_key, order in list(self.order_detail_map.items()):
-            if self.current_minute == order["time"]:
+            current_time_human = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if current_time_human == order["time"]:
+                log_info(f"当前时间与订单时间相同，跳过平仓: {current_time_human} == {order['time']}")
                 continue
             pin_key = self.kai_pin_map.get(kai_key)
             if pin_key == signal_name:
@@ -302,13 +330,12 @@ class InstrumentTrader:
                 )
                 if result:
                     keys_to_remove.append(kai_key)
-                    print(
-                        f"【平仓成功】 {pin_key} for {self.instrument} 开仓方向 {side}成交, , 开仓价格: {kai_price} 平仓价格: {price_val}, 开仓时间{order['open_time']} 平仓时间: {datetime.datetime.now()} "
-                    )
+                    log_info(f"【平仓成功】 {pin_key} for {self.instrument} 开仓方向 {side}成交, 开仓价格: {kai_price} 平仓价格: {price_val}, 开仓时间: {order['open_time']} 平仓时间: {datetime.datetime.now()}")
                     # 记录平仓订单详情
                     close_record = {
                         "instrument": self.instrument,
-                        "signal": pin_key,
+                        'kai_signal': kai_key,
+                        "pin_signal": pin_key,
                         "open_time": order["open_time"],
                         "close_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         "open_price": kai_price,
@@ -319,9 +346,7 @@ class InstrumentTrader:
                     }
                     self.record_closed_order(close_record)
                 else:
-                    print(
-                        f"❌ {pin_key} for {self.instrument} 平仓失败, 价格: {price_val}, 开仓价格: {kai_price}, 时间: {datetime.datetime.now()}"
-                    )
+                    log_error(f"❌ {pin_key} for {self.instrument} 平仓失败, 价格: {price_val}, 开仓价格: {kai_price}, 时间: {datetime.datetime.now()}")
         if keys_to_remove:
             for k in keys_to_remove:
                 self.order_detail_map.pop(k, None)
@@ -348,15 +373,15 @@ class InstrumentTrader:
                             "time": self.current_minute,
                             "size": self.min_count,
                         }
-                        print(
-                            f"开仓成功 {key} for {self.instrument} 成交, 价格: {price_val}, 时间: {datetime.datetime.now()} 最小价格: {min_price}, 最大价格: {max_price}"
-                        )
+                        log_info(f"开仓成功 {key} for {self.instrument} 成交, 价格: {price_val}, 时间: {datetime.datetime.now()} 最小价格: {min_price}, 最大价格: {max_price}")
                         self.save_order_detail_map()
 
     def process_close_orders(self, price_val):
         keys_to_remove = []
         for kai_key, order in list(self.order_detail_map.items()):
-            if self.current_minute == order["time"]:
+            current_time_human = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if current_time_human == order["time"]:
+                log_info(f"当前时间与订单时间相同，跳过平仓: {current_time_human} == {order['time']}")
                 continue
             pin_key = self.kai_pin_map.get(kai_key)
             if not pin_key:
@@ -373,13 +398,12 @@ class InstrumentTrader:
                         )
                         if result:
                             keys_to_remove.append(kai_key)
-                            print(
-                                f"【平仓成功】 {pin_key} for {self.instrument} 开仓方向 {side}成交, , 开仓价格: {kai_price} 平仓价格: {price_val}, 开仓时间{order['open_time']} 平仓时间: {datetime.datetime.now()} "
-                            )
+                            log_info(f"【平仓成功】 {pin_key} for {self.instrument} 开仓方向 {side}成交, 开仓价格: {kai_price} 平仓价格: {price_val}, 开仓时间: {order['open_time']} 平仓时间: {datetime.datetime.now()}")
                             # 记录平仓订单详情
                             close_record = {
                                 "instrument": self.instrument,
-                                "signal": pin_key,
+                                'kai_signal': kai_key,
+                                "pin_signal": pin_key,
                                 "open_time": order["open_time"],
                                 "close_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                 "open_price": kai_price,
@@ -390,9 +414,7 @@ class InstrumentTrader:
                             }
                             self.record_closed_order(close_record)
                         else:
-                            print(
-                                f"❌ {pin_key} for {self.instrument} 平仓失败, 价格: {price_val}, 开仓价格: {kai_price}, 时间: {datetime.datetime.now()}"
-                            )
+                            log_error(f"❌ {pin_key} for {self.instrument} 平仓失败, 价格: {price_val}, 开仓价格: {kai_price}, 时间: {datetime.datetime.now()}")
         if keys_to_remove:
             for k in keys_to_remove:
                 self.order_detail_map.pop(k, None)
@@ -401,9 +423,7 @@ class InstrumentTrader:
     async def fetch_new_data(self, max_period):
         kai_column_list = self.strategy_df["kai_column"].unique().tolist()
         pin_column_list = self.strategy_df["pin_column"].unique().tolist()
-        print(
-            f"【{self.instrument}】当前策略数据的开仓信号数量: {len(kai_column_list)} 平仓信号数量: {len(pin_column_list)}"
-        )
+        log_info(f"【{self.instrument}】当前策略数据的开仓信号数量: {len(kai_column_list)} 平仓信号数量: {len(pin_column_list)}")
         not_close_signal_key = ["abs", "relate", "donchian"]
         newest_data = LatestDataManager(max_period, self.instrument)
         max_attempts = 200
@@ -413,20 +433,16 @@ class InstrumentTrader:
             try:
                 now = datetime.datetime.now()
                 if self.current_minute is None or now.minute != self.current_minute:
-                    # print(f"🕐 {now.strftime('%H:%M')} {self.instrument} 触发数据更新...")
                     attempt = 0
                     while attempt < max_attempts:
                         origin_df = newest_data.get_newnewest_data()
                         df = origin_df[origin_df["confirm"] == "1"]
                         latest_timestamp = df.iloc[-1]["timestamp"] if not df.empty else None
                         if previous_timestamp is None or latest_timestamp != previous_timestamp:
-                            print(
-                                f"✅ {self.instrument} 数据已更新, 最新 timestamp: {latest_timestamp} 实时最新价格: {self.price} 最新数据的时间: {origin_df.iloc[-1]['timestamp']}"
-                            )
-                            # 处理 close 类型的开仓和平仓
+                            log_info(f"✅ {self.instrument} 数据已更新, 最新 timestamp: {latest_timestamp} 实时最新价格: {self.price} 最新数据的时间: {origin_df.iloc[-1]['timestamp']}")
                             exist_kai_keys = list(self.order_detail_map.keys())
                             exist_pin_keys = [self.kai_pin_map[k] for k in exist_kai_keys]
-                            print(f"【{self.instrument}】当前持仓的开仓信号数量: {len(exist_kai_keys)} 平仓信号数量: {len(exist_pin_keys)}")
+                            log_info(f"【{self.instrument}】当前持仓的开仓信号数量: {len(exist_kai_keys)} 平仓信号数量: {len(exist_pin_keys)}")
                             need_close_kai = []
                             not_need_close_kai = []
                             for kai in kai_column_list:
@@ -443,13 +459,10 @@ class InstrumentTrader:
                                 if signal_flag:
                                     detail_map[kai] = target_price
                                     self.open_order(kai, target_price)
-                            print(
-                                f"【{self.instrument}】  耗时: {int((datetime.datetime.now() - start_time).total_seconds() * 1000)}ms 需要close价格开仓的开仓信号:{len(need_close_kai)}  {detail_map} 不需要close价格开仓的开仓信号: {len(not_need_close_kai)} {not_need_close_kai}"
-                            )
+                            log_info(f"【{self.instrument}】 耗时: {int((datetime.datetime.now() - start_time).total_seconds() * 1000)}ms 需要close价格开仓的开仓信号:{len(need_close_kai)} {detail_map} 不需要close价格开仓的开仓信号: {len(not_need_close_kai)} {not_need_close_kai}")
 
                             need_close_pin = []
                             not_need_close_pin = []
-
                             for pin in exist_pin_keys:
                                 if any(k in pin for k in not_close_signal_key):
                                     not_need_close_pin.append(pin)
@@ -457,15 +470,12 @@ class InstrumentTrader:
                                     need_close_pin.append(pin)
                             start_time = datetime.datetime.now()
                             detail_map = {}
-
                             for pin in need_close_pin:
                                 signal_flag, target_price = self.compute_last_signal(df, pin)
                                 if signal_flag:
                                     detail_map[pin] = target_price
                                     self.close_order(pin, target_price)
-                            print(
-                                f"【{self.instrument}】  耗时: {int((datetime.datetime.now() - start_time).total_seconds() * 1000)} ms 需要close价格开仓的平仓信号:{len(need_close_pin)}  {detail_map} 不需要close价格开仓的平仓信号: {len(not_need_close_pin)} {not_need_close_pin}"
-                            )
+                            log_info(f"【{self.instrument}】 耗时: {int((datetime.datetime.now() - start_time).total_seconds() * 1000)} ms 需要close价格开仓的平仓信号:{len(need_close_pin)} {detail_map} 不需要close价格开仓的平仓信号: {len(not_need_close_pin)} {not_need_close_pin}")
 
                             for kai in not_need_close_kai:
                                 signal_flag, target_price = self.compute_last_signal(origin_df, kai)
@@ -483,9 +493,7 @@ class InstrumentTrader:
 
                             self.price_list.clear()
 
-                            print(
-                                f"{self.instrument} 开仓信号个数 {len(self.kai_target_price_info_map)}  详细结果：{self.kai_target_price_info_map} 平仓信号个数{len(self.pin_target_price_info_map)}  详细结果：{self.pin_target_price_info_map}"
-                            )
+                            log_info(f"{self.instrument} 开仓信号个数 {len(self.kai_target_price_info_map)}  详细结果：{self.kai_target_price_info_map} 平仓信号个数{len(self.pin_target_price_info_map)}  详细结果：{self.pin_target_price_info_map}")
                             self.is_new_minute = True
                             previous_timestamp = latest_timestamp
                             self.current_minute = now.minute
@@ -493,13 +501,13 @@ class InstrumentTrader:
                         else:
                             attempt += 1
                     if attempt == max_attempts:
-                        print(f"❌ {self.instrument} 多次尝试数据仍未更新，跳过本轮更新")
+                        log_error(f"❌ {self.instrument} 多次尝试数据仍未更新，跳过本轮更新")
                 await asyncio.sleep(1)
             except Exception as e:
                 self.pin_target_price_info_map = {}
                 self.kai_target_price_info_map = {}
                 self.is_new_minute = True
-                traceback.print_exc()
+                log_error("Error in fetch_new_data", exc_info=True)
 
     async def subscribe_channel(self, ws):
         subscribe_msg = {
@@ -507,13 +515,13 @@ class InstrumentTrader:
             "args": [{"channel": "trades", "instId": self.instrument}],
         }
         await ws.send(json.dumps(subscribe_msg))
-        print(f"📡 {self.instrument} 已订阅实时数据")
+        log_info(f"📡 {self.instrument} 已订阅实时数据")
 
     async def websocket_listener(self):
         while True:
             try:
                 async with websockets.connect(OKX_WS_URL) as ws:
-                    print(f"✅ {self.instrument} 连接到 OKX WebSocket")
+                    log_info(f"✅ {self.instrument} 连接到 OKX WebSocket")
                     await self.subscribe_channel(ws)
                     while True:
                         try:
@@ -532,11 +540,13 @@ class InstrumentTrader:
                                 self.process_open_orders(price_val)
                                 self.process_close_orders(price_val)
                         except websockets.exceptions.ConnectionClosed:
-                            print(f"🔴 {self.instrument} WebSocket 连接断开，重连中...")
+                            log_warning(f"🔴 {self.instrument} WebSocket 连接断开，重连中...")
                             await asyncio.sleep(2)  # 休息2秒再尝试连接
                             break
+                        except Exception as e:
+                            log_error("Error in websocket_listener inner loop", exc_info=True)
             except Exception as e:
-                traceback.print_exc()
+                log_error("Error in websocket_listener", exc_info=True)
 
     def save_order_detail_map(self):
         try:
@@ -546,7 +556,7 @@ class InstrumentTrader:
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(self.order_detail_map, f, indent=4, ensure_ascii=False)
         except Exception as e:
-            traceback.print_exc()
+            log_error("Error in save_order_detail_map", exc_info=True)
 
     def load_order_detail_map(self):
         file_path = f"temp/order_detail_map_{self.instrument}.json"
@@ -554,9 +564,9 @@ class InstrumentTrader:
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
                     self.order_detail_map.update(json.load(f))
-                print(f"✅ {self.instrument} 已加载之前的订单信息")
+                log_info(f"✅ {self.instrument} 已加载之前的订单信息")
             except Exception as e:
-                print(f"❌ {self.instrument} 加载订单信息失败:", e)
+                log_error(f"❌ {self.instrument} 加载订单信息失败", exc_info=True)
         else:
             self.order_detail_map.clear()
 
@@ -579,7 +589,7 @@ class InstrumentTrader:
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(records, f, indent=4, ensure_ascii=False)
         except Exception as e:
-            traceback.print_exc()
+            log_error("Error in record_closed_order", exc_info=True)
 
     async def main_trading_loop(self):
         # 加载历史订单记录
@@ -614,7 +624,7 @@ class InstrumentTrader:
                 capital_no_leverage = selected_strategies["capital_no_leverage"].min()
                 min_capital_no_leverage = max(min_capital_no_leverage, capital_no_leverage)
                 all_dfs.append(selected_strategies)
-                print(f"{self.instrument} final_good_df shape: {selected_strategies.shape[0]} 来自 {origin_good_path}")
+                log_info(f"{self.instrument} final_good_df shape: {selected_strategies.shape[0]} 来自 {origin_good_path}")
         if all_dfs:
             self.strategy_df = pd.concat(all_dfs)
             self.strategy_df = self.strategy_df[self.strategy_df["capital_no_leverage"] >= min_capital_no_leverage]
@@ -632,9 +642,9 @@ class InstrumentTrader:
             sell_count = len(self.strategy_df) - buy_count
             self.strategy_df.to_parquet(f"temp/strategy_df_{self.instrument}.parquet", index=False)
 
-            print(f"【{self.instrument}】策略数据加载成功, 策略数量: {self.strategy_df.shape[0]} 做多信号数量: {buy_count} 做空信号数量: {sell_count} 最大相关系数: {max_corr:.4f} 最小利润: {min_capital_no_leverage:.4f}")
+            log_info(f"【{self.instrument}】策略数据加载成功, 策略数量: {self.strategy_df.shape[0]} 做多信号数量: {buy_count} 做空信号数量: {sell_count} 最大相关系数: {max_corr:.4f} 最小利润: {min_capital_no_leverage:.4f}")
         else:
-            print(f"❌ {self.instrument} 策略数据不存在!")
+            log_error(f"❌ {self.instrument} 策略数据不存在!")
             return
 
         # 构造 kai_pin_map 与 kai_reverse_map
@@ -649,10 +659,10 @@ class InstrumentTrader:
                 period_list.append(int(kai.split("_")[1]))
                 period_list.append(int(pin.split("_")[1]))
             except Exception as ex:
-                print("Error parsing period from signal name:", ex)
+                log_error("Error parsing period from signal name", exc_info=True)
         max_period = int(np.ceil(max(period_list) / 100) * 100) if period_list else 100
         max_period = max_period * 2
-        print(f"【{self.instrument}】最大周期: {max_period}")
+        log_info(f"【{self.instrument}】最大周期: {max_period}")
 
         # 同时启动数据更新任务和 WebSocket 监听任务
         await asyncio.gather(
@@ -662,7 +672,7 @@ class InstrumentTrader:
 
 
 def run_instrument(instrument):
-    print(f"【进程启动】开始处理 {instrument}")
+    log_info(f"【进程启动】开始处理 {instrument}")
     trader = InstrumentTrader(instrument)
     asyncio.run(trader.main_trading_loop())
 
