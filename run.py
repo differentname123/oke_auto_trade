@@ -79,7 +79,7 @@ def log_error(message, exc_info=False):
 OKX_WS_URL = "wss://ws.okx.com:8443/ws/v5/public"
 # 定义需要操作的多个交易对
 INSTRUMENT_LIST = ["SOL-USDT-SWAP", "BTC-USDT-SWAP", "ETH-USDT-SWAP", "TON-USDT-SWAP", "DOGE-USDT-SWAP", "XRP-USDT-SWAP"]
-# INSTRUMENT_LIST = ["SOL-USDT-SWAP"]
+# INSTRUMENT_LIST = ["BTC-USDT-SWAP"]
 
 # 各交易对最小下单量映射
 min_count_map = {
@@ -614,6 +614,7 @@ class InstrumentTrader:
             origin_good_path = f"temp/corr/{inst_id}_{is_reverse}_filter_similar_strategy.parquet_origin_good_weekly_net_profit_detail.parquet"
             if os.path.exists(origin_good_path):
                 temp_strategy_df = pd.read_parquet(origin_good_path)
+                temp_strategy_df = temp_strategy_df[temp_strategy_df["capital_no_leverage"] > 2]
                 # 删除kai_column包含not_close_signal_key的行
                 temp_strategy_df = temp_strategy_df[~temp_strategy_df["kai_column"].str.contains("|".join(not_close_signal_key))]
                 # 删除pin_column包含not_close_signal_key的行
@@ -623,8 +624,8 @@ class InstrumentTrader:
                 selected_strategies, selected_correlation_df = select_strategies_optimized(
                     temp_strategy_df,
                     correlation_df,
-                    k=10,
-                    penalty_scaler=0.1,
+                    k=20,
+                    penalty_scaler=0.0001,
                     use_absolute_correlation=True,
                 )
                 max_corr = max(max_corr, selected_correlation_df["Correlation"].max())
@@ -632,6 +633,11 @@ class InstrumentTrader:
                 selected_strategies = selected_strategies.sort_values(by="capital_no_leverage", ascending=False)
                 max_selected_strategies = selected_strategies.head(2)
                 max_df_list.append(max_selected_strategies)
+
+                if selected_strategies[selected_strategies["capital_no_leverage"] > 10].shape[0] > 0:
+                    selected_strategies = selected_strategies[selected_strategies["capital_no_leverage"] > 10]
+                    selected_strategies = selected_strategies.sort_values(by="capital_no_leverage", ascending=False)
+
                 capital_no_leverage = selected_strategies["capital_no_leverage"].min()
                 min_capital_no_leverage = max(min_capital_no_leverage, capital_no_leverage)
                 all_dfs.append(selected_strategies)
