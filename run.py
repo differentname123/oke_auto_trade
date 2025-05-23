@@ -42,26 +42,34 @@ from trade_common import LatestDataManager, place_order
 
 # --------------------
 # 自定义日志函数，仅记录当前代码输出的日志
+# 日志文件存储在 log 文件夹下，文件名按照日期划分
 # --------------------
+def get_log_file_path():
+    today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    log_dir = "log"
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    return os.path.join(log_dir, f"{today_str}.log")
+
 def log_info(message):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_message = f"{timestamp} [INFO] {message}"
     print(log_message)
-    with open("trade.log", "a", encoding="utf-8") as f:
+    with open(get_log_file_path(), "a", encoding="utf-8") as f:
         f.write(log_message + "\n")
 
 def log_warning(message):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_message = f"{timestamp} [WARNING] {message}"
     print(log_message)
-    with open("trade.log", "a", encoding="utf-8") as f:
+    with open(get_log_file_path(), "a", encoding="utf-8") as f:
         f.write(log_message + "\n")
 
 def log_error(message, exc_info=False):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_message = f"{timestamp} [ERROR] {message}"
     print(log_message)
-    with open("trade.log", "a", encoding="utf-8") as f:
+    with open(get_log_file_path(), "a", encoding="utf-8") as f:
         f.write(log_message + "\n")
         if exc_info:
             error_trace = traceback.format_exc()
@@ -492,7 +500,6 @@ class InstrumentTrader:
                                     self.pin_target_price_info_map[pin] = (0, target_price)
 
                             self.price_list.clear()
-
                             log_info(f"{self.instrument} 开仓信号个数 {len(self.kai_target_price_info_map)}  详细结果：{self.kai_target_price_info_map} 平仓信号个数{len(self.pin_target_price_info_map)}  详细结果：{self.pin_target_price_info_map}")
                             self.is_new_minute = True
                             previous_timestamp = latest_timestamp
@@ -601,11 +608,17 @@ class InstrumentTrader:
         min_capital_no_leverage = 0
         max_df_list = []
         max_corr = 0
+        not_close_signal_key = ["abs", "relate", "donchian"]
         for is_reverse in ['all_short', 'all']:
             corr_path = f"temp/corr/{inst_id}_{is_reverse}_filter_similar_strategy.parquet_corr_weekly_net_profit_detail.parquet"
             origin_good_path = f"temp/corr/{inst_id}_{is_reverse}_filter_similar_strategy.parquet_origin_good_weekly_net_profit_detail.parquet"
             if os.path.exists(origin_good_path):
                 temp_strategy_df = pd.read_parquet(origin_good_path)
+                # 删除kai_column包含not_close_signal_key的行
+                temp_strategy_df = temp_strategy_df[~temp_strategy_df["kai_column"].str.contains("|".join(not_close_signal_key))]
+                # 删除pin_column包含not_close_signal_key的行
+                temp_strategy_df = temp_strategy_df[~temp_strategy_df["pin_column"].str.contains("|".join(not_close_signal_key))]
+
                 correlation_df = pd.read_parquet(corr_path)
                 selected_strategies, selected_correlation_df = select_strategies_optimized(
                     temp_strategy_df,
@@ -617,8 +630,6 @@ class InstrumentTrader:
                 max_corr = max(max_corr, selected_correlation_df["Correlation"].max())
                 # 将selected_strategies按照capital_no_leverage降序排列
                 selected_strategies = selected_strategies.sort_values(by="capital_no_leverage", ascending=False)
-
-                # 获取capital_no_leverage最大的一行
                 max_selected_strategies = selected_strategies.head(2)
                 max_df_list.append(max_selected_strategies)
                 capital_no_leverage = selected_strategies["capital_no_leverage"].min()
@@ -630,18 +641,15 @@ class InstrumentTrader:
             self.strategy_df = self.strategy_df[self.strategy_df["capital_no_leverage"] >= min_capital_no_leverage]
             max_df = pd.concat(max_df_list)
             self.strategy_df = pd.concat([self.strategy_df, max_df])
-
             self.strategy_df = self.strategy_df.drop_duplicates(subset=["kai_column"])
             self.strategy_df = self.strategy_df.drop_duplicates(subset=["pin_column"])
             false_df = self.strategy_df[self.strategy_df["is_reverse"] == False]
             kai_long_count = false_df["kai_column"].str.contains("long").sum()
             true_df = self.strategy_df[self.strategy_df["is_reverse"] == True]
             kai_short_count = true_df["kai_column"].str.contains("short").sum()
-
             buy_count = kai_long_count + kai_short_count
             sell_count = len(self.strategy_df) - buy_count
             self.strategy_df.to_parquet(f"temp/strategy_df_{self.instrument}.parquet", index=False)
-
             log_info(f"【{self.instrument}】策略数据加载成功, 策略数量: {self.strategy_df.shape[0]} 做多信号数量: {buy_count} 做空信号数量: {sell_count} 最大相关系数: {max_corr:.4f} 最小利润: {min_capital_no_leverage:.4f}")
         else:
             log_error(f"❌ {self.instrument} 策略数据不存在!")
@@ -670,12 +678,10 @@ class InstrumentTrader:
             self.websocket_listener(),
         )
 
-
 def run_instrument(instrument):
     log_info(f"【进程启动】开始处理 {instrument}")
     trader = InstrumentTrader(instrument)
     asyncio.run(trader.main_trading_loop())
-
 
 if __name__ == "__main__":
     processes = []

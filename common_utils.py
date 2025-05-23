@@ -142,7 +142,7 @@ def select_strategies_optimized(
     candidate_pool_str.remove(first_strategy_str)
 
     # 设置相关性阈值：如果候选策略与任一已选策略的相关性超过该阈值，则不被考虑。
-    correlation_threshold = 40
+    correlation_threshold = 50
 
     while len(selected_strategies_str) < k and candidate_pool_str:
         best_candidate_str = None
