@@ -96,7 +96,7 @@ min_count_map = {
 class InstrumentTrader:
     def __init__(self, instrument):
         self.instrument = instrument
-        self.min_count = min_count_map.get(instrument, 0) * 50
+        self.min_count = min_count_map.get(instrument, 0) * 100
         self.order_detail_map = {}
         self.price = 0.0
         self.price_list = []
@@ -624,7 +624,7 @@ class InstrumentTrader:
                 selected_strategies, selected_correlation_df = select_strategies_optimized(
                     temp_strategy_df,
                     correlation_df,
-                    k=20,
+                    k=30,
                     penalty_scaler=0.0001,
                     use_absolute_correlation=True,
                 )
@@ -634,8 +634,8 @@ class InstrumentTrader:
                 max_selected_strategies = selected_strategies.head(2)
                 max_df_list.append(max_selected_strategies)
 
-                if selected_strategies[selected_strategies["capital_no_leverage"] > 10].shape[0] > 0:
-                    selected_strategies = selected_strategies[selected_strategies["capital_no_leverage"] > 10]
+                if selected_strategies[selected_strategies["capital_no_leverage"] > 4].shape[0] > 0:
+                    selected_strategies = selected_strategies[selected_strategies["capital_no_leverage"] > 4]
                     selected_strategies = selected_strategies.sort_values(by="capital_no_leverage", ascending=False)
 
                 capital_no_leverage = selected_strategies["capital_no_leverage"].min()
