@@ -284,7 +284,7 @@ def fast_check(k_idx, k_price, p_idx, p_price, min_trades=10, loss_th=-30.0, is_
         j += 1
 
     # 最终返回条件：交易数达到要求、累计最大亏损不超过阈值、且累计利润大于10
-    return (trades >= min_trades) and (min_sum >= loss_th) and (total_profit > -110)
+    return (trades >= min_trades) and (min_sum >= loss_th) and (total_profit > 10)
 
 
 def check_max_loss(df, kai_column, pin_column, is_reverse=False):
@@ -436,17 +436,17 @@ def generate_all_signals():
     # column_list.append((relate_long, relate_short, relate_key))
     # donchian_long, donchian_short, donchian_key = gen_donchian_signal_name(1, 20, 1)
     # column_list.append((donchian_long, donchian_short, donchian_key))
-    boll_long, boll_short, boll_key = gen_boll_signal_name(1, 3000, 100, 1, 50, 2)
+    boll_long, boll_short, boll_key = gen_boll_signal_name(1, 3000, 400, 1, 50, 2)
     column_list.append((boll_long, boll_short, boll_key))
     macross_long, macross_short, macross_key = gen_macross_signal_name(1, 3000, 100, 1, 3000, 100)
     column_list.append((macross_long, macross_short, macross_key))
-    rsi_long, rsi_short, rsi_key = gen_rsi_signal_name(1, 1000, 500)
+    rsi_long, rsi_short, rsi_key = gen_rsi_signal_name(1, 2000, 1500)
     column_list.append((rsi_long, rsi_short, rsi_key))
-    macd_long, macd_short, macd_key = gen_macd_signal_name(300, 1000, 50)
+    macd_long, macd_short, macd_key = gen_macd_signal_name(300, 1000, 75)
     column_list.append((macd_long, macd_short, macd_key))
-    cci_long, cci_short, cci_key = gen_cci_signal_name(1, 2000, 1000, 1, 2, 1)
+    cci_long, cci_short, cci_key = gen_cci_signal_name(1, 8000, 8000, 1, 2, 1)
     column_list.append((cci_long, cci_short, cci_key))
-    atr_long, atr_short, atr_key = gen_atr_signal_name(1, 3000, 3000)
+    atr_long, atr_short, atr_key = gen_atr_signal_name(1, 10000, 10000)
     column_list.append((atr_long, atr_short, atr_key))
     column_list = sorted(column_list, key=lambda x: len(x[0]))
     all_signals = []
@@ -487,7 +487,7 @@ def precompute_signals(df, signals, chunk_size=100):
     """
     num_workers = multiprocessing.cpu_count()
 
-    with multiprocessing.Pool(processes=num_workers, initializer=init_worker1, initargs=(df,)) as pool:
+    with multiprocessing.Pool(processes=25, initializer=init_worker1, initargs=(df,)) as pool:
         results = pool.imap(process_signal, signals, chunksize=chunk_size)
 
         precomputed = {}
@@ -599,7 +599,7 @@ def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, 
 
     batch_index = 0
     start_time = time.time()
-    pool_processes = 32
+    pool_processes = 25
     chunk_size = max(100, batch_size // (pool_processes * 20))
 
     print(f"开始穷举回测，批次大小: {batch_size}，进程池大小: {pool_processes}，chunk_size: {chunk_size}。时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
@@ -700,8 +700,8 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
     year_list = df_local["year"].unique()
     # 生成所有候选信号
     all_signals, key_name = generate_all_signals()
+    needed_all_signals = all_signals
     all_files_df = None
-    needed_signals = all_signals
     # 对预计算使用所有信号（长短信号均在 all_signals 内）
     print(f"生成 {len(all_signals)} 候选信号。")
     for year in year_list:
@@ -729,16 +729,16 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
         df = temp_df_local.copy()
 
         if pre_key_name is not None:
-            all_files_df, needed_signals = load_files_in_parallel(checkpoint_dir, pre_key_name)
+            all_files_df, needed_all_signals = load_files_in_parallel(checkpoint_dir, pre_key_name)
 
         # 预计算所有候选信号数据
         precomputed = load_or_compute_precomputed_signals(df, all_signals, f'{year}_{base_name}_{key_name}')
-        # 只保留needed_signals中的信号
-        precomputed = {sig: precomputed[sig] for sig in needed_signals if sig in precomputed}
+        # 只保留在needed_all_signals中的信号
+        precomputed = {sig: data for sig, data in precomputed.items() if sig in needed_all_signals}
 
         total_size = sys.getsizeof(precomputed) + sum(
             sys.getsizeof(sig) + s.nbytes + p.nbytes for sig, (s, p) in precomputed.items())
-        print(f"预计算信号内存大小: {total_size / (1024 * 1024):.2f} MB 信号数量: {len(precomputed)} 总体信号个数: {len(needed_signals)}")
+        print(f"预计算信号内存大小: {total_size / (1024 * 1024):.2f} MB 信号数量: {len(precomputed)} 总体信号个数: {len(needed_all_signals)}")
 
         global GLOBAL_SIGNALS
         GLOBAL_SIGNALS = precomputed
@@ -764,6 +764,7 @@ def example():
         "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
         "kline_data/origin_data_1m_5000000_DOGE-USDT-SWAP_2025-05-06.csv",
         "kline_data/origin_data_1m_5000000_XRP-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_OKB-USDT_2025-05-06.csv",
     ]
     for data_path in data_path_list:
         try:
