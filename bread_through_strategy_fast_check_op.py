@@ -700,6 +700,7 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
     year_list = df_local["year"].unique()
     # 生成所有候选信号
     all_signals, key_name = generate_all_signals()
+    needed_signals = all_signals
     all_files_df = None
     # 对预计算使用所有信号（长短信号均在 all_signals 内）
     print(f"生成 {len(all_signals)} 候选信号。")
@@ -728,10 +729,13 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
         df = temp_df_local.copy()
 
         if pre_key_name is not None:
-            all_files_df, all_signals = load_files_in_parallel(checkpoint_dir, pre_key_name)
+            all_files_df, needed_signals = load_files_in_parallel(checkpoint_dir, pre_key_name)
 
         # 预计算所有候选信号数据
         precomputed = load_or_compute_precomputed_signals(df, all_signals, f'{year}_{base_name}_{key_name}')
+        # 只保留需要的信号
+        precomputed = {sig: data for sig, data in precomputed.items() if sig in needed_signals}
+
         total_size = sys.getsizeof(precomputed) + sum(
             sys.getsizeof(sig) + s.nbytes + p.nbytes for sig, (s, p) in precomputed.items())
         print(f"预计算信号内存大小: {total_size / (1024 * 1024):.2f} MB 信号数量: {len(precomputed)} 总体信号个数: {len(all_signals)}")
