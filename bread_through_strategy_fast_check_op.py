@@ -284,7 +284,7 @@ def fast_check(k_idx, k_price, p_idx, p_price, min_trades=10, loss_th=-30.0, is_
         j += 1
 
     # 最终返回条件：交易数达到要求、累计最大亏损不超过阈值、且累计利润大于10
-    return (trades >= min_trades) and (min_sum >= loss_th) and (total_profit > 10)
+    return (trades >= min_trades) and (min_sum >= loss_th) and (total_profit > -110)
 
 
 def check_max_loss(df, kai_column, pin_column, is_reverse=False):
@@ -700,8 +700,8 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
     year_list = df_local["year"].unique()
     # 生成所有候选信号
     all_signals, key_name = generate_all_signals()
-    needed_signals = all_signals
     all_files_df = None
+    needed_signals = all_signals
     # 对预计算使用所有信号（长短信号均在 all_signals 内）
     print(f"生成 {len(all_signals)} 候选信号。")
     for year in year_list:
@@ -733,12 +733,12 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
 
         # 预计算所有候选信号数据
         precomputed = load_or_compute_precomputed_signals(df, all_signals, f'{year}_{base_name}_{key_name}')
-        # 只保留需要的信号
-        precomputed = {sig: data for sig, data in precomputed.items() if sig in needed_signals}
+        # 只保留needed_signals中的信号
+        precomputed = {sig: precomputed[sig] for sig in needed_signals if sig in precomputed}
 
         total_size = sys.getsizeof(precomputed) + sum(
             sys.getsizeof(sig) + s.nbytes + p.nbytes for sig, (s, p) in precomputed.items())
-        print(f"预计算信号内存大小: {total_size / (1024 * 1024):.2f} MB 信号数量: {len(precomputed)} 总体信号个数: {len(all_signals)}")
+        print(f"预计算信号内存大小: {total_size / (1024 * 1024):.2f} MB 信号数量: {len(precomputed)} 总体信号个数: {len(needed_signals)}")
 
         global GLOBAL_SIGNALS
         GLOBAL_SIGNALS = precomputed
