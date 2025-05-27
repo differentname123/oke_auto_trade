@@ -447,7 +447,7 @@ class InstrumentTrader:
                         df = origin_df[origin_df["confirm"] == "1"]
                         latest_timestamp = df.iloc[-1]["timestamp"] if not df.empty else None
                         if previous_timestamp is None or latest_timestamp != previous_timestamp:
-                            log_info(f"✅ {self.instrument} 数据已更新, 最新 timestamp: {latest_timestamp} 实时最新价格: {self.price} 最新数据的时间: {origin_df.iloc[-1]['timestamp']}")
+                            log_info(f"✅ {self.instrument} 数据已更新, 最新 timestamp: {latest_timestamp} {origin_df.iloc[-1]['close']} 实时最新价格: {self.price} 最新数据的时间: {origin_df.iloc[-1]['timestamp']}")
                             exist_kai_keys = list(self.order_detail_map.keys())
                             exist_pin_keys = [self.kai_pin_map[k] for k in exist_kai_keys]
                             log_info(f"【{self.instrument}】当前持仓的开仓信号数量: {len(exist_kai_keys)} 平仓信号数量: {len(exist_pin_keys)}")
@@ -681,7 +681,7 @@ class InstrumentTrader:
         # 同时启动数据更新任务和 WebSocket 监听任务
         await asyncio.gather(
             self.fetch_new_data(max_period),
-            self.websocket_listener(),
+            # self.websocket_listener(),
         )
 
 def run_instrument(instrument):
