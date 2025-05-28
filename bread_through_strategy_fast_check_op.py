@@ -2,24 +2,33 @@
 # -*- coding: utf-8 -*-
 
 """
-该代码实现了基于“突破策略”的信号生成与回测流程，主要思路是通过穷举所有候选信号（包括长信号和短信号）的组合，利用多进程和批次化方式对每对信号进行回测验证。主要功能包括：
+该代码实现了基于“突破策略”的信号生成与回测流程，主要思路是通过穷举所有候选信号（包括长信号和短信号）的组合，
+利用多进程和批次化方式对每对信号进行回测验证。
+主要功能包括：
 
 多技术指标信号计算与生成：
-支持多种技术指标（如 abs、relate、donchian、boll、macross、rsi、macd、cci、atr）的计算，根据历史行情数据生成交易信号和目标价格，并通过参数生成对应的候选信号名称。
+支持多种技术指标（如 abs、relate、donchian、boll、macross、rsi、macd、cci、atr）的计算，
+根据历史行情数据生成交易信号和目标价格，并通过参数生成对应的候选信号名称。
 
 信号预计算：
-利用多进程对所有候选信号进行预计算，将生成的信号索引与价格数据转换为 NumPy 数组保存，方便后续回测时快速调用，同时将结果保存至本地文件以便复用。
+利用多进程对所有候选信号进行预计算，将生成的信号索引与价格数据转换为 NumPy 数组保存，
+方便后续回测时快速调用，同时将结果保存至本地文件以便复用。
 
 信号组合回测：
-通过生成长信号与短信号的所有可能组合（采用生成器方式避免内存爆炸），利用多进程池对每一对组合进行回测。回测过程中采用了加速函数（基于 numba.njit）实现的快速匹配与盈亏计算，并加入了最小交易次数、累计收益、最大连续亏损等风险控制条件来过滤无效组合。
+通过生成长信号与短信号的所有可能组合（采用生成器方式避免内存爆炸），利用多进程池对每一对组合进行回测。
+回测过程中采用了加速函数（基于 numba.njit）实现的快速匹配与盈亏计算，并加入了最小交易次数、
+累计收益、最大连续亏损等风险控制条件来过滤无效组合。
 
 批次化处理与结果存储：
-针对海量组合，将候选信号组合分成固定大小的批次并行计算，每个批次计算后都将有效的组合结果保存到本地文件，便于后续汇总和分析。
+针对海量组合，将候选信号组合分成固定大小的批次并行计算，每个批次计算后都将有效的组合结果保存到本地文件，
+便于后续汇总和分析。
 
 数据预处理与多文件支持：
-支持对多个历史行情数据文件进行处理，通过特定时间（如年份、半年度）筛选和预处理数据（例如价格尺度调整、数据类型转换等），以保证回测数据的质量。
+支持对多个历史行情数据文件进行处理，通过特定时间（如年份、半年度）筛选和预处理数据
+（例如价格尺度调整、数据类型转换等），以保证回测数据的质量。
 
-总体而言，代码用穷举搜索和批次并行的方式，对各种技术指标信号组合进行全面回测，通过预计算和多进程加速，筛选出满足策略要求的有效信号组合，为突破策略的进一步优化和研究提供数据支撑。
+总体而言，代码用穷举搜索和批次并行的方式，对各种技术指标信号组合进行全面回测，
+通过预计算和多进程加速，筛选出满足策略要求的有效信号组合，为突破策略的进一步优化和研究提供数据支撑。
 """
 import gc
 import os
@@ -221,8 +230,11 @@ def fast_check(k_idx, k_price, p_idx, p_price, min_trades=10, loss_th=-30.0, is_
       - 在持仓未平仓前，后续的开仓信号将被忽略；
       - k_idx, k_price 为开仓信号对应的索引和价格；
       - p_idx, p_price 为平仓信号对应的索引和价格。
-    如果匹配过程中的最小累计收益（连续亏损）低于 loss_th，则提前返回 False，
-    最后判断是否满足最少 min_trades 笔交易要求。
+    如果匹配过程中的最小累计收益（连续亏损）低于 loss_th，则提前返回 (False, min_sum, total_profit)；
+    最后返回一个三元组：(flag, min_sum, total_profit)，
+        flag: 是否满足最少 min_trades 笔交易、累计最大亏损不超过 loss_th 且累计利润大于10 的条件；
+        min_sum: 匹配过程中遇到的最小累计收益；
+        total_profit: 累计所有交易的利润（单位为百分比）。
     """
     i = 0  # 开仓信号的指针
     j = 0  # 平仓信号的指针
@@ -274,7 +286,7 @@ def fast_check(k_idx, k_price, p_idx, p_price, min_trades=10, loss_th=-30.0, is_
 
         # 若累计亏损超过允许阈值，则提前退出
         if min_sum < loss_th:
-            return False
+            return (False, min_sum, total_profit)
 
         # 更新上一次平仓时刻，之后开仓信号必须晚于此时刻才能开新仓
         last_closed_time = p_idx[j]
@@ -283,17 +295,17 @@ def fast_check(k_idx, k_price, p_idx, p_price, min_trades=10, loss_th=-30.0, is_
         i += 1
         j += 1
 
-    # 最终返回条件：交易数达到要求、累计最大亏损不超过阈值、且累计利润大于10
-    return (trades >= min_trades) and (min_sum >= loss_th) and (total_profit > 10)
+    flag = (trades >= min_trades) and (min_sum >= loss_th) and (total_profit > 10)
+    return (flag, min_sum, total_profit)
 
 
 def check_max_loss(df, kai_column, pin_column, is_reverse=False):
     """
     融合了 fast_check 的版本：
       1. 首先尝试从 GLOBAL_SIGNALS 中获取 kai 与 pin 信号数据，若不存在则计算。
-      2. 控制条件：若 kai_idx 与 pin_idx 重叠率（交集除以较少的触发次数） >= 1%，直接返回 False。
+      2. 控制条件：若 kai_idx 与 pin_idx 重叠率（交集除以较少的触发次数）>= 1%，直接返回 (False, 0.0, 0.0)。
       3. 调用 fast_check 进行加速计算，匹配方式假设两个信号生成的数据均为时间上递增的 NumPy 数组，
-         并计算累计盈亏；若最大连续亏损未低于 -30% 且交易次数不少于 100 笔，则返回 True。
+         并计算累计盈亏；返回 (flag, min_sum, total_profit)。
     """
     try:
         kai_idx, kai_prices = GLOBAL_SIGNALS[kai_column]
@@ -307,7 +319,7 @@ def check_max_loss(df, kai_column, pin_column, is_reverse=False):
     common = np.intersect1d(kai_idx, pin_idx)
     overlap_ratio = common.size / min(kai_idx.size, pin_idx.size)
     if overlap_ratio >= 0.01:
-        return False
+        return (False, 0.0, 0.0)
     side = True
     if 'short' in kai_column:
         side = False
@@ -551,17 +563,17 @@ def candidate_pairs_generator(long_signals, short_signals):
 
 def evaluate_candidate(candidate):
     """
-    对单个候选组合进行回测，返回 statistic_dict；
+    对单个候选组合进行回测，返回 (kai_column, pin_column, min_sum, total_profit)；
     若回测条件不满足，则返回 None。
     """
     long_sig, short_sig = candidate
     check_result = check_max_loss(df, long_sig, short_sig, is_reverse=IS_REVERSE)
-    if check_result:
-        return (long_sig, short_sig)
+    if check_result[0]:
+        return (long_sig, short_sig, check_result[1], check_result[2])
     return None
 
 
-def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, key_name="brute_force_results",all_files_df=None):
+def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, key_name="brute_force_results", all_files_df=None):
     """
     穷举遍历所有 (长信号, 短信号) 组合，每 batch_size 个组合为一个批次，
     使用多进程并行计算每个候选组合的回测结果，保存每个批次的有效回测结果到文件。
@@ -584,7 +596,7 @@ def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, 
         candidate_gen = candidate_pairs_generator(long_signals, short_signals)
     else:
 
-        # 只保留all_files_df信号在long_signals和short_signals中的组合
+        # 只保留 all_files_df 信号在 long_signals 和 short_signals 中的组合
         all_files_df = all_files_df[all_files_df["kai_column"].isin(long_signals) & all_files_df["pin_column"].isin(short_signals)]
         # 直接从 all_files_df 中获取所有信号对
         candidate_gen = zip(all_files_df["kai_column"].to_numpy(), all_files_df["pin_column"].to_numpy())
@@ -623,9 +635,10 @@ def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, 
             results = pool.imap_unordered(evaluate_candidate, batch, chunksize=chunk_size)
             valid_results = [res for res in results if res is not None]
             if valid_results:  # 确保 valid_results 不为空，否则创建空 DataFrame 时指定列名可能无意义或报错
-                temp_df = pd.DataFrame(valid_results, columns=['kai_column', 'pin_column'])
+                temp_df = pd.DataFrame(valid_results,
+                                       columns=['kai_column', 'pin_column', 'min_sum', 'total_profit'])
             else:
-                temp_df = pd.DataFrame(columns=['kai_column', 'pin_column'])  # 创建一个空的但有列名的DataFrame
+                temp_df = pd.DataFrame(columns=['kai_column', 'pin_column', 'min_sum', 'total_profit'])
             temp_df.to_parquet(stats_file_name, index=False)
             print(
                 f"批次 {batch_index} 处理完毕，有效组合数量: {len(valid_results)} 耗时 {time.time() - start_time:.2f} 秒 当前时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
@@ -735,7 +748,7 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
 
         # 预计算所有候选信号数据
         precomputed = load_or_compute_precomputed_signals(df, all_signals, f'{year}_{base_name}_{key_name}')
-        # 只保留在needed_all_signals中的信号
+        # 只保留在 needed_all_signals 中的信号
         precomputed = {sig: data for sig, data in precomputed.items() if sig in needed_all_signals}
 
         total_size = sys.getsizeof(precomputed) + sum(
@@ -750,7 +763,7 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
 
         # 穷举回测所有候选组合，每一批次计算并保存结果
         brute_force_backtesting(df, candidate_signals, candidate_signals, batch_size=10000000,
-                                                key_name=f'{year}_{base_name}_{key_name}', all_files_df=all_files_df)
+                                key_name=f'{year}_{base_name}_{key_name}', all_files_df=all_files_df)
         pre_key_name = f'{year}_{base_name}_{key_name}'
         load_files_in_parallel(checkpoint_dir, f'{year}_{base_name}_{key_name}')
 
@@ -764,9 +777,9 @@ def example():
         # "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
-        "kline_data/origin_data_1m_5000000_DOGE-USDT-SWAP_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_DOGE-USDT-SWAP_2025-05-06.csv",
         "kline_data/origin_data_1m_5000000_XRP-USDT-SWAP_2025-05-06.csv",
-        "kline_data/origin_data_1m_5000000_OKB-USDT_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_OKB-USDT_2025-05-06.csv",
     ]
     for data_path in data_path_list:
         try:
