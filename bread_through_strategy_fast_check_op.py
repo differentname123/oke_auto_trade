@@ -21,7 +21,7 @@
 
 总体而言，代码用穷举搜索和批次并行的方式，对各种技术指标信号组合进行全面回测，通过预计算和多进程加速，筛选出满足策略要求的有效信号组合，为突破策略的进一步优化和研究提供数据支撑。
 """
-
+import gc
 import os
 import random
 import sys
@@ -658,9 +658,11 @@ def load_files_in_parallel(checkpoint_dir, pre_key_name):
                 all_files.append(result)
 
             if all_files:
+                print(f"加载 {len(all_files)} 个数据文件成功，开始合并 ...")
                 # 合并所有 DataFrame（避免不必要的复制）
                 all_files_df = pd.concat(all_files, ignore_index=True, copy=False)
                 all_files_df.to_parquet(output_file_path, index=False)
+                print(f"合并完成，保存到 {output_file_path}，共 {len(all_files_df)} 条记录。")
     else:
         all_files_df = pd.read_parquet(output_file_path)
         print(f"从 {output_file_path} 加载数据，共 {len(all_files_df)} 条记录。")
@@ -760,8 +762,8 @@ def example():
     data_path_list = [
         # "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
-        "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
-        "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
         "kline_data/origin_data_1m_5000000_DOGE-USDT-SWAP_2025-05-06.csv",
         "kline_data/origin_data_1m_5000000_XRP-USDT-SWAP_2025-05-06.csv",
         "kline_data/origin_data_1m_5000000_OKB-USDT_2025-05-06.csv",
