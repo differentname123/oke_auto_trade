@@ -230,11 +230,8 @@ def fast_check(k_idx, k_price, p_idx, p_price, min_trades=10, loss_th=-30.0, is_
       - 在持仓未平仓前，后续的开仓信号将被忽略；
       - k_idx, k_price 为开仓信号对应的索引和价格；
       - p_idx, p_price 为平仓信号对应的索引和价格。
-    如果匹配过程中的最小累计收益（连续亏损）低于 loss_th，则提前返回 (False, min_sum, total_profit)；
-    最后返回一个三元组：(flag, min_sum, total_profit)，
-        flag: 是否满足最少 min_trades 笔交易、累计最大亏损不超过 loss_th 且累计利润大于10 的条件；
-        min_sum: 匹配过程中遇到的最小累计收益；
-        total_profit: 累计所有交易的利润（单位为百分比）。
+    如果匹配过程中的最小累计收益（连续亏损）低于 loss_th，则提前返回 False，
+    最后判断是否满足最少 min_trades 笔交易要求。
     """
     i = 0  # 开仓信号的指针
     j = 0  # 平仓信号的指针
@@ -286,7 +283,7 @@ def fast_check(k_idx, k_price, p_idx, p_price, min_trades=10, loss_th=-30.0, is_
 
         # 若累计亏损超过允许阈值，则提前退出
         if min_sum < loss_th:
-            return (False, min_sum, total_profit)
+            return False
 
         # 更新上一次平仓时刻，之后开仓信号必须晚于此时刻才能开新仓
         last_closed_time = p_idx[j]
@@ -295,17 +292,17 @@ def fast_check(k_idx, k_price, p_idx, p_price, min_trades=10, loss_th=-30.0, is_
         i += 1
         j += 1
 
-    flag = (trades >= min_trades) and (min_sum >= loss_th) and (total_profit > 10)
-    return (flag, min_sum, total_profit)
+    # 最终返回条件：交易数达到要求、累计最大亏损不超过阈值、且累计利润大于10
+    return (trades >= min_trades) and (min_sum >= loss_th) and (total_profit > 10)
 
 
 def check_max_loss(df, kai_column, pin_column, is_reverse=False):
     """
     融合了 fast_check 的版本：
       1. 首先尝试从 GLOBAL_SIGNALS 中获取 kai 与 pin 信号数据，若不存在则计算。
-      2. 控制条件：若 kai_idx 与 pin_idx 重叠率（交集除以较少的触发次数）>= 1%，直接返回 (False, 0.0, 0.0)。
+      2. 控制条件：若 kai_idx 与 pin_idx 重叠率（交集除以较少的触发次数） >= 1%，直接返回 False。
       3. 调用 fast_check 进行加速计算，匹配方式假设两个信号生成的数据均为时间上递增的 NumPy 数组，
-         并计算累计盈亏；返回 (flag, min_sum, total_profit)。
+         并计算累计盈亏；若最大连续亏损未低于 -30% 且交易次数不少于 100 笔，则返回 True。
     """
     try:
         kai_idx, kai_prices = GLOBAL_SIGNALS[kai_column]
@@ -319,7 +316,7 @@ def check_max_loss(df, kai_column, pin_column, is_reverse=False):
     common = np.intersect1d(kai_idx, pin_idx)
     overlap_ratio = common.size / min(kai_idx.size, pin_idx.size)
     if overlap_ratio >= 0.01:
-        return (False, 0.0, 0.0)
+        return False
     side = True
     if 'short' in kai_column:
         side = False
@@ -563,13 +560,13 @@ def candidate_pairs_generator(long_signals, short_signals):
 
 def evaluate_candidate(candidate):
     """
-    对单个候选组合进行回测，返回 (kai_column, pin_column, min_sum, total_profit)；
+    对单个候选组合进行回测，返回 statistic_dict；
     若回测条件不满足，则返回 None。
     """
     long_sig, short_sig = candidate
     check_result = check_max_loss(df, long_sig, short_sig, is_reverse=IS_REVERSE)
-    if check_result[0]:
-        return (long_sig, short_sig, check_result[1], check_result[2])
+    if check_result:
+        return (long_sig, short_sig)
     return None
 
 
@@ -635,10 +632,9 @@ def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, 
             results = pool.imap_unordered(evaluate_candidate, batch, chunksize=chunk_size)
             valid_results = [res for res in results if res is not None]
             if valid_results:  # 确保 valid_results 不为空，否则创建空 DataFrame 时指定列名可能无意义或报错
-                temp_df = pd.DataFrame(valid_results,
-                                       columns=['kai_column', 'pin_column', 'min_sum', 'total_profit'])
+                temp_df = pd.DataFrame(valid_results, columns=['kai_column', 'pin_column'])
             else:
-                temp_df = pd.DataFrame(columns=['kai_column', 'pin_column', 'min_sum', 'total_profit'])
+                temp_df = pd.DataFrame(columns=['kai_column', 'pin_column'])  # 创建一个空的但有列名的DataFrame
             temp_df.to_parquet(stats_file_name, index=False)
             print(
                 f"批次 {batch_index} 处理完毕，有效组合数量: {len(valid_results)} 耗时 {time.time() - start_time:.2f} 秒 当前时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
@@ -778,9 +774,9 @@ def example():
         # "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
-        # "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_DOGE-USDT-SWAP_2025-05-06.csv",
-        "kline_data/origin_data_1m_5000000_XRP-USDT-SWAP_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_XRP-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_OKB-USDT_2025-05-06.csv",
     ]
     for data_path in data_path_list:
