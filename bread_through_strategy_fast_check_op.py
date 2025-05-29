@@ -651,6 +651,8 @@ def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, 
 def load_file(file_path):
     try:
         temp_df = pd.read_parquet(file_path)
+        # 只保留kai_column和pin_column两列
+        temp_df = temp_df[['kai_column', 'pin_column']]
         return temp_df
     except Exception as e:
         print(f"加载 {file_path} 时出错：{e}")
