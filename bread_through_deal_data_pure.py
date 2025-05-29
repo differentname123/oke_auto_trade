@@ -515,6 +515,11 @@ def get_common_data():
         if os.path.exists(file_path):
             df = pd.read_parquet(file_path)
             df['inst_id'] = inst_id
+            df['monthly_net_profit_std_score'] = df['net_profit_rate'] * df['net_profit_rate'] / df['monthly_net_profit_std']
+            df['weekly_net_profit_std_score'] = df['net_profit_rate'] * df['net_profit_rate']  / df['weekly_net_profit_std']
+            df['true_profit_std_score'] = df['net_profit_rate'] * df['net_profit_rate']  / df['true_profit_std']
+            df['std_score'] = df['monthly_net_profit_std_score'] + df['weekly_net_profit_std_score'] + df['true_profit_std_score']
+
             df = compute_rewarded_penalty_from_flat_df(df)
 
             # df = df[df['max_consecutive_loss'] > -30]

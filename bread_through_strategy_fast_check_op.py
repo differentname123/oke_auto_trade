@@ -56,7 +56,7 @@ warnings.filterwarnings(
 )
 
 # 全局参数及变量
-IS_REVERSE = False  # 是否反向操作
+IS_REVERSE = True  # 是否反向操作
 checkpoint_dir = 'temp'
 GLOBAL_SIGNALS = {}
 df = None  # 回测数据，在子进程中通过初始化传入
@@ -771,12 +771,12 @@ def example():
     """
     start_time = time.time()
     data_path_list = [
-        # "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
-        # "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
-        # "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
         "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
-        # "kline_data/origin_data_1m_5000000_DOGE-USDT-SWAP_2025-05-06.csv",
-        # "kline_data/origin_data_1m_5000000_XRP-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_DOGE-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_XRP-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_OKB-USDT_2025-05-06.csv",
     ]
     for data_path in data_path_list:
