@@ -96,7 +96,7 @@ min_count_map = {
 class InstrumentTrader:
     def __init__(self, instrument):
         self.instrument = instrument
-        self.min_count = min_count_map.get(instrument, 0) * 100
+        self.min_count = min_count_map.get(instrument, 0) * 1
         self.order_detail_map = {}
         self.price = 0.0
         self.price_list = []

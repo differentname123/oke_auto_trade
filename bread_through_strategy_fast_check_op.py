@@ -608,7 +608,7 @@ def brute_force_backtesting(df, long_signals, short_signals, batch_size=100000, 
 
     batch_index = 0
     start_time = time.time()
-    pool_processes = 25
+    pool_processes = 30
     chunk_size = max(100, batch_size // (pool_processes * 20))
 
     print(f"开始穷举回测，批次大小: {batch_size}，进程池大小: {pool_processes}，chunk_size: {chunk_size}。时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
@@ -771,10 +771,10 @@ def example():
     """
     start_time = time.time()
     data_path_list = [
-        "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
-        "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
-        "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
-        "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
+        # "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
         "kline_data/origin_data_1m_5000000_DOGE-USDT-SWAP_2025-05-06.csv",
         "kline_data/origin_data_1m_5000000_XRP-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_OKB-USDT_2025-05-06.csv",
