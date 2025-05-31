@@ -124,11 +124,11 @@ def choose_zuhe_beam_opt():
       2. 对于每个组合大小 k（例如 k=2,3,4,5）执行 Beam Search 得到候选组合
       3. 将各个 k 的搜索结果汇总到一个 DataFrame 中，并保存为单个文件
     """
-    inst_id_list = ['BTC', 'XRP']
+    inst_id_list = ['XRP']
     for inst_id in inst_id_list:
         print(f"正在处理 {inst_id} 的组合搜索...")
         # 读取数据（请确保文件路径正确）
-        df = pd.read_parquet(f"temp_back/{inst_id}_False_short_filter_similar_strategy.parquet")
+        df = pd.read_parquet( f'temp_back\statistic_results_final_{inst_id}_False.parquet')
         print(f"选取策略数：{len(df)}")
 
         # 将原始列表数据转换为二维 numpy 数组
