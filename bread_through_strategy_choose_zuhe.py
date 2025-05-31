@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import math
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 
 def calc_metrics_with_cache(agg_profit: np.ndarray, agg_kai: np.ndarray, cand_length: int, n_weeks: int):
@@ -117,18 +118,54 @@ def beam_search_opt(profit_mat: np.ndarray, kai_mat: np.ndarray, k: int, beam_wi
     return beam_candidates
 
 
+def process_k(k, profit_mat, kai_mat, original_indices, beam_width):
+    """
+    用于多进程中处理单个 k 值的 Beam Search.
+    返回一个列表，列表中的每个元素为一个字典，代表一个候选组合的结果。
+    """
+    result_list = []
+    print(f"开始处理 k={k}，beam_width={beam_width}")
+    t0 = time.time()
+    beam = beam_search_opt(profit_mat, kai_mat, k, beam_width)
+    elapsed = time.time() - t0
+
+    if not beam:
+        print(f"k={k} 未找到合适的组合")
+        return result_list
+
+    for candidate_entry in beam:
+        cand, last_idx, agg_profit, agg_kai, length, metrics = candidate_entry
+        # 将候选组合索引转换为原始 DataFrame 中的标签
+        orig_cand = tuple(original_indices[i] for i in cand)
+        row = {
+            "k": k,
+            "index_list": orig_cand,
+            "weekly_loss_rate": metrics["weekly_loss_rate"],
+            "active_week_ratio": metrics["active_week_ratio"],
+            "weekly_net_profit_sum": metrics["weekly_net_profit_sum"],
+            "weekly_net_profit_min": metrics["weekly_net_profit_min"],
+            "weekly_net_profit_max": metrics["weekly_net_profit_max"],
+            "weekly_net_profit_std": metrics["weekly_net_profit_std"]
+        }
+        result_list.append(row)
+
+    print(f"k={k}: 得到候选数量 = {len(beam)}，耗时 {elapsed:.2f} 秒")
+    return result_list
+
+
 def choose_zuhe_beam_opt():
     """
     主函数：
       1. 从 parquet 文件中加载数据并预处理（取排序后表现最佳的100条）
-      2. 对于每个组合大小 k（例如 k=2,3,4,5）执行 Beam Search 得到候选组合
+      2. 利用多进程对每个组合大小 k（例如 k=2,3,...,29）并行执行 Beam Search
       3. 将各个 k 的搜索结果汇总到一个 DataFrame 中，并保存为单个文件
     """
-    inst_id_list = ['XRP']
+    inst_id_list = ['SOL']
     for inst_id in inst_id_list:
         print(f"正在处理 {inst_id} 的组合搜索...")
         # 读取数据（请确保文件路径正确）
-        df = pd.read_parquet( f'temp_back\statistic_results_final_{inst_id}_False.parquet')
+        # df = pd.read_parquet(f'temp_back/statistic_results_final_{inst_id}_False.parquet')
+        df = pd.read_parquet(f'temp_back/{inst_id}_False_short_filter_similar_strategy.parquet')
         print(f"选取策略数：{len(df)}")
 
         # 将原始列表数据转换为二维 numpy 数组
@@ -136,43 +173,28 @@ def choose_zuhe_beam_opt():
         kai_mat = np.stack(df['weekly_kai_count_detail'].to_numpy(), axis=0).astype(np.float32)
         original_indices = df.index.to_numpy()
 
+        beam_width = 1000  # 可根据需要调整 beam 宽度
         all_rows = []
-        # 对不同 k 值进行搜索（这里 k 的取值为2,3,4,5）
-        for k in range(2, 30):
-            beam_width = 1000  # 可根据需要调整 beam 宽度
-            print(f"\n====== 开始 Beam Search：组合大小 k={k} ，beam_width={beam_width} ======")
-            t0 = time.time()
-            beam = beam_search_opt(profit_mat, kai_mat, k, beam_width)
-            elapsed = time.time() - t0
+        k_values = list(range(2, 30))  # 这里的 k 值范围，根据需要可调整
 
-            if not beam:
-                print(f"k={k} 未找到合适的组合")
-                continue
-
-            # 将 beam 中每个候选转换为字典记录，便于后续汇总
-            for candidate_entry in beam:
-                cand, last_idx, agg_profit, agg_kai, length, metrics = candidate_entry
-                # 转换候选组合索引为原始 DataFrame 中的标签
-                orig_cand = tuple(original_indices[i] for i in cand)
-                row = {
-                    "k": k,
-                    "index_list": orig_cand,
-                    "weekly_loss_rate": metrics["weekly_loss_rate"],
-                    "active_week_ratio": metrics["active_week_ratio"],
-                    "weekly_net_profit_sum": metrics["weekly_net_profit_sum"],
-                    "weekly_net_profit_min": metrics["weekly_net_profit_min"],
-                    "weekly_net_profit_max": metrics["weekly_net_profit_max"],
-                    "weekly_net_profit_std": metrics["weekly_net_profit_std"]
-                }
-                all_rows.append(row)
-
-            print(f"k={k}: 得到候选数量 = {len(beam)}，耗时 {elapsed:.2f} 秒")
+        # 使用进程池并设置 max_workers 为 10
+        with ProcessPoolExecutor(max_workers=5) as executor:
+            futures = {
+                executor.submit(process_k, k, profit_mat, kai_mat, original_indices, beam_width): k
+                for k in k_values
+            }
+            for future in as_completed(futures):
+                try:
+                    rows = future.result()
+                    all_rows.extend(rows)
+                except Exception as e:
+                    k_val = futures[future]
+                    print(f"k={k_val} 出现异常：{e}")
 
         # 将所有候选组合汇总到一个 DataFrame 中
         result_df = pd.DataFrame(all_rows)
         # 可按 k 和 weekly_loss_rate 排序（最优候选靠前）
         result_df = result_df.sort_values(["k", "weekly_loss_rate"])
-
         # 保存汇总结果为一个文件（例如，使用 parquet 格式）
         result_filename = f"temp_back/result_combined_{inst_id}.parquet"
         result_df.to_parquet(result_filename, index=False)
