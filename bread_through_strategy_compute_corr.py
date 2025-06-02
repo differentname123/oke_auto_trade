@@ -315,10 +315,13 @@ def filter_similar_strategy_all():
             df_list.append(data_df)
         data_df = pd.concat(df_list, ignore_index=True)
         temp_path = f'temp_back/{inst_id}_all.parquet'
-        if os.path.exists(temp_path):
-            print(f'文件已存在，跳过处理：{temp_path}')
-            continue
+        # if os.path.exists(temp_path):
+        #     print(f'文件已存在，跳过处理：{temp_path}')
+        #     continue
         data_df.to_parquet(temp_path, index=False)
+        if os.path.exists(output_path):
+            print(f'文件已存在，跳过处理：{output_path}')
+            continue
         print(f'处理 {inst_id} 的数据 {len(df_list)}，数据量：{len(data_df)}')
         while True:
             filtered_df = filtering(data_df, grouping_column='kai_count', sort_key='capital_no_leverage', _unused_threshold=None)

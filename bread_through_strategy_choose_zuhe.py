@@ -146,7 +146,7 @@ def choose_zuhe_beam_opt():
     # 定义实例列表，这里可以根据实际需要进行修改
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
     max_k = 100
-    beam_width = 10_0  #  beam_width 数值较大时可能占用较多内存，请根据实际场景调整
+    beam_width = 10000  #  beam_width 数值较大时可能占用较多内存，请根据实际场景调整
     objective = lambda m: m["weekly_loss_rate"]  # Beam-Search 目标函数
 
     out_dir = Path("temp_back")
