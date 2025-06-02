@@ -318,7 +318,7 @@ def filter_similar_strategy_all():
         while True:
             filtered_df = filtering(data_df, grouping_column='kai_count', sort_key='capital_no_leverage', _unused_threshold=None)
             print(f'{inst_id} 过滤后的数据量：{len(filtered_df)} 过滤前数据量：{len(data_df)}')
-            if filtered_df.shape[0] == data_df.shape[0]:
+            if abs(filtered_df.shape[0] - data_df.shape[0]) < 0.001 * data_df.shape[0]:
                 break
             data_df = filtered_df
             print(f'继续过滤')

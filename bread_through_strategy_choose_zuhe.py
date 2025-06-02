@@ -152,16 +152,14 @@ def choose_zuhe_beam_opt():
     out_dir = Path("temp_back")
     out_dir.mkdir(parents=True, exist_ok=True)
     for inst in inst_id_list:
-        elements_path = out_dir / f"result_elements_{inst}.parquet"
+        elements_path = out_dir / f"result_elements_{inst}_min_net.parquet"
         if elements_path.exists():
             elements_df = pd.read_parquet(elements_path)
-            elements_df['cha_score'] = (
-                elements_df['weekly_loss_rate_merged'] *
-                elements_df['weekly_net_profit_min_merged'] *
-                elements_df['weekly_loss_rate_merged'] *
-                elements_df['weekly_net_profit_min_merged']
-            )
+            # 获取weekly_net_profit_detail的元素个数
+            weeks = elements_df['weekly_net_profit_detail'].iloc[0].shape[0]
+            elements_df['cha_score'] = elements_df['weekly_loss_rate_merged'] * elements_df['weekly_net_profit_min_merged'] * weeks / 2
             elements_df['score_score'] = elements_df['cha_score'] / elements_df['weekly_net_profit_sum_merged']
+            elements_df['score_score1'] = elements_df['weekly_net_profit_sum_merged'] / elements_df['weekly_loss_rate_merged']
         print(f"\n==== 处理 {inst} ====")
 
         df_path = Path(f"temp_back/{inst}_True_all_filter_similar_strategy.parquet")
@@ -169,6 +167,7 @@ def choose_zuhe_beam_opt():
             print(f"未找到文件 {df_path}，跳过该实例。")
             continue
         df = pd.read_parquet(df_path)
+        df["weekly_loss_rate"] = -df["weekly_net_profit_min"]  # 转换为正值
         print("策略条数：", len(df))
 
         # 将 DataFrame 中的列表转换为 numpy 数组
