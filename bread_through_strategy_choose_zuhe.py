@@ -49,18 +49,6 @@ def beam_search_multi_k(profit_mat: np.ndarray,
                         objective_func=lambda metrics: metrics["weekly_loss_rate"]):
     """
     一次 Beam-Search 同时得到 1 … max_k 所有层的 top-beam 组合。
-
-    参数：
-        profit_mat: 每个策略的 weekly_profit_detail (策略数行 × 周数列)
-        kai_mat: 每个策略的 weekly_kai_count_detail (策略数行 × 周数列)
-        max_k: 最大组合长度（层数）
-        beam_width: 每一层保留的组合个数
-        objective_func: 评价函数，接收一个指标字典，返回一个数值（默认用 weekly_loss_rate 作为评价指标）
-
-    返回值：
-        dict[int, list]
-            键为 k，值为该 k 对应的 beam（已按 objective_func 返回的数值升序排序），
-            每个元素结构：(cand, last_idx, agg_profit, agg_kai, length, metrics)
     """
     n_strategies, n_weeks = profit_mat.shape
     # 第 0 层：单策略初始化 Beam
@@ -98,10 +86,13 @@ def beam_search_multi_k(profit_mat: np.ndarray,
 
 def choose_zuhe_beam_opt():
     """
-    主函数：一次 Beam-Search 直接拿到 k≤max_k 的全部最优组合。
+    主函数：一次 Beam-Search 直接拿到 k≤max_k 的全部最优组合，
+    并同时生成：
+      1. 组合汇总表  result_df
+      2. 元素明细表  elements_df
     """
-    inst_id_list = ['SOL']          # 根据需要配置所选实例
-    max_k = 50                      # 组合的最大长度
+    inst_id_list = ['BTC']          # 根据需要配置所选实例
+    max_k = 10                      # 组合的最大长度
     beam_width = 1_000              # Beam Search 的宽度
 
     evaluation_function = lambda metrics: metrics["weekly_loss_rate"]
@@ -109,21 +100,19 @@ def choose_zuhe_beam_opt():
     for inst in inst_id_list:
         print(f"\n==== 处理 {inst} ====")
         # ------------------------------------------------------------------ #
-        # 1. 读取parquet文件
-        df_path = Path(f"temp/corr/{inst}_all_filter_similar_strategy.parquet_origin_good_weekly_net_profit_detail.parquet")
+        # 1. 读取 parquet
+        df_path = Path(f"temp_back/{inst}_True_all_filter_similar_strategy.parquet")
         df = pd.read_parquet(df_path)
         print("策略条数：", len(df))
 
         # ------------------------------------------------------------------ #
-        # 2. 将数据转为 numpy 数组
-        profit_mat = np.stack(df['weekly_net_profit_detail'].to_numpy(),
-                              axis=0).astype(np.float32)
-        kai_mat = np.stack(df['weekly_kai_count_detail'].to_numpy(),
-                           axis=0).astype(np.float32)
+        # 2. 转 numpy
+        profit_mat = np.stack(df['weekly_net_profit_detail'].to_numpy(), axis=0).astype(np.float32)
+        kai_mat    = np.stack(df['weekly_kai_count_detail'].to_numpy(),  axis=0).astype(np.float32)
         original_indices = df.index.to_numpy()
 
         # ------------------------------------------------------------------ #
-        # 3. Beam Search（一次实现所有组合层次）
+        # 3. Beam Search
         t0 = time.time()
         layers = beam_search_multi_k(profit_mat, kai_mat,
                                      max_k=max_k, beam_width=beam_width,
@@ -131,13 +120,13 @@ def choose_zuhe_beam_opt():
         print(f"Beam-Search 用时: {time.time() - t0:.2f}s")
 
         # ------------------------------------------------------------------ #
-        # 4. 展开并保存结果
-        rows = []
+        # 4-A. 组合汇总表
+        rows_summary = []
         for k, beam in layers.items():
-            if k < 2:  # 题主只关注 k ≥ 2 的情况，可根据需要调整
+            if k < 2:        # 如需全部 k，请删除本行
                 continue
             for cand, *_ , metrics in beam:
-                rows.append(dict(
+                rows_summary.append(dict(
                     k=k,
                     index_list=tuple(original_indices[i] for i in cand),
                     weekly_loss_rate=metrics["weekly_loss_rate"],
@@ -148,15 +137,38 @@ def choose_zuhe_beam_opt():
                     weekly_net_profit_std=metrics["weekly_net_profit_std"]
                 ))
 
-        result_df = (pd.DataFrame(rows)
+        result_df = (pd.DataFrame(rows_summary)
                        .sort_values(["k", "weekly_loss_rate"])
                        .reset_index(drop=True))
 
-        out_path = Path("temp_back") / f"result_combined_{inst}.parquet"
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        result_df.to_parquet(out_path, index=False)
+        # ------------------------------------------------------------------ #
+        # 4-B. 元素明细表
+        elem_dfs = []
+        for k, beam in layers.items():
+            if k < 2:
+                continue
+            for rank, (cand, *_ ) in enumerate(beam, start=1):
+                sub = df.loc[original_indices[list(cand)]].copy()
+                sub["k"] = k
+                sub["comb_rank"] = rank     # 该 k 层内的名次（1=最佳）
+                elem_dfs.append(sub)
 
-        print(f"已写入 {out_path}（{len(result_df)} 行）")
+        elements_df = (pd.concat(elem_dfs, ignore_index=True)
+                         .reset_index(drop=True))
+
+        # ------------------------------------------------------------------ #
+        # 5. 保存
+        out_dir = Path("temp_back")
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        summary_path  = out_dir / f"result_combined_{inst}_all.parquet"
+        elements_path = out_dir / f"result_elements_{inst}_all.parquet"
+
+        result_df.to_parquet(summary_path,  index=False)
+        elements_df.to_parquet(elements_path, index=False)
+
+        print(f"组合汇总已写入 {summary_path}（{len(result_df)} 行）")
+        print(f"元素明细已写入 {elements_path}（{len(elements_df)} 行）")
 
 
 if __name__ == "__main__":

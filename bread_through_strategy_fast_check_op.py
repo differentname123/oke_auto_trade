@@ -293,7 +293,7 @@ def fast_check(k_idx, k_price, p_idx, p_price, min_trades=10, loss_th=-30.0, is_
         j += 1
 
     # 最终返回条件：交易数达到要求、累计最大亏损不超过阈值、且累计利润大于10
-    return (trades >= min_trades) and (min_sum >= loss_th) and (total_profit > 10)
+    return (trades >= min_trades) and (min_sum >= loss_th) and (total_profit > 0)
 
 
 def check_max_loss(df, kai_column, pin_column, is_reverse=False):
@@ -717,6 +717,8 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
     all_files_df = None
     # 对预计算使用所有信号（长短信号均在 all_signals 内）
     print(f"生成 {len(all_signals)} 候选信号。")
+    origin_base_name = base_name
+    base_name = f"{base_name}_short"
     for year in year_list:
         print(f"数据 {base_name} 的第一年: {year}")
         temp_df_local = df_local[df_local["year"] == year]
@@ -745,7 +747,7 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
             all_files_df, needed_all_signals = load_files_in_parallel(checkpoint_dir, pre_key_name)
 
         # 预计算所有候选信号数据
-        precomputed = load_or_compute_precomputed_signals(df, all_signals, f'{year}_{base_name}_{key_name}')
+        precomputed = load_or_compute_precomputed_signals(df, all_signals, f'{year}_{origin_base_name}_{key_name}')
         # 只保留在 needed_all_signals 中的信号
         precomputed = {sig: data for sig, data in precomputed.items() if sig in needed_all_signals}
 
@@ -757,10 +759,12 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
         GLOBAL_SIGNALS = precomputed
         # 本例中长信号与短信号均取预计算结果中的所有信号
         candidate_signals = list(GLOBAL_SIGNALS.keys())
+        short_signals = [sig for sig in candidate_signals if 'short' in sig]
+        long_signals = [sig for sig in candidate_signals if 'long' in sig]
         print(f"候选信号数量: {len(candidate_signals)}。")
 
         # 穷举回测所有候选组合，每一批次计算并保存结果
-        brute_force_backtesting(df, candidate_signals, candidate_signals, batch_size=10000000,
+        brute_force_backtesting(df, long_signals, candidate_signals, batch_size=10000000,
                                 key_name=f'{year}_{base_name}_{key_name}', all_files_df=all_files_df)
         pre_key_name = f'{year}_{base_name}_{key_name}'
         load_files_in_parallel(checkpoint_dir, f'{year}_{base_name}_{key_name}')
@@ -772,10 +776,10 @@ def example():
     start_time = time.time()
     data_path_list = [
         # "kline_data/origin_data_1m_5000000_BTC-USDT-SWAP_2025-05-06.csv",
-        # "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
-        # "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
-        # "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
-        # "kline_data/origin_data_1m_5000000_DOGE-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_ETH-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_SOL-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_TON-USDT-SWAP_2025-05-06.csv",
+        "kline_data/origin_data_1m_5000000_DOGE-USDT-SWAP_2025-05-06.csv",
         "kline_data/origin_data_1m_5000000_XRP-USDT-SWAP_2025-05-06.csv",
         # "kline_data/origin_data_1m_5000000_OKB-USDT_2025-05-06.csv",
     ]
