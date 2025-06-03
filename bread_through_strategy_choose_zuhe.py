@@ -3,6 +3,7 @@ import pandas as pd
 import time
 from pathlib import Path
 import heapq
+import gc
 
 
 # -------------------- 指标计算函数（不含杠杆计算） -------------------- #
@@ -102,41 +103,62 @@ def calc_leverage_metrics(agg_profit: np.ndarray,
     return optimal_leverage, optimal_capital, capital_no_leverage
 
 
-# -------------------- Beam-Search，多 k 同时返回 -------------------- #
+# -------------------- 辅助函数：基于索引计算聚合指标 -------------------- #
+def calc_metrics_by_indices(cand: tuple, profit_mat: np.ndarray, kai_mat: np.ndarray, n_weeks: int):
+    """
+    根据候选组合的索引计算累计的利润与开仓数组，然后调用 calc_metrics_with_cache 计算指标。
+    """
+    # 将候选组合中的各行数据求和
+    agg_profit = np.sum(profit_mat[list(cand)], axis=0)
+    agg_kai = np.sum(kai_mat[list(cand)], axis=0)
+    return calc_metrics_with_cache(agg_profit, agg_kai, len(cand), n_weeks)
+
+
+def get_aggregated_arrays(cand: tuple, profit_mat: np.ndarray, kai_mat: np.ndarray):
+    """
+    根据候选索引组合返回累计利润 agg_profit 和累计开仓 agg_kai 数组。
+    """
+    agg_profit = np.sum(profit_mat[list(cand)], axis=0)
+    agg_kai = np.sum(kai_mat[list(cand)], axis=0)
+    return agg_profit, agg_kai
+
+
+# -------------------- Beam-Search，多 k 同时返回（基于索引，延迟聚合） -------------------- #
 def beam_search_multi_k(profit_mat: np.ndarray,
                         kai_mat: np.ndarray,
                         max_k: int,
                         beam_width: int,
                         objective_func=lambda m: m["weekly_loss_rate"]):
+    """
+    使用 Beam-Search 在不保存中间大数组的条件下搜索候选组合，
+    仅记录候选组合中策略的索引元组。指标计算时基于原始矩阵聚合计算。
+    """
     n_strategies, n_weeks = profit_mat.shape
 
-    # 初始化（k=1）
+    # k = 1 时的初始候选，仅记录索引及对应指标（通过延迟聚合计算）
     beam = []
     for i in range(n_strategies):
-        agg_p = profit_mat[i].copy()
-        agg_k = kai_mat[i].copy()
-        metrics = calc_metrics_with_cache(agg_p, agg_k, 1, n_weeks)
-        beam.append(((i,), i, agg_p, agg_k, 1, metrics))
-
-    # 利用 heapq.nsmallest 替代全排序获得最优的 beam_width 个候选
-    beam = heapq.nsmallest(beam_width, beam, key=lambda x: objective_func(x[5]))
+        cand = (i,)
+        metrics = calc_metrics_by_indices(cand, profit_mat, kai_mat, n_weeks)
+        beam.append((cand, i, metrics))
+    beam = heapq.nsmallest(beam_width, beam, key=lambda x: objective_func(x[2]))
     layer_results = {1: beam}
 
-    # 逐层扩展
-    for cur_len in range(1, max_k):
+    # 逐层扩展，生成 k=2,3,... 的组合
+    for _ in range(1, max_k):
         new_beam = []
-        for cand, last_idx, agg_p, agg_k, length, _ in beam:
-            next_length = length + 1
+        for cand, last_idx, _ in beam:
+            next_length = len(cand) + 1
             for nxt in range(last_idx + 1, n_strategies):
-                ncand = cand + (nxt,)
-                nagg_p = agg_p + profit_mat[nxt]
-                nagg_k = agg_k + kai_mat[nxt]
-                nmetrics = calc_metrics_with_cache(nagg_p, nagg_k, next_length, n_weeks)
-                new_beam.append((ncand, nxt, nagg_p, nagg_k, next_length, nmetrics))
+                new_cand = cand + (nxt,)
+                new_metrics = calc_metrics_by_indices(new_cand, profit_mat, kai_mat, n_weeks)
+                new_beam.append((new_cand, nxt, new_metrics))
         if not new_beam:
             break
-        beam = heapq.nsmallest(beam_width, new_beam, key=lambda x: objective_func(x[5]))
-        layer_results[cur_len + 1] = beam
+        beam = heapq.nsmallest(beam_width, new_beam, key=lambda x: objective_func(x[2]))
+        layer_results[len(beam[0][0])] = beam  # 当前候选长度
+        # 主动释放内存，减少中间层占用
+        gc.collect()
 
     return layer_results
 
@@ -146,7 +168,7 @@ def choose_zuhe_beam_opt():
     # 定义实例列表，这里可以根据实际需要进行修改
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
     max_k = 100
-    beam_width = 50000  #  beam_width 数值较大时可能占用较多内存，请根据实际场景调整
+    beam_width = 100000  # beam_width 数值较大时可能占用较多内存，根据实际场景调整
     objective = lambda m: m["weekly_loss_rate"]  # Beam-Search 目标函数
 
     out_dir = Path("temp_back")
@@ -161,12 +183,14 @@ def choose_zuhe_beam_opt():
             print(f"未找到文件 {df_path}，跳过该实例。")
             continue
         df = pd.read_parquet(df_path)
+        # 获取weekly_net_profit_detail的元素个数
+        weeks = len(df['weekly_net_profit_detail'].iloc[0]) if not df.empty else 0
+        print("每个策略的周数：", weeks)
         print("策略条数：", len(df))
 
         # 从 df 中提取 profit 和 kai 的详细数据（注意这些字段为列表形式）
         profit_mat = np.stack(df['weekly_net_profit_detail'].to_numpy()).astype(np.float32)
         kai_mat = np.stack(df['weekly_kai_count_detail'].to_numpy()).astype(np.float32)
-        # 不再需要原始 df 的索引，下面直接基于聚合统计结果保存
 
         t0 = time.time()
         layers = beam_search_multi_k(profit_mat, kai_mat,
@@ -180,9 +204,11 @@ def choose_zuhe_beam_opt():
         for k, beam in layers.items():
             if k < 2:
                 continue
-            for cand, last_idx, agg_p, agg_k, length, metrics in beam:
+            for cand, last_idx, metrics in beam:
+                # 根据候选组合索引重新计算累计数组
+                agg_p, agg_k = get_aggregated_arrays(cand, profit_mat, kai_mat)
                 # 计算杠杆指标
-                optimal_leverage, optimal_capital, no_leverage_capital = calc_leverage_metrics(agg_p, agg_k, length)
+                optimal_leverage, optimal_capital, no_leverage_capital = calc_leverage_metrics(agg_p, agg_k, len(cand))
 
                 # 构造统计结果字典，字段名增加 _merged 后缀以便区分
                 merged_info = {
@@ -210,19 +236,15 @@ def choose_zuhe_beam_opt():
             continue
 
         # 将聚合结果转换为 DataFrame
-        result_df = pd.DataFrame(results)
+        elements_df = pd.DataFrame(results)
 
-        # 根据原始代码逻辑，计算额外得分（注意：这里按原代码计算方式，weekly_loss_rate_merged 与 weekly_net_profit_min_merged各乘两次）
-        result_df['cha_score_merged'] = (
-            result_df['weekly_loss_rate_merged'] *
-            result_df['weekly_net_profit_min_merged'] *
-            result_df['weekly_loss_rate_merged'] *
-            result_df['weekly_net_profit_min_merged']
-        )
-        result_df['score_score_merged'] = result_df['cha_score_merged'] / result_df['weekly_net_profit_sum_merged']
 
-        result_df.to_parquet(elements_path, index=False)
-        print(f"统计结果已写入 {elements_path}（{len(result_df)} 行）")
+        elements_df['cha_score'] = elements_df['weekly_loss_rate_merged'] * elements_df['weekly_net_profit_min_merged'] * weeks / 2
+        elements_df['score_score'] = elements_df['cha_score'] / elements_df['weekly_net_profit_sum_merged']
+        elements_df['score_score1'] = elements_df['weekly_net_profit_sum_merged'] / elements_df['weekly_loss_rate_merged']
+
+        elements_df.to_parquet(elements_path, index=False)
+        print(f"统计结果已写入 {elements_path}（{len(elements_df)} 行）")
 
 
 if __name__ == "__main__":

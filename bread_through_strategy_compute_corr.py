@@ -145,7 +145,7 @@ def filtering(origin_good_df, grouping_column, sort_key, _unused_threshold):
     if start < n:
         groups.append(df_sorted.iloc[start:n])
     # 根据组的数量动态计算组内相关性过滤阈值
-    group_threshold = max(50, 99 - int(0.01 * len(groups)))
+    group_threshold = max(50, 98 - int(0.01 * len(groups)))
     print(f"总分组数量：{len(groups)} ，组内相关性阈值：{group_threshold}")
 
     filtered_dfs = []
@@ -286,17 +286,37 @@ def final_compute_corr():
 
         print(f'策略数量：{len(selected_strategies)}')
 
+def add_side(df):
+    """
+    添加 is_reverse 列，True 表示反向交易，False 表示正向交易。
+    :param df: DataFrame
+    :return: DataFrame
+    """
+    # 遍历df
+    for index, row in df.iterrows():
+        side = 'buy'
+        kai_column = row['kai_column']
+        if row['is_reverse']:
+            if 'long' in kai_column:
+                side = 'sell'
+        else:
+            if 'short' in kai_column:
+                side = 'sell'
+        df.at[index, 'side'] = side
+    return df
+
+
 def filter_similar_strategy_all():
     """
     过滤掉太过于相似的策略。
     :return:
     """
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
+    inst_id_list = ['ETH', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
     is_reverse_list = [False, True]
     for inst_id in inst_id_list:
         df_list = []
         for is_reverse in is_reverse_list:
-            data_file = f'temp_back\statistic_results_final_{inst_id}_{is_reverse}.parquet'
+            data_file = f'temp_back\statistic_results_final_{inst_id}_{is_reverse}_short.parquet'
             if not os.path.exists(data_file):
                 print(f'文件不存在，跳过处理：{data_file}')
                 continue
@@ -314,19 +334,21 @@ def filter_similar_strategy_all():
             data_df = data_df[data_df['capital_no_leverage'] > 1.1]
             df_list.append(data_df)
         data_df = pd.concat(df_list, ignore_index=True)
-        temp_path = f'temp_back/{inst_id}_all.parquet'
+        temp_path = f'temp_back/{inst_id}_all_short.parquet'
         # if os.path.exists(temp_path):
         #     print(f'文件已存在，跳过处理：{temp_path}')
         #     continue
+        data_df = add_side(data_df)
+        data_df = data_df[data_df['side'] == 'buy']
         data_df.to_parquet(temp_path, index=False)
-        if os.path.exists(output_path):
-            print(f'文件已存在，跳过处理：{output_path}')
-            continue
+        # if os.path.exists(output_path):
+        #     print(f'文件已存在，跳过处理：{output_path}')
+        #     continue
         print(f'处理 {inst_id} 的数据 {len(df_list)}，数据量：{len(data_df)}')
         while True:
             filtered_df = filtering(data_df, grouping_column='kai_count', sort_key='capital_no_leverage', _unused_threshold=None)
             print(f'{inst_id} 过滤后的数据量：{len(filtered_df)} 过滤前数据量：{len(data_df)}')
-            if abs(filtered_df.shape[0] - data_df.shape[0]) < 0.001 * data_df.shape[0]:
+            if abs(filtered_df.shape[0] - data_df.shape[0]) < 0.01 * data_df.shape[0]:
                 break
             data_df = filtered_df
             print(f'继续过滤')
