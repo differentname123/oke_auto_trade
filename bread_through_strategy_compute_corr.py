@@ -311,7 +311,7 @@ def filter_similar_strategy_all():
     过滤掉太过于相似的策略。
     :return:
     """
-    inst_id_list = ['ETH', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
     is_reverse_list = [False, True]
     for inst_id in inst_id_list:
         df_list = []
@@ -321,7 +321,7 @@ def filter_similar_strategy_all():
                 print(f'文件不存在，跳过处理：{data_file}')
                 continue
 
-            output_path = f'temp_back/{inst_id}_{is_reverse}_all_filter_similar_strategy.parquet'
+            output_path = f'temp_back/{inst_id}_{is_reverse}_all_short_filter_similar_strategy.parquet'
             # if os.path.exists(output_path):
             #     print(f'文件已存在，跳过处理：{output_path}')
             #     continue
@@ -334,7 +334,7 @@ def filter_similar_strategy_all():
             data_df = data_df[data_df['capital_no_leverage'] > 1.1]
             df_list.append(data_df)
         data_df = pd.concat(df_list, ignore_index=True)
-        temp_path = f'temp_back/{inst_id}_all_short.parquet'
+        temp_path = f'temp_back/{inst_id}_all.parquet'
         # if os.path.exists(temp_path):
         #     print(f'文件已存在，跳过处理：{temp_path}')
         #     continue

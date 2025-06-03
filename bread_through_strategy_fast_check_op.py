@@ -764,7 +764,7 @@ def brute_force_optimize_breakthrough_signal(data_path="temp/TON_1m_2000.csv"):
         print(f"候选信号数量: {len(candidate_signals)}。")
 
         # 穷举回测所有候选组合，每一批次计算并保存结果
-        brute_force_backtesting(df, long_signals, candidate_signals, batch_size=10000000,
+        brute_force_backtesting(df, short_signals, candidate_signals, batch_size=10000000,
                                 key_name=f'{year}_{base_name}_{key_name}', all_files_df=all_files_df)
         pre_key_name = f'{year}_{base_name}_{key_name}'
         load_files_in_parallel(checkpoint_dir, f'{year}_{base_name}_{key_name}')
