@@ -175,7 +175,7 @@ def choose_zuhe_beam_opt():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for inst in inst_id_list:
-        elements_path = out_dir / f"result_elements_{inst}.parquet"
+        elements_path = out_dir / f"result_elements_{inst}_{beam_width}.parquet"
         print(f"\n==== 处理 {inst} ====")
 
         df_path = Path(f"temp_back/{inst}_True_all_filter_similar_strategy.parquet")
@@ -184,7 +184,8 @@ def choose_zuhe_beam_opt():
             continue
         df = pd.read_parquet(df_path)
         print("策略条数：", len(df))
-
+        weeks = len(df['weekly_net_profit_detail'].iloc[0])  # 获取每个策略的周数
+        print(f"每个策略的周数：{weeks}")
         # 从 df 中提取 profit 和 kai 的详细数据（注意这些字段为列表形式）
         profit_mat = np.stack(df['weekly_net_profit_detail'].to_numpy()).astype(np.float32)
         kai_mat = np.stack(df['weekly_kai_count_detail'].to_numpy()).astype(np.float32)
@@ -234,22 +235,11 @@ def choose_zuhe_beam_opt():
 
         # 将聚合结果转换为 DataFrame
         elements_df = pd.DataFrame(results)
-
-        # 获取weekly_net_profit_detail的元素个数
-        weeks = 282
         elements_df['cha_score'] = elements_df['weekly_loss_rate_merged'] * elements_df['weekly_net_profit_min_merged'] * weeks / 2
         elements_df['score_score'] = elements_df['cha_score'] / elements_df['weekly_net_profit_sum_merged']
         elements_df['score_score1'] = elements_df['weekly_net_profit_sum_merged'] / elements_df['weekly_loss_rate_merged']
 
-
-        # 根据原始代码逻辑，计算额外得分（注意：这里按原代码计算方式，weekly_loss_rate_merged 与 weekly_net_profit_min_merged各乘两次）
-        result_df['cha_score_merged'] = (
-            result_df['weekly_loss_rate_merged'] *
-            result_df['weekly_net_profit_min_merged']
-        )
-        result_df['score_score_merged'] = result_df['cha_score_merged'] / result_df['weekly_net_profit_sum_merged']
-
-        result_df.to_parquet(elements_path, index=False)
+        elements_df.to_parquet(elements_path, index=False)
         print(f"统计结果已写入 {elements_path}（{len(elements_df)} 行）")
 
 
