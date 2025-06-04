@@ -306,6 +306,7 @@ def choose_zuhe_beam_opt():
                     elements_df['std_score'] = (elements_df['weekly_net_profit_std_merged'] /
                                                 elements_df['weekly_net_profit_sum_merged'])
                 print(f"已找到 {inst} 的历史结果文件：{elements_path}")
+                continue
 
             print(f"\n==== 处理 {inst} ====")
             df_path = Path(f"temp_back/{inst}_True_{type}_filter_similar_strategy.parquet")
