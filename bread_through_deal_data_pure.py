@@ -393,7 +393,7 @@ def process_df_numba(df):
     return df
 
 def merge_df(inst_id):
-    is_reverse_list = [False, True]
+
     merge_columns = ["kai_column", "pin_column"]
     target_columns = [
         "kai_count", "hold_time_mean", "net_profit_rate",
@@ -401,31 +401,30 @@ def merge_df(inst_id):
         "weekly_net_profit_detail"
     ]
     columns_to_read = merge_columns + target_columns
-    for is_reverse in is_reverse_list:
-        output_file = f'temp_back/{inst_id}_{is_reverse}_pure_data_with_future.parquet'
-        origin_file = f'temp_back/{inst_id}_{is_reverse}_pure_data.parquet'
-        origin_good_df = pd.read_parquet(origin_file)
+    output_file = f'temp_back/{inst_id}_True_all_short_filter_similar_strategy_with_pure.parquet'
+    origin_file = f'temp_back/{inst_id}_True_all_short_filter_similar_strategy.parquet'
+    origin_good_df = pd.read_parquet(origin_file)
 
-        # 读取 Parquet 文件时仅读取需要的列，指定 engine 可根据实际情况选择
-        new_df = pd.read_parquet(
-            f'temp_back/{inst_id}_{is_reverse}_pure_data.parquet_1m_200000_{inst_id}-USDT-SWAP_2025-05-01.csvstatistic_results_final.parquet',
-            columns=columns_to_read,
-            engine='pyarrow'
-        )
+    # 读取 Parquet 文件时仅读取需要的列，指定 engine 可根据实际情况选择
+    new_df = pd.read_parquet(
+        f'temp_back\statistic_results_final_{inst_id}_False_short_new.parquet',
+        columns=columns_to_read,
+        engine='pyarrow'
+    )
 
-        # 选择需要的列，并重命名以区分
-        new_df_selected = new_df.copy()
-        new_df_selected = new_df_selected.rename(
-            columns={col: col + "_new20" for col in target_columns}
-        )
+    # 选择需要的列，并重命名以区分
+    new_df_selected = new_df.copy()
+    new_df_selected = new_df_selected.rename(
+        columns={col: col + "_new20" for col in target_columns}
+    )
 
-        origin_good_df = origin_good_df.set_index(merge_columns)
-        new_df_selected = new_df_selected.set_index(merge_columns)
+    origin_good_df = origin_good_df.set_index(merge_columns)
+    new_df_selected = new_df_selected.set_index(merge_columns)
 
-        # 使用 join 进行合并（左连接），然后重置索引
-        origin_good_df = origin_good_df.join(new_df_selected, how="left").reset_index()
-        origin_good_df = process_df_numba(origin_good_df)
-        origin_good_df.to_parquet(output_file, index=False)
+    # 使用 join 进行合并（左连接），然后重置索引
+    origin_good_df = origin_good_df.join(new_df_selected, how="left").reset_index()
+    origin_good_df = process_df_numba(origin_good_df)
+    origin_good_df.to_parquet(output_file, index=False)
 
 
 def group_statistics_and_inst_details(df: pd.DataFrame,
@@ -652,6 +651,7 @@ def compute_scores_v2(df_raw: pd.DataFrame) -> pd.DataFrame:
     return df.sort_values("rank")
 
 def example():
+    merge_df('BTC')
     get_common_data()
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
     is_reverse = False
