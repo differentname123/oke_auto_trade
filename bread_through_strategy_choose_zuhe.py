@@ -289,89 +289,89 @@ def choose_zuhe_beam_opt():
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
     max_k = 100
     beam_width = 10000  # 根据内存情况调整
-    type = 'all_short'
+    type_list = ['all', 'all_short']
     # 目标函数：使用 -score 使得得分越高的候选更优
     objective = lambda m: -m["score"]
 
     out_dir = Path("temp_back")
     out_dir.mkdir(parents=True, exist_ok=True)
+    for type in type_list:
+        for inst in inst_id_list:
+            elements_path = out_dir / f"result_elements_{inst}_{beam_width}_{type}.parquet"
 
-    for inst in inst_id_list:
-        elements_path = out_dir / f"result_elements_{inst}_{beam_width}_{type}.parquet"
+            # 如果历史文件存在，则加载提示
+            if elements_path.exists():
+                elements_df = pd.read_parquet(elements_path)
+                if not elements_df.empty and "weekly_net_profit_std_merged" in elements_df.columns and "weekly_net_profit_sum_merged" in elements_df.columns:
+                    elements_df['std_score'] = (elements_df['weekly_net_profit_std_merged'] /
+                                                elements_df['weekly_net_profit_sum_merged'])
+                print(f"已找到 {inst} 的历史结果文件：{elements_path}")
 
-        # 如果历史文件存在，则加载提示
-        if elements_path.exists():
-            elements_df = pd.read_parquet(elements_path)
-            if not elements_df.empty and "weekly_net_profit_std_merged" in elements_df.columns and "weekly_net_profit_sum_merged" in elements_df.columns:
-                elements_df['std_score'] = (elements_df['weekly_net_profit_std_merged'] /
-                                            elements_df['weekly_net_profit_sum_merged'])
-            print(f"已找到 {inst} 的历史结果文件：{elements_path}")
-
-        print(f"\n==== 处理 {inst} ====")
-        df_path = Path(f"temp_back/{inst}_True_{type}_filter_similar_strategy.parquet")
-        if not df_path.exists():
-            print(f"未找到文件 {df_path}，跳过该实例。")
-            continue
-
-        df = pd.read_parquet(df_path)
-        print(f"策略条数：{len(df)}")
-        weeks = len(df.iloc[0]['weekly_net_profit_detail'])
-        print(f"每个策略的周数：{weeks}")
-
-        # 提取收益和开仓数据，转换为矩阵（字段均为列表格式）
-        profit_mat = np.stack(df['weekly_net_profit_detail'].to_numpy()).astype(np.float32)
-        kai_mat = np.stack(df['weekly_kai_count_detail'].to_numpy()).astype(np.float32)
-
-        t0 = time.time()
-        layers = beam_search_multi_k(profit_mat, kai_mat,
-                                     max_k=max_k, beam_width=beam_width,
-                                     objective_func=objective)
-        print(f"Beam-Search 用时 {time.time() - t0:.2f} 秒")
-
-        results = []
-        # 遍历所有层（跳过单一策略组合 k=1）
-        for k, beam in layers.items():
-            if k < 2:
+            print(f"\n==== 处理 {inst} ====")
+            df_path = Path(f"temp_back/{inst}_True_{type}_filter_similar_strategy.parquet")
+            if not df_path.exists():
+                print(f"未找到文件 {df_path}，跳过该实例。")
                 continue
-            for candidate_item in beam:
-                candidate = candidate_item[0]
-                metrics = candidate_item[2]
-                agg_profit = candidate_item[3]
-                agg_kai = candidate_item[4]
-                optimal_leverage, optimal_capital, no_leverage_capital = calc_leverage_metrics(
-                    agg_profit, agg_kai, len(candidate))
-                score_val = scoring_function(agg_profit / len(candidate))
-                merged_info = {
-                    "k": k,
-                    "weekly_loss_rate": metrics["weekly_loss_rate"],
-                    "active_week_ratio": metrics["active_week_ratio"],
-                    "weekly_net_profit_sum": metrics["weekly_net_profit_sum"],
-                    "weekly_net_profit_min": metrics["weekly_net_profit_min"],
-                    "weekly_net_profit_max": metrics["weekly_net_profit_max"],
-                    "weekly_net_profit_std": metrics["weekly_net_profit_std"],
-                    "optimal_leverage": optimal_leverage,
-                    "optimal_capital": optimal_capital,
-                    "capital_no_leverage": no_leverage_capital,
-                    "score": score_val,
-                }
-                result_item = {"strategies": candidate}
-                for key, value in merged_info.items():
-                    result_item[f"{key}_merged"] = value
-                results.append(result_item)
 
-        if not results:
-            print(f"{inst} 未产生任何组合结果。")
-            continue
+            df = pd.read_parquet(df_path)
+            print(f"策略条数：{len(df)}")
+            weeks = len(df.iloc[0]['weekly_net_profit_detail'])
+            print(f"每个策略的周数：{weeks}")
 
-        elements_df = pd.DataFrame(results)
-        elements_df['cha_score'] = (elements_df['weekly_loss_rate_merged'] *
-                                    elements_df['weekly_net_profit_min_merged'] * weeks / 2)
-        elements_df['score_score'] = elements_df['cha_score'] / elements_df['weekly_net_profit_sum_merged']
-        elements_df['score_score1'] = elements_df['weekly_net_profit_sum_merged'] / elements_df[
-            'weekly_loss_rate_merged']
+            # 提取收益和开仓数据，转换为矩阵（字段均为列表格式）
+            profit_mat = np.stack(df['weekly_net_profit_detail'].to_numpy()).astype(np.float32)
+            kai_mat = np.stack(df['weekly_kai_count_detail'].to_numpy()).astype(np.float32)
 
-        elements_df.to_parquet(elements_path, index=False)
-        print(f"统计结果已写入 {elements_path}（{len(elements_df)} 行）")
+            t0 = time.time()
+            layers = beam_search_multi_k(profit_mat, kai_mat,
+                                         max_k=max_k, beam_width=beam_width,
+                                         objective_func=objective)
+            print(f"Beam-Search 用时 {time.time() - t0:.2f} 秒")
+
+            results = []
+            # 遍历所有层（跳过单一策略组合 k=1）
+            for k, beam in layers.items():
+                if k < 2:
+                    continue
+                for candidate_item in beam:
+                    candidate = candidate_item[0]
+                    metrics = candidate_item[2]
+                    agg_profit = candidate_item[3]
+                    agg_kai = candidate_item[4]
+                    optimal_leverage, optimal_capital, no_leverage_capital = calc_leverage_metrics(
+                        agg_profit, agg_kai, len(candidate))
+                    score_val = scoring_function(agg_profit / len(candidate))
+                    merged_info = {
+                        "k": k,
+                        "weekly_loss_rate": metrics["weekly_loss_rate"],
+                        "active_week_ratio": metrics["active_week_ratio"],
+                        "weekly_net_profit_sum": metrics["weekly_net_profit_sum"],
+                        "weekly_net_profit_min": metrics["weekly_net_profit_min"],
+                        "weekly_net_profit_max": metrics["weekly_net_profit_max"],
+                        "weekly_net_profit_std": metrics["weekly_net_profit_std"],
+                        "optimal_leverage": optimal_leverage,
+                        "optimal_capital": optimal_capital,
+                        "capital_no_leverage": no_leverage_capital,
+                        "score": score_val,
+                    }
+                    result_item = {"strategies": candidate}
+                    for key, value in merged_info.items():
+                        result_item[f"{key}_merged"] = value
+                    results.append(result_item)
+
+            if not results:
+                print(f"{inst} 未产生任何组合结果。")
+                continue
+
+            elements_df = pd.DataFrame(results)
+            elements_df['cha_score'] = (elements_df['weekly_loss_rate_merged'] *
+                                        elements_df['weekly_net_profit_min_merged'] * weeks / 2)
+            elements_df['score_score'] = elements_df['cha_score'] / elements_df['weekly_net_profit_sum_merged']
+            elements_df['score_score1'] = elements_df['weekly_net_profit_sum_merged'] / elements_df[
+                'weekly_loss_rate_merged']
+
+            elements_df.to_parquet(elements_path, index=False)
+            print(f"统计结果已写入 {elements_path}（{len(elements_df)} 行）")
 
 
 if __name__ == "__main__":
