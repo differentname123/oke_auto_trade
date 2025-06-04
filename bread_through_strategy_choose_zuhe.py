@@ -1,3 +1,4 @@
+import itertools
 import os
 import time
 import gc
@@ -253,15 +254,24 @@ def beam_search_multi_k(profit_mat: np.ndarray,
                                                 initializer=init_worker,
                                                 initargs=(profit_mat, kai_mat)) as pool:
         for current_k in range(2, max_k + 1):
+            start_time = time.time()
+            print(f"正在扩展 Layer {current_k} 当前时间：{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
             work_items = [(parent, n_strategies, current_k, n_weeks) for parent in beam]
-            new_beam = []
-            for candidate_list in pool.map(expand_candidate_worker, work_items):
-                new_beam.extend(candidate_list)
+
+            # 使用 submit 并利用 as_completed 来尽快收集各个任务的结果
+            futures = [pool.submit(expand_candidate_worker, item) for item in work_items]
+            candidate_lists = []
+            for future in concurrent.futures.as_completed(futures):
+                candidate_lists.append(future.result())
+
+            new_beam = list(itertools.chain.from_iterable(candidate_lists))
+
             if not new_beam:
                 break
             beam = heapq.nsmallest(beam_width, new_beam, key=lambda x: objective_func(x[2]))
             layer_results[current_k] = beam
             gc.collect()
+            print(f"Layer {current_k} 扩展完成，耗时 {time.time() - start_time:.2f} 秒，候选数：{len(beam)} 当前时间：{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
 
     return layer_results
 
@@ -276,7 +286,7 @@ def choose_zuhe_beam_opt():
     3. 计算每个组合的各项指标及杠杆指标，
     4. 最终将聚合结果保存为 parquet 文件。
     """
-    inst_id_list = ['BTC', 'TON', 'DOGE', 'XRP', 'OKB']
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
     max_k = 100
     beam_width = 100000  # 根据内存情况调整
     # 目标函数：使用 -score 使得得分越高的候选更优
