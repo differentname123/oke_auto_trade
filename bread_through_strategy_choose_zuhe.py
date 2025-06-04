@@ -166,8 +166,8 @@ def beam_search_multi_k(profit_mat: np.ndarray,
 # -------------------- 主流程 -------------------- #
 def choose_zuhe_beam_opt():
     # 定义实例列表，这里可以根据实际需要进行修改
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
-    max_k = 100
+    inst_id_list = ['SOL', 'TON', 'DOGE', 'XRP', 'OKB']
+    max_k = 30
     beam_width = 100000  # beam_width 数值较大时可能占用较多内存，根据实际场景调整
     objective = lambda m: m["weekly_loss_rate"]  # Beam-Search 目标函数
 

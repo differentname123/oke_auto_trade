@@ -333,13 +333,15 @@ def filter_similar_strategy_all():
             # capital_no_leverage
             data_df = data_df[data_df['capital_no_leverage'] > 1.1]
             df_list.append(data_df)
+        if len(df_list) == 0:
+            continue
         data_df = pd.concat(df_list, ignore_index=True)
-        temp_path = f'temp_back/{inst_id}_all.parquet'
+        temp_path = f'temp_back/{inst_id}_all_short.parquet'
         # if os.path.exists(temp_path):
         #     print(f'文件已存在，跳过处理：{temp_path}')
         #     continue
         data_df = add_side(data_df)
-        data_df = data_df[data_df['side'] == 'buy']
+        data_df = data_df[data_df['side'] == 'sell']
         data_df.to_parquet(temp_path, index=False)
         # if os.path.exists(output_path):
         #     print(f'文件已存在，跳过处理：{output_path}')
@@ -348,7 +350,7 @@ def filter_similar_strategy_all():
         while True:
             filtered_df = filtering(data_df, grouping_column='kai_count', sort_key='capital_no_leverage', _unused_threshold=None)
             print(f'{inst_id} 过滤后的数据量：{len(filtered_df)} 过滤前数据量：{len(data_df)}')
-            if abs(filtered_df.shape[0] - data_df.shape[0]) < 0.01 * data_df.shape[0]:
+            if (abs(filtered_df.shape[0] - data_df.shape[0]) < 0.01 * data_df.shape[0]) or abs(filtered_df.shape[0] - data_df.shape[0]) == 0:
                 break
             data_df = filtered_df
             print(f'继续过滤')
