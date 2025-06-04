@@ -74,10 +74,10 @@ def scoring_function(weekly_net_profit_detail: np.ndarray) -> float:
 
     # --- 4. 加权汇总 ---
     weights = {
-        "W": 0.35,
-        "L": 0.20,
-        "DS": 0.15,
-        "STD": 0.10,
+        "W": 0.45,
+        "L": 0.25,
+        "DS": 0.05,
+        "STD": 0.05,
         "MDD": 0.10,
         "S": 0.10,
     }
@@ -288,7 +288,8 @@ def choose_zuhe_beam_opt():
     """
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
     max_k = 100
-    beam_width = 100000  # 根据内存情况调整
+    beam_width = 10000  # 根据内存情况调整
+    type = 'all_short'
     # 目标函数：使用 -score 使得得分越高的候选更优
     objective = lambda m: -m["score"]
 
@@ -296,7 +297,7 @@ def choose_zuhe_beam_opt():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for inst in inst_id_list:
-        elements_path = out_dir / f"result_elements_{inst}_{beam_width}_op.parquet"
+        elements_path = out_dir / f"result_elements_{inst}_{beam_width}_{type}.parquet"
 
         # 如果历史文件存在，则加载提示
         if elements_path.exists():
@@ -307,7 +308,7 @@ def choose_zuhe_beam_opt():
             print(f"已找到 {inst} 的历史结果文件：{elements_path}")
 
         print(f"\n==== 处理 {inst} ====")
-        df_path = Path(f"temp_back/{inst}_True_all_filter_similar_strategy.parquet")
+        df_path = Path(f"temp_back/{inst}_True_{type}_filter_similar_strategy.parquet")
         if not df_path.exists():
             print(f"未找到文件 {df_path}，跳过该实例。")
             continue
