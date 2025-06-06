@@ -7,6 +7,31 @@ import heapq
 import numpy as np
 import pandas as pd
 import concurrent.futures
+from scipy.stats import spearmanr
+
+
+# -------------------- 稳健相关性计算函数 -------------------- #
+def compute_robust_correlation(array1, array2):
+    """
+    计算稳健相关性，使用 Pearson 和 Spearman 相关系数的均值。
+    如果数据长度不足或标准差为 0，则返回 0。
+    """
+    n_common = min(len(array1), len(array2))
+    if n_common < 3:
+        return 0
+    x = array1[:n_common]
+    y = array2[:n_common]
+    std_x = np.std(x)
+    std_y = np.std(y)
+    if std_x == 0 or std_y == 0:
+        return 0
+    # 计算 Pearson 相关系数
+    pearson_corr = np.corrcoef(x, y)[0, 1]
+    # 计算 Spearman 相关系数。如果结果为 nan 则置为 0。
+    spearman_corr, _ = spearmanr(x, y)
+    if np.isnan(spearman_corr):
+        spearman_corr = 0
+    return (pearson_corr + spearman_corr) / 2
 
 
 # -------------------- 旧评分函数 -------------------- #
@@ -221,6 +246,57 @@ def expand_candidate_worker(args):
     return expand_candidate(parent, n_strategies, current_k, n_weeks)
 
 
+# --------------------
+# 对单个候选组合进行统计计算的函数
+# 该函数将计算杠杆指标、评分，以及组合内各策略之间的稳健相关性，
+# 并返回一个包含统计信息的字典
+# --------------------
+def process_candidate_item(args):
+    candidate_item, profit_mat, weeks = args
+    candidate = candidate_item[0]
+    metrics = candidate_item[2]
+    agg_profit = candidate_item[3]
+    agg_kai = candidate_item[4]
+
+    optimal_leverage, optimal_capital, no_leverage_capital = calc_leverage_metrics(
+        agg_profit, agg_kai, len(candidate)
+    )
+    score_val = scoring_function(agg_profit / len(candidate))
+
+    # 计算组合内各策略间的稳健相关性
+    correlations = []
+    for (i, j) in itertools.combinations(candidate, 2):
+        corr_val = compute_robust_correlation(profit_mat[i], profit_mat[j])
+        correlations.append(corr_val)
+    if correlations:
+        max_corr = max(correlations)
+        min_corr = min(correlations)
+        avg_corr = np.mean(correlations)
+    else:
+        max_corr = min_corr = avg_corr = 0
+
+    merged_info = {
+        "k": len(candidate),
+        "weekly_loss_rate": metrics["weekly_loss_rate"],
+        "active_week_ratio": metrics["active_week_ratio"],
+        "weekly_net_profit_sum": metrics["weekly_net_profit_sum"],
+        "weekly_net_profit_min": metrics["weekly_net_profit_min"],
+        "weekly_net_profit_max": metrics["weekly_net_profit_max"],
+        "weekly_net_profit_std": metrics["weekly_net_profit_std"],
+        "optimal_leverage": optimal_leverage,
+        "optimal_capital": optimal_capital,
+        "capital_no_leverage": no_leverage_capital,
+        "score": score_val,
+        "max_correlation": max_corr,
+        "min_correlation": min_corr,
+        "avg_correlation": avg_corr,
+    }
+    result_item = {"strategies": candidate}
+    for key, value in merged_info.items():
+        result_item[f"{key}_merged"] = value
+    return result_item
+
+
 # -------------------- Beam-Search 多 k 并行扩展 -------------------- #
 def beam_search_multi_k(profit_mat: np.ndarray,
                         kai_mat: np.ndarray,
@@ -271,7 +347,8 @@ def beam_search_multi_k(profit_mat: np.ndarray,
             beam = heapq.nsmallest(beam_width, new_beam, key=lambda x: objective_func(x[2]))
             layer_results[current_k] = beam
             gc.collect()
-            print(f"Layer {current_k} 扩展完成，耗时 {time.time() - start_time:.2f} 秒，候选数：{len(beam)} 当前时间：{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
+            print(
+                f"Layer {current_k} 扩展完成，耗时 {time.time() - start_time:.2f} 秒，候选数：{len(beam)} 当前时间：{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
 
     return layer_results
 
@@ -283,12 +360,13 @@ def choose_zuhe_beam_opt():
 
     1. 根据实例名称读取策略数据；
     2. 针对每个实例采用并行 Beam-Search 寻找最优组合；
-    3. 计算每个组合的各项指标及杠杆指标，
+    3. 对 Beam-Search 结果进行统计操作（包括计算杠杆指标、评分和组合内各策略间相关性），
+       该统计操作使用多进程并行处理。
     4. 最终将聚合结果保存为 parquet 文件。
     """
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
     max_k = 100
-    beam_width = 10000  # 根据内存情况调整
+    beam_width = 1000  # 根据内存情况调整
     type_list = ['all', 'all_short']
     # 目标函数：使用 -score 使得得分越高的候选更优
     objective = lambda m: -m["score"]
@@ -329,36 +407,17 @@ def choose_zuhe_beam_opt():
                                          objective_func=objective)
             print(f"Beam-Search 用时 {time.time() - t0:.2f} 秒")
 
-            results = []
-            # 遍历所有层（跳过单一策略组合 k=1）
+            # 将所有候选组合（k>=2）合并成一个列表，方便并行处理统计操作
+            all_candidates = []
             for k, beam in layers.items():
                 if k < 2:
                     continue
-                for candidate_item in beam:
-                    candidate = candidate_item[0]
-                    metrics = candidate_item[2]
-                    agg_profit = candidate_item[3]
-                    agg_kai = candidate_item[4]
-                    optimal_leverage, optimal_capital, no_leverage_capital = calc_leverage_metrics(
-                        agg_profit, agg_kai, len(candidate))
-                    score_val = scoring_function(agg_profit / len(candidate))
-                    merged_info = {
-                        "k": k,
-                        "weekly_loss_rate": metrics["weekly_loss_rate"],
-                        "active_week_ratio": metrics["active_week_ratio"],
-                        "weekly_net_profit_sum": metrics["weekly_net_profit_sum"],
-                        "weekly_net_profit_min": metrics["weekly_net_profit_min"],
-                        "weekly_net_profit_max": metrics["weekly_net_profit_max"],
-                        "weekly_net_profit_std": metrics["weekly_net_profit_std"],
-                        "optimal_leverage": optimal_leverage,
-                        "optimal_capital": optimal_capital,
-                        "capital_no_leverage": no_leverage_capital,
-                        "score": score_val,
-                    }
-                    result_item = {"strategies": candidate}
-                    for key, value in merged_info.items():
-                        result_item[f"{key}_merged"] = value
-                    results.append(result_item)
+                all_candidates.extend(beam)
+
+            # 使用多进程对候选组合进行统计计算（包括杠杆指标、评分和各策略间相关性）
+            with concurrent.futures.ProcessPoolExecutor(max_workers=25) as stat_pool:
+                tasks = [(candidate_item, profit_mat, weeks) for candidate_item in all_candidates]
+                results = list(stat_pool.map(process_candidate_item, tasks))
 
             if not results:
                 print(f"{inst} 未产生任何组合结果。")
