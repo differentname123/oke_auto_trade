@@ -9,7 +9,6 @@ import pandas as pd
 import concurrent.futures
 from scipy.stats import spearmanr
 
-
 # -------------------- 稳健相关性计算函数 -------------------- #
 def compute_robust_correlation(array1, array2):
     """
@@ -33,14 +32,12 @@ def compute_robust_correlation(array1, array2):
         spearman_corr = 0
     return (pearson_corr + spearman_corr) / 2
 
-
 # -------------------- 旧评分函数 -------------------- #
 def scoring_function_old(avg_profit: np.ndarray) -> float:
     """
     返回各周期平均收益中的最小值。
     """
     return float(avg_profit.min())
-
 
 # -------------------- 新评分函数 -------------------- #
 def scoring_function(weekly_net_profit_detail: np.ndarray) -> float:
@@ -114,7 +111,6 @@ def scoring_function(weekly_net_profit_detail: np.ndarray) -> float:
                    weights["S"] * score_S)
     return float(np.clip(total_score, 0, 100))
 
-
 # -------------------- 计算指标函数（不含杠杆计算） -------------------- #
 def calc_metrics_with_cache(agg_profit: np.ndarray,
                             agg_kai: np.ndarray,
@@ -147,7 +143,6 @@ def calc_metrics_with_cache(agg_profit: np.ndarray,
         "weekly_net_profit_max": active_avg.max(),
         "weekly_net_profit_std": active_avg.std(),
     }
-
 
 # -------------------- 杠杆指标计算函数 -------------------- #
 def calc_leverage_metrics(agg_profit: np.ndarray,
@@ -185,7 +180,6 @@ def calc_leverage_metrics(agg_profit: np.ndarray,
 
     return optimal_leverage, optimal_capital, capital_no_leverage
 
-
 # -------------------- 基于累计数组计算指标（利用缓存） -------------------- #
 def calc_metrics_from_agg(agg_profit: np.ndarray, agg_kai: np.ndarray, cand_length: int, n_weeks: int) -> dict:
     """
@@ -196,12 +190,10 @@ def calc_metrics_from_agg(agg_profit: np.ndarray, agg_kai: np.ndarray, cand_leng
     metrics["score"] = scoring_function(avg_profit)
     return metrics
 
-
 # -------------------- 全局变量及并行初始化 -------------------- #
 # 在子进程中使用全局变量来避免重复传递大数据
 GLOBAL_PROFIT_MAT = None
 GLOBAL_KAI_MAT = None
-
 
 def init_worker(profit, kai):
     """
@@ -210,7 +202,6 @@ def init_worker(profit, kai):
     global GLOBAL_PROFIT_MAT, GLOBAL_KAI_MAT
     GLOBAL_PROFIT_MAT = profit
     GLOBAL_KAI_MAT = kai
-
 
 # -------------------- 候选项扩展函数 -------------------- #
 def expand_candidate(parent, n_strategies, current_k, n_weeks):
@@ -236,7 +227,6 @@ def expand_candidate(parent, n_strategies, current_k, n_weeks):
         new_candidates.append((new_candidate, nxt, new_metrics, new_agg_profit, new_agg_kai))
     return new_candidates
 
-
 # --------------------
 # 全局工作函数，用于并行扩展候选项
 # 参数以一个元组传入，避免局部 lambda 导致的 pickle 问题
@@ -245,14 +235,14 @@ def expand_candidate_worker(args):
     parent, n_strategies, current_k, n_weeks = args
     return expand_candidate(parent, n_strategies, current_k, n_weeks)
 
-
 # --------------------
 # 对单个候选组合进行统计计算的函数
 # 该函数将计算杠杆指标、评分，以及组合内各策略之间的稳健相关性，
 # 并返回一个包含统计信息的字典
 # --------------------
+# 注意：相关性计算部分已修改，改为直接查找预先计算的相关性
 def process_candidate_item(args):
-    candidate_item, profit_mat, weeks = args
+    candidate_item, weeks = args
     candidate = candidate_item[0]
     metrics = candidate_item[2]
     agg_profit = candidate_item[3]
@@ -263,11 +253,8 @@ def process_candidate_item(args):
     )
     score_val = scoring_function(agg_profit / len(candidate))
 
-    # 计算组合内各策略间的稳健相关性
-    correlations = []
-    for (i, j) in itertools.combinations(candidate, 2):
-        corr_val = compute_robust_correlation(profit_mat[i], profit_mat[j])
-        correlations.append(corr_val)
+    # 使用预先计算的相关性字典 GLOBAL_CORR_DICT 直接获取各策略对的相关性
+    correlations = [GLOBAL_CORR_DICT[(i, j)] for (i, j) in itertools.combinations(candidate, 2)]
     if correlations:
         max_corr = max(correlations)
         min_corr = min(correlations)
@@ -296,6 +283,30 @@ def process_candidate_item(args):
         result_item[f"{key}_merged"] = value
     return result_item
 
+# --------------------
+# 初始化统计候选组合时进程池全局变量（传入 profit_mat 与相关性字典）
+# --------------------
+GLOBAL_CORR_DICT = {}
+def init_worker_stat(profit, corr_dict):
+    global GLOBAL_PROFIT_MAT, GLOBAL_CORR_DICT
+    GLOBAL_PROFIT_MAT = profit
+    GLOBAL_CORR_DICT = corr_dict
+
+# --------------------
+# 用于预计算策略对相关性的进程池初始化函数
+# --------------------
+GLOBAL_PROFIT_FOR_CORR = None
+def init_worker_corr(profit):
+    global GLOBAL_PROFIT_FOR_CORR
+    GLOBAL_PROFIT_FOR_CORR = profit
+
+# --------------------
+# 计算策略对相关性的工作函数
+# --------------------
+def compute_pair_correlation(pair):
+    global GLOBAL_PROFIT_FOR_CORR
+    i, j = pair
+    return (i, j), compute_robust_correlation(GLOBAL_PROFIT_FOR_CORR[i], GLOBAL_PROFIT_FOR_CORR[j])
 
 # -------------------- Beam-Search 多 k 并行扩展 -------------------- #
 def beam_search_multi_k(profit_mat: np.ndarray,
@@ -352,7 +363,6 @@ def beam_search_multi_k(profit_mat: np.ndarray,
 
     return layer_results
 
-
 # -------------------- 主流程 -------------------- #
 def choose_zuhe_beam_opt():
     """
@@ -361,21 +371,21 @@ def choose_zuhe_beam_opt():
     1. 根据实例名称读取策略数据；
     2. 针对每个实例采用并行 Beam-Search 寻找最优组合；
     3. 对 Beam-Search 结果进行统计操作（包括计算杠杆指标、评分和组合内各策略间相关性），
-       该统计操作使用多进程并行处理。
+       该统计操作使用多进程并行处理，并通过预先计算相关性来避免重复计算。
     4. 最终将聚合结果保存为 parquet 文件。
     """
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
     max_k = 100
-    beam_width = 1000  # 根据内存情况调整
+    beam_width = 10000  # 根据内存情况调整
     type_list = ['all', 'all_short']
     # 目标函数：使用 -score 使得得分越高的候选更优
     objective = lambda m: -m["score"]
 
     out_dir = Path("temp_back")
     out_dir.mkdir(parents=True, exist_ok=True)
-    for type in type_list:
+    for typ in type_list:
         for inst in inst_id_list:
-            elements_path = out_dir / f"result_elements_{inst}_{beam_width}_{type}.parquet"
+            elements_path = out_dir / f"result_elements_{inst}_{beam_width}_{typ}.parquet"
 
             # 如果历史文件存在，则加载提示
             if elements_path.exists():
@@ -384,10 +394,10 @@ def choose_zuhe_beam_opt():
                     elements_df['std_score'] = (elements_df['weekly_net_profit_std_merged'] /
                                                 elements_df['weekly_net_profit_sum_merged'])
                 print(f"已找到 {inst} 的历史结果文件：{elements_path}")
-                continue
+                # continue
 
             print(f"\n==== 处理 {inst} ====")
-            df_path = Path(f"temp_back/{inst}_True_{type}_filter_similar_strategy.parquet")
+            df_path = Path(f"temp_back/{inst}_True_{typ}_filter_similar_strategy.parquet")
             if not df_path.exists():
                 print(f"未找到文件 {df_path}，跳过该实例。")
                 continue
@@ -414,9 +424,31 @@ def choose_zuhe_beam_opt():
                     continue
                 all_candidates.extend(beam)
 
+            # --------------------
+            # 预先计算所有候选组合中需要使用到的策略对相关性，避免重复计算
+            # --------------------
+            unique_pairs = set()
+            for candidate_item in all_candidates:
+                candidate = candidate_item[0]
+                for pair in itertools.combinations(candidate, 2):
+                    unique_pairs.add(pair)
+            print(f"需要计算的唯一策略对数量：{len(unique_pairs)}")
+
+            with concurrent.futures.ProcessPoolExecutor(max_workers=25,
+                                                         initializer=init_worker_corr,
+                                                         initargs=(profit_mat,)) as corr_pool:
+                correlation_results = list(corr_pool.map(compute_pair_correlation, list(unique_pairs)))
+            correlation_dict = dict(correlation_results)
+            print("预先计算相关性完成。")
+
+            # --------------------
             # 使用多进程对候选组合进行统计计算（包括杠杆指标、评分和各策略间相关性）
-            with concurrent.futures.ProcessPoolExecutor(max_workers=25) as stat_pool:
-                tasks = [(candidate_item, profit_mat, weeks) for candidate_item in all_candidates]
+            # 此时相关性直接通过全局变量 GLOBAL_CORR_DICT 传入
+            # --------------------
+            with concurrent.futures.ProcessPoolExecutor(max_workers=25,
+                                                         initializer=init_worker_stat,
+                                                         initargs=(profit_mat, correlation_dict)) as stat_pool:
+                tasks = [(candidate_item, weeks) for candidate_item in all_candidates]
                 results = list(stat_pool.map(process_candidate_item, tasks))
 
             if not results:
