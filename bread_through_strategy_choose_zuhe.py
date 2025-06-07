@@ -374,7 +374,7 @@ def choose_zuhe_beam_opt():
        该统计操作使用多进程并行处理，并通过预先计算相关性来避免重复计算。
     4. 最终将聚合结果保存为 parquet 文件。
     """
-    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP', 'OKB']
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
     max_k = 100
     beam_width = 10000  # 根据内存情况调整
     type_list = ['all', 'all_short']

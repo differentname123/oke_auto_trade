@@ -316,12 +316,12 @@ def filter_similar_strategy_all():
     for inst_id in inst_id_list:
         df_list = []
         for is_reverse in is_reverse_list:
-            data_file = f'temp_back\statistic_results_final_{inst_id}_{is_reverse}_short.parquet'
+            data_file = f'temp_back\statistic_results_final_{inst_id}_{is_reverse}.parquet'
             if not os.path.exists(data_file):
                 print(f'文件不存在，跳过处理：{data_file}')
                 continue
 
-            output_path = f'temp_back/{inst_id}_{is_reverse}_all_short_filter_similar_strategy.parquet'
+            output_path = f'temp_back/{inst_id}_{is_reverse}_all_filter_similar_strategy.parquet'
             # if os.path.exists(output_path):
             #     print(f'文件已存在，跳过处理：{output_path}')
             #     continue
@@ -336,12 +336,12 @@ def filter_similar_strategy_all():
         if len(df_list) == 0:
             continue
         data_df = pd.concat(df_list, ignore_index=True)
-        temp_path = f'temp_back/{inst_id}_all_short.parquet'
+        temp_path = f'temp_back/{inst_id}_all.parquet'
         # if os.path.exists(temp_path):
         #     print(f'文件已存在，跳过处理：{temp_path}')
         #     continue
         data_df = add_side(data_df)
-        data_df = data_df[data_df['side'] == 'sell']
+        data_df = data_df[data_df['side'] == 'buy']
         data_df.to_parquet(temp_path, index=False)
         # if os.path.exists(output_path):
         #     print(f'文件已存在，跳过处理：{output_path}')
