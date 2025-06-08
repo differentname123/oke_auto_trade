@@ -219,7 +219,7 @@ def beam_search_multi_k(profit_mat: np.ndarray,
 
 # -------------------- 主流程 -------------------- #
 def choose_zuhe_beam_opt():
-    inst_id_list = ['DOGE', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
+    inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
     max_k = 100
     beam_width = 100000
     type_list = ["all", "all_short"]
