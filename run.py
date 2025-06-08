@@ -91,6 +91,14 @@ min_count_map = {
     "XRP-USDT-SWAP": 0.01
 }
 max_leverage_map = {
+    "BTC-USDT-SWAP": 100,
+    "ETH-USDT-SWAP": 100,
+    "SOL-USDT-SWAP": 50,
+    "TON-USDT-SWAP": 20,
+    "DOGE-USDT-SWAP": 50,
+    "XRP-USDT-SWAP": 50
+}
+true_leverage_map = {
     "BTC-USDT-SWAP": 10000,
     "ETH-USDT-SWAP": 1000,
     "SOL-USDT-SWAP": 5000,
