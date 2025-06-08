@@ -88,10 +88,16 @@ min_count_map = {
     "SOL-USDT-SWAP": 0.01,
     "TON-USDT-SWAP": 1,
     "DOGE-USDT-SWAP": 0.01,
-    "XRP-USDT-SWAP": 0.01,
-    "PEPE-USDT-SWAP": 0.1
+    "XRP-USDT-SWAP": 0.01
 }
-
+max_leverage_map = {
+    "BTC-USDT-SWAP": 10000,
+    "ETH-USDT-SWAP": 1000,
+    "SOL-USDT-SWAP": 5000,
+    "TON-USDT-SWAP": 20,
+    "DOGE-USDT-SWAP": 0.05,
+    "XRP-USDT-SWAP": 0.5
+}
 
 class InstrumentTrader:
     def __init__(self, instrument):
@@ -598,65 +604,21 @@ class InstrumentTrader:
         except Exception as e:
             log_error("Error in record_closed_order", exc_info=True)
 
-    async def main_trading_loop(self):
+    async def main_trading_loop(self, inst_info):
         # 加载历史订单记录
         self.load_order_detail_map()
-
         # 加载策略数据（例如 parquet 文件）
-        inst_id = self.instrument.split("-")[0]
         all_dfs = []
-        min_capital_no_leverage = 0
-        max_df_list = []
-        max_corr = 0
-        not_close_signal_key = ["abs", "relate", "donchian"]
-        for is_reverse in ['all_short', 'all']:
-            corr_path = f"temp/corr/{inst_id}_{is_reverse}_filter_similar_strategy.parquet_corr_weekly_net_profit_detail.parquet"
-            origin_good_path = f"temp/corr/{inst_id}_{is_reverse}_filter_similar_strategy.parquet_origin_good_weekly_net_profit_detail.parquet"
-            if os.path.exists(origin_good_path):
-                temp_strategy_df = pd.read_parquet(origin_good_path)
-                temp_strategy_df = temp_strategy_df[(temp_strategy_df["capital_no_leverage"] > 3) | (temp_strategy_df["optimal_capital"] > 50)]
-                # 删除kai_column包含not_close_signal_key的行
-                temp_strategy_df = temp_strategy_df[~temp_strategy_df["kai_column"].str.contains("|".join(not_close_signal_key))]
-                # 删除pin_column包含not_close_signal_key的行
-                temp_strategy_df = temp_strategy_df[~temp_strategy_df["pin_column"].str.contains("|".join(not_close_signal_key))]
-
-                correlation_df = pd.read_parquet(corr_path)
-                selected_strategies, selected_correlation_df = select_strategies_optimized(
-                    temp_strategy_df,
-                    correlation_df,
-                    k=30,
-                    penalty_scaler=0.0001,
-                    use_absolute_correlation=True,
-                )
-                max_corr = max(max_corr, selected_correlation_df["Correlation"].max())
-                # 将selected_strategies按照capital_no_leverage降序排列
-                selected_strategies = selected_strategies.sort_values(by="capital_no_leverage", ascending=False)
-                max_selected_strategies = selected_strategies.head(2)
-                max_df_list.append(max_selected_strategies)
-
-                if selected_strategies[selected_strategies["capital_no_leverage"] > 4].shape[0] > 0:
-                    selected_strategies = selected_strategies[selected_strategies["capital_no_leverage"] > 4]
-                    selected_strategies = selected_strategies.sort_values(by="capital_no_leverage", ascending=False)
-
-                capital_no_leverage = selected_strategies["capital_no_leverage"].min()
-                min_capital_no_leverage = max(min_capital_no_leverage, capital_no_leverage)
-                all_dfs.append(selected_strategies)
-                log_info(f"{self.instrument} final_good_df shape: {selected_strategies.shape[0]} 来自 {origin_good_path}")
+        for type in ['all_short', 'all']:
+            selected_strategies = inst_info[type]["strategies"]
+            all_dfs.append(selected_strategies)
+            log_info(f"{self.instrument} final_good_df shape: {selected_strategies.shape[0]}")
         if all_dfs:
             self.strategy_df = pd.concat(all_dfs)
-            self.strategy_df = self.strategy_df[self.strategy_df["capital_no_leverage"] >= min_capital_no_leverage]
-            max_df = pd.concat(max_df_list)
-            self.strategy_df = pd.concat([self.strategy_df, max_df])
-            self.strategy_df = self.strategy_df.drop_duplicates(subset=["kai_column"])
-            self.strategy_df = self.strategy_df.drop_duplicates(subset=["pin_column"])
-            false_df = self.strategy_df[self.strategy_df["is_reverse"] == False]
-            kai_long_count = false_df["kai_column"].str.contains("long").sum()
-            true_df = self.strategy_df[self.strategy_df["is_reverse"] == True]
-            kai_short_count = true_df["kai_column"].str.contains("short").sum()
-            buy_count = kai_long_count + kai_short_count
-            sell_count = len(self.strategy_df) - buy_count
+            buy_count = (self.strategy_df["side"] == "buy").sum()
+            sell_count = (self.strategy_df["side"] == "sell").sum()
             self.strategy_df.to_parquet(f"temp/strategy_df_{self.instrument}.parquet", index=False)
-            log_info(f"【{self.instrument}】策略数据加载成功, 策略数量: {self.strategy_df.shape[0]} 做多信号数量: {buy_count} 做空信号数量: {sell_count} 最大相关系数: {max_corr:.4f} 最小利润: {min_capital_no_leverage:.4f}")
+            log_info(f"【{self.instrument}】策略数据加载成功, 策略数量: {self.strategy_df.shape[0]} 做多信号数量: {buy_count} 做空信号数量: {sell_count}")
         else:
             log_error(f"❌ {self.instrument} 策略数据不存在!")
             return
@@ -684,15 +646,119 @@ class InstrumentTrader:
             # self.websocket_listener(),
         )
 
-def run_instrument(instrument):
+def run_instrument(inst_info):
+    instrument = inst_info['instrument']
     log_info(f"【进程启动】开始处理 {instrument}")
     trader = InstrumentTrader(instrument)
-    asyncio.run(trader.main_trading_loop())
+    asyncio.run(trader.main_trading_loop(inst_info))
+
+def calc_leverage_metrics(agg_profit: np.ndarray,
+                          agg_kai: np.ndarray,
+                          cand_length: int):
+    """
+    根据累计收益数据（仅针对活跃周：kai > 0）计算杠杆指标：
+      - optimal_leverage: 最优整数杠杆
+      - optimal_capital: 在最优杠杆下的累计收益率（初始本金为 1）
+      - capital_no_leverage: 不加杠杆情况下的累计收益率
+    """
+    avg_profit = agg_profit / cand_length
+    active_mask = agg_kai > 0
+    active_count = np.count_nonzero(active_mask)
+
+    if active_count == 0:
+        return np.nan, np.nan, np.nan
+
+    active_avg = avg_profit[active_mask]
+    capital_no_leverage = np.prod(1 + active_avg / 100)
+
+    min_profit = active_avg.min()
+    if min_profit >= 0:
+        max_possible_leverage = 30
+    else:
+        max_possible_leverage = int(1 / (abs(min_profit) / 100))
+
+    L_values = np.arange(1, max_possible_leverage + 1)
+    factors = 1 + np.outer(L_values, active_avg) / 100  # shape: (num_leverages, active_weeks)
+    safe = np.all(factors > 0, axis=1)
+    capitals = np.where(safe, np.prod(factors, axis=1), -np.inf)
+    optimal_index = np.argmax(capitals)
+    optimal_leverage = int(L_values[optimal_index])
+    optimal_capital = capitals[optimal_index]
+
+    return optimal_leverage, optimal_capital, capital_no_leverage
+
+def init():
+    """
+    进行初始化，主要是进行资金的分配，以及每个策略的单次买入数量
+    :return:
+    """
+    total_capital = 1000000  # 总资金
+    final_score_total = 0
+    beam_width = 100000
+    out_dir = 'temp_back'
+    inst_map_info = {}
+    for type in ['all_short', 'all']:
+        temp_info = {}
+        for inst in INSTRUMENT_LIST:
+            inst_id = inst.split("-")[0]
+            elements_path = f"{out_dir}/result_elements_{inst_id}_{beam_width}_{type}_op.parquet"
+            origin_df_path = f"{out_dir}/{inst_id}_True_{type}_filter_similar_strategy.parquet"
+            if not os.path.exists(elements_path) or not os.path.exists(origin_df_path):
+                log_error(f"❌ {inst} 的元素文件或原始数据文件不存在，跳过初始化")
+                continue
+            elements_df = pd.read_parquet(elements_path)
+            origin_df = pd.read_parquet(origin_df_path)
+            elements_df = elements_df.sort_values(by='score_merged', ascending=False)
+            row = elements_df.iloc[0]
+            indices = row['strategies']
+            score_merged = row['score_merged']
+            weekly_net_profit_sum_merged = row['weekly_net_profit_sum_merged']
+            strategies = origin_df.iloc[list(indices)].copy()
+
+            # 将所有 weekly_net_profit_detail 堆叠成一个二维数组
+            weekly_arrays = np.stack(strategies["weekly_net_profit_detail"].values)
+            weekly_count_arrays = np.stack(strategies["weekly_kai_count_detail"].values)
+
+            # 计算按列（每周）平均
+            average_weekly_net_profit_detail = weekly_arrays.mean(axis=0)
+            average_weekly_kai_count_detail = weekly_count_arrays.mean(axis=0)
+            optimal_leverage, optimal_capital, no_leverage_capital = calc_leverage_metrics(average_weekly_net_profit_detail, average_weekly_kai_count_detail, 1)
+
+
+            final_score = weekly_net_profit_sum_merged / score_merged
+            temp_info[inst] = {
+                'strategies': strategies,
+                'score_merged': score_merged,
+                'weekly_net_profit_sum_merged': weekly_net_profit_sum_merged,
+                'final_score': final_score,
+                'optimal_leverage':optimal_leverage,
+                'optimal_capital':optimal_capital,
+                'no_leverage_capital': no_leverage_capital
+            }
+            final_score_total += final_score
+        inst_map_info[type] = temp_info
+    # 计算每一个final_score占总共的百分比
+    for type, inst_info in inst_map_info.items():
+        for inst, info in inst_info.items():
+            final_score = info['final_score']
+            percent = final_score / final_score_total
+            capital_no_leverage = total_capital * percent
+            info['capital_no_leverage'] = capital_no_leverage
+            log_info(f"【{inst}】策略 {type} 的最终得分: {final_score:.4f}, 占比: {percent:.4%}, 分配资金: {capital_no_leverage:.2f}")
+    print(f"总的 final_score: {final_score_total:.4f}")
+    return inst_map_info
+
+
 
 if __name__ == "__main__":
+    inst_map_info = init()
     processes = []
     for instr in INSTRUMENT_LIST:
-        p = multiprocessing.Process(target=run_instrument, args=(instr,))
+        temp_inst_info = {}
+        temp_inst_info['instrument'] = instr
+        temp_inst_info['all'] = inst_map_info['all'][instr]
+        temp_inst_info['all_short'] = inst_map_info['all_short'][instr]
+        p = multiprocessing.Process(target=run_instrument, args=(temp_inst_info,))
         p.start()
         processes.append(p)
         time.sleep(10)  # 在启动下一个进程前暂停10秒
