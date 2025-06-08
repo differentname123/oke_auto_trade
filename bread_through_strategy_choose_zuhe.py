@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-优化版本（修正版）：
+优化版本（支持通过 is_merged 控制是否先合并后处理）：
   · beam_search_multi_k 取消节点大数组
   · 使用 shared_memory 零拷贝
-  · 通过 mp_context 参数正确创建 ProcessPoolExecutor
+  · 当 is_merged=True 时，合并同一 inst_id 的多个类型文件，然后再做后续处理；
+    当 is_merged=False 时，对每种 type 单独处理。
 """
 import itertools
 import os
@@ -34,7 +35,6 @@ def compute_robust_correlation(array1, array2):
     if np.isnan(spearman_corr):
         spearman_corr = 0.0
     return float((pearson_corr + spearman_corr) / 2)
-
 
 # -------------------- 评分函数 -------------------- #
 def scoring_function(weekly_net_profit_detail: np.ndarray) -> float:
@@ -79,7 +79,6 @@ def scoring_function(weekly_net_profit_detail: np.ndarray) -> float:
     )
     return float(np.clip(total_score, 0, 100))
 
-
 # -------------------- 根据 indices 计算指标 -------------------- #
 def aggregate_and_metrics(indices: tuple,
                           profit_mat: np.ndarray,
@@ -115,25 +114,21 @@ def aggregate_and_metrics(indices: tuple,
     metrics["score"] = scoring_function(avg_profit)
     return metrics
 
-
 # -------------------- 共享内存工具 -------------------- #
 def _to_shared(arr: np.ndarray):
     shm = shared_memory.SharedMemory(create=True, size=arr.nbytes)
     np.ndarray(arr.shape, dtype=arr.dtype, buffer=shm.buf)[:] = arr
-    return shm, (arr.shape, arr.dtype.str)  # dtype.str 比 str(arr.dtype) 更紧凑
-
+    return shm, (arr.shape, arr.dtype.str)
 
 def _attach_shared(name: str, shape, dtype_str):
     shm = shared_memory.SharedMemory(name=name, create=False)
     array = np.ndarray(shape, dtype=np.dtype(dtype_str), buffer=shm.buf)
     return shm, array
 
-
 # -------------------- worker 初始化 -------------------- #
 GLOBAL_PROFIT = None
 GLOBAL_KAI = None
 GLOBAL_SHM = []
-
 
 def init_worker_shared(p_name, p_shape, p_dtype,
                        k_name, k_shape, k_dtype):
@@ -144,20 +139,15 @@ def init_worker_shared(p_name, p_shape, p_dtype,
     GLOBAL_KAI = arr_k
     GLOBAL_SHM = [shm_p, shm_k]
 
-
 # -------------------- 单个父节点扩展 -------------------- #
 def expand_single_parent(args):
-    (parent_tuple, last_idx, n_strategies,
-     current_k, n_weeks) = args
+    (parent_tuple, last_idx, n_strategies, current_k, n_weeks) = args
     out = []
     for nxt in range(last_idx + 1, n_strategies):
         child = parent_tuple + (nxt,)
-        metrics = aggregate_and_metrics(
-            child, GLOBAL_PROFIT, GLOBAL_KAI, n_weeks
-        )
+        metrics = aggregate_and_metrics(child, GLOBAL_PROFIT, GLOBAL_KAI, n_weeks)
         out.append((child, nxt, metrics))
     return out
-
 
 # -------------------- Beam-Search -------------------- #
 def beam_search_multi_k(profit_mat: np.ndarray,
@@ -174,7 +164,7 @@ def beam_search_multi_k(profit_mat: np.ndarray,
     ctx = get_context("spawn")
     with concurrent.futures.ProcessPoolExecutor(
         max_workers=min(os.cpu_count(), 30),
-        mp_context=ctx,                      # 关键修正
+        mp_context=ctx,
         initializer=init_worker_shared,
         initargs=(shm_profit.name, *profit_meta,
                   shm_kai.name, *kai_meta),
@@ -202,52 +192,69 @@ def beam_search_multi_k(profit_mat: np.ndarray,
             new_candidates = list(itertools.chain.from_iterable(futures))
             if not new_candidates:
                 break
-            beam = heapq.nsmallest(
-                beam_width, new_candidates, key=lambda x: objective_func(x[2])
-            )
+            beam = heapq.nsmallest(beam_width, new_candidates, key=lambda x: objective_func(x[2]))
             layer_results[current_k] = beam
             gc.collect()
-            print(
-                f"完成 Layer {current_k}，用时 {time.time() - t0:.2f}s，保留 {len(beam)} 条"
-            )
+            print(f"完成 Layer {current_k}，用时 {time.time() - t0:.2f}s，保留 {len(beam)} 条")
 
     # 清理共享内存
     shm_profit.close(); shm_profit.unlink()
     shm_kai.close(); shm_kai.unlink()
     return layer_results
 
-
 # -------------------- 主流程 -------------------- #
 def choose_zuhe_beam_opt():
+    # 开关：为 True 时先合并，再后续处理；否则按各类型单独处理。
+    is_merged = False
+
+    # 需要处理的 inst_id 列表
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
+    # 待合并的类型（如果 is_merged=False，则对每种类型单独处理）
+    type_list = ["all", "all_short"]
     max_k = 100
     beam_width = 100000
-    type_list = ["all", "all_short"]
     objective = lambda m: -m["score"]
     out_dir = Path("temp_back")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for typ in type_list:
+    if is_merged:
+        print("采用合并模式：对同一 inst_id 的所有类型先合并后处理")
         for inst in inst_id_list:
-            elements_path = out_dir / f"result_elements_{inst}_{beam_width}_{typ}_op.parquet"
-            print(f"\n==== 处理 {inst} ({typ}) ====")
-            df_path = Path(f"temp_back/{inst}_True_{typ}_filter_similar_strategy.parquet")
-            if not df_path.exists():
-                print(f"文件缺失 {df_path}，跳过")
-                continue
+            print(f"\n==== 处理 {inst} 合并类型 ====")
+            merged_file_path = out_dir / f"{inst}_merged_data.parquet"
+
+            # 合并逻辑：如果合并文件不存在，则加载各类型数据后合并保存
+            if not merged_file_path.exists():
+                df_list = []
+                for typ in type_list:
+                    df_path = out_dir / f"{inst}_True_{typ}_filter_similar_strategy.parquet"
+                    if not df_path.exists():
+                        print(f"文件缺失 {df_path}，跳过该类型")
+                        continue
+                    print(f"载入 {df_path}")
+                    df = pd.read_parquet(df_path)
+                    print(f"{df_path} 策略条数：{len(df)}")
+                    df_list.append(df)
+                if len(df_list) == 0:
+                    print(f"{inst} 无任何类型数据，跳过")
+                    continue
+                merged_df = pd.concat(df_list, ignore_index=True)
+                merged_df.to_parquet(merged_file_path, index=False)
+                print(f"写入合并文件 {merged_file_path}（{len(merged_df)} 行）")
+            else:
+                print(f"合并文件 {merged_file_path} 已存在，直接载入")
+                merged_df = pd.read_parquet(merged_file_path)
+
+            # 对合并后的数据进行处理
+            elements_path = out_dir / f"result_elements_{inst}_{beam_width}_merged_op.parquet"
             if os.path.exists(elements_path):
-                print(f"已存在 {elements_path}，跳过")
+                print(f"结果文件 {elements_path} 已存在，跳过处理")
                 continue
 
-            df = pd.read_parquet(df_path)
-            print(f"策略条数：{len(df)}")
-            weeks = len(df.iloc[0]["weekly_net_profit_detail"])
-            profit_mat = np.stack(df["weekly_net_profit_detail"].to_numpy()).astype(
-                np.float32
-            )
-            kai_mat = np.stack(df["weekly_kai_count_detail"].to_numpy()).astype(
-                np.float32
-            )
+            print(f"开始处理 {inst} 合并数据，策略条数: {len(merged_df)}")
+            weeks = len(merged_df.iloc[0]["weekly_net_profit_detail"])
+            profit_mat = np.stack(merged_df["weekly_net_profit_detail"].to_numpy()).astype(np.float32)
+            kai_mat = np.stack(merged_df["weekly_kai_count_detail"].to_numpy()).astype(np.float32)
 
             t0 = time.time()
             layers = beam_search_multi_k(
@@ -257,17 +264,13 @@ def choose_zuhe_beam_opt():
             print(f"Beam-Search 完成, 用时 {time.time() - t0:.1f}s")
 
             # -------- 后续统计 ----------
-            all_candidates = [
-                item for k, layer in layers.items() if k >= 2 for item in layer
-            ]
+            all_candidates = [item for k, layer in layers.items() if k >= 2 for item in layer]
             if not all_candidates:
                 print("无组合结果")
                 continue
 
             unique_pairs = {
-                pair
-                for item in all_candidates
-                for pair in itertools.combinations(item[0], 2)
+                pair for item in all_candidates for pair in itertools.combinations(item[0], 2)
             }
             print(f"需计算相关性对数：{len(unique_pairs)}")
 
@@ -284,9 +287,7 @@ def choose_zuhe_beam_opt():
 
             results = []
             for cand, _, m in all_candidates:
-                corr_lst = [
-                    corr_dict[pair] for pair in itertools.combinations(cand, 2)
-                ] or [0]
+                corr_lst = [corr_dict[pair] for pair in itertools.combinations(cand, 2)] or [0]
                 res = {
                     "strategies": cand,
                     "k": len(cand),
@@ -300,7 +301,73 @@ def choose_zuhe_beam_opt():
             df_out = pd.DataFrame(results)
             df_out.to_parquet(elements_path, index=False)
             print(f"写入 {elements_path} OK （{len(df_out)} 行）")
+    else:
+        print("采用非合并模式：对每种 type 数据单独处理")
+        for typ in type_list:
+            for inst in inst_id_list:
+                print(f"\n==== 处理 {inst} ({typ}) ====")
+                elements_path = out_dir / f"result_elements_{inst}_{beam_width}_{typ}_op.parquet"
+                if os.path.exists(elements_path):
+                    print(f"结果文件 {elements_path} 已存在，跳过处理")
+                    continue
 
+                df_path = out_dir / f"{inst}_True_{typ}_filter_similar_strategy.parquet"
+                if not df_path.exists():
+                    print(f"文件缺失 {df_path}，跳过")
+                    continue
+
+                print(f"载入 {df_path}")
+                df = pd.read_parquet(df_path)
+                print(f"{df_path} 策略条数：{len(df)}")
+                weeks = len(df.iloc[0]["weekly_net_profit_detail"])
+                profit_mat = np.stack(df["weekly_net_profit_detail"].to_numpy()).astype(np.float32)
+                kai_mat = np.stack(df["weekly_kai_count_detail"].to_numpy()).astype(np.float32)
+
+                t0 = time.time()
+                layers = beam_search_multi_k(
+                    profit_mat, kai_mat, max_k=max_k,
+                    beam_width=beam_width, objective_func=objective
+                )
+                print(f"Beam-Search 完成, 用时 {time.time() - t0:.1f}s")
+
+                # -------- 后续统计 ----------
+                all_candidates = [item for k, layer in layers.items() if k >= 2 for item in layer]
+                if not all_candidates:
+                    print("无组合结果")
+                    continue
+
+                unique_pairs = {
+                    pair for item in all_candidates for pair in itertools.combinations(item[0], 2)
+                }
+                print(f"需计算相关性对数：{len(unique_pairs)}")
+
+                from concurrent.futures import ThreadPoolExecutor
+                corr_dict = {}
+                with ThreadPoolExecutor(max_workers=32) as th_pool:
+                    for key, val in th_pool.map(
+                        lambda pair: (pair, compute_robust_correlation(
+                            profit_mat[pair[0]], profit_mat[pair[1]]
+                        )),
+                        unique_pairs,
+                    ):
+                        corr_dict[key] = val
+
+                results = []
+                for cand, _, m in all_candidates:
+                    corr_lst = [corr_dict[pair] for pair in itertools.combinations(cand, 2)] or [0]
+                    res = {
+                        "strategies": cand,
+                        "k": len(cand),
+                        **{f"{k}_{typ}": v for k, v in m.items()},
+                        "max_correlation": max(corr_lst),
+                        "min_correlation": min(corr_lst),
+                        "avg_correlation": float(np.mean(corr_lst)),
+                    }
+                    results.append(res)
+
+                df_out = pd.DataFrame(results)
+                df_out.to_parquet(elements_path, index=False)
+                print(f"写入 {elements_path} OK （{len(df_out)} 行）")
 
 if __name__ == "__main__":
     choose_zuhe_beam_opt()
