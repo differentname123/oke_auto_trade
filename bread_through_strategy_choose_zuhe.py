@@ -68,7 +68,7 @@ def scoring_function(weekly_net_profit_detail: np.ndarray) -> float:
     score_MDD = 100 * np.exp(-mdd_pct / tau4)
     score_S = 100 * (1 - np.exp(-sortino / kappa)) if np.isfinite(sortino) else 100
 
-    w = {"W": 0.45, "L": 0.25, "DS": 0.05, "STD": 0.05, "MDD": 0.10, "S": 0.10}
+    w = {"W": 0.65, "L": 0.25, "DS": 0.01, "STD": 0.01, "MDD": 0.01, "S": 0.01}
     total_score = (
         w["W"] * score_W
         + w["L"] * score_L
@@ -224,29 +224,27 @@ def choose_zuhe_beam_opt():
             merged_file_path = out_dir / f"{inst}_merged_data.parquet"
 
             # 合并逻辑：如果合并文件不存在，则加载各类型数据后合并保存
-            if not merged_file_path.exists():
-                df_list = []
-                for typ in type_list:
-                    df_path = out_dir / f"{inst}_True_{typ}_filter_similar_strategy.parquet"
-                    if not df_path.exists():
-                        print(f"文件缺失 {df_path}，跳过该类型")
-                        continue
-                    print(f"载入 {df_path}")
-                    df = pd.read_parquet(df_path)
-                    print(f"{df_path} 策略条数：{len(df)}")
-                    df_list.append(df)
-                if len(df_list) == 0:
-                    print(f"{inst} 无任何类型数据，跳过")
+            df_list = []
+            for typ in type_list:
+                df_path = out_dir / f"{inst}_True_{typ}_filter_similar_strategy.parquet"
+                if not df_path.exists():
+                    print(f"文件缺失 {df_path}，跳过该类型")
                     continue
-                merged_df = pd.concat(df_list, ignore_index=True)
-                merged_df.to_parquet(merged_file_path, index=False)
-                print(f"写入合并文件 {merged_file_path}（{len(merged_df)} 行）")
-            else:
-                print(f"合并文件 {merged_file_path} 已存在，直接载入")
-                merged_df = pd.read_parquet(merged_file_path)
+                print(f"载入 {df_path}")
+                df = pd.read_parquet(df_path)
+                print(f"{df_path} 策略条数：{len(df)}")
+                df_list.append(df)
+            if len(df_list) == 0:
+                print(f"{inst} 无任何类型数据，跳过")
+                continue
+            merged_df = pd.concat(df_list, ignore_index=True)
+            merged_df.to_parquet(merged_file_path, index=False)
+            beam_width = int( 2000 * 100000 / len(merged_df))
+            print(f"写入合并文件 {merged_file_path}（{len(merged_df)} 行）  {beam_width}")
+
 
             # 对合并后的数据进行处理
-            elements_path = out_dir / f"result_elements_{inst}_{beam_width}_merged_op.parquet"
+            elements_path = out_dir / f"result_elements_{inst}_adp_merged_op.parquet"
             if os.path.exists(elements_path):
                 print(f"结果文件 {elements_path} 已存在，跳过处理")
                 continue
@@ -305,11 +303,7 @@ def choose_zuhe_beam_opt():
         print("采用非合并模式：对每种 type 数据单独处理")
         for typ in type_list:
             for inst in inst_id_list:
-                print(f"\n==== 处理 {inst} ({typ}) ====")
-                elements_path = out_dir / f"result_elements_{inst}_{beam_width}_{typ}_op.parquet"
-                if os.path.exists(elements_path):
-                    print(f"结果文件 {elements_path} 已存在，跳过处理")
-                    continue
+
 
                 df_path = out_dir / f"{inst}_True_{typ}_filter_similar_strategy.parquet"
                 if not df_path.exists():
@@ -319,6 +313,13 @@ def choose_zuhe_beam_opt():
                 print(f"载入 {df_path}")
                 df = pd.read_parquet(df_path)
                 print(f"{df_path} 策略条数：{len(df)}")
+                beam_width = int(2000 * 100000 / len(df))
+                print(f"\n==== 处理 {inst} ({typ}) ====")
+                elements_path = out_dir / f"result_elements_{inst}_adp_{typ}_op.parquet"
+                if os.path.exists(elements_path):
+                    print(f"结果文件 {elements_path} 已存在，跳过处理")
+                    continue
+                print(f"开始处理 {inst} ({typ}) 数据，策略条数: {len(df)}  {elements_path}" )
                 weeks = len(df.iloc[0]["weekly_net_profit_detail"])
                 profit_mat = np.stack(df["weekly_net_profit_detail"].to_numpy()).astype(np.float32)
                 kai_mat = np.stack(df["weekly_kai_count_detail"].to_numpy()).astype(np.float32)
@@ -358,10 +359,10 @@ def choose_zuhe_beam_opt():
                     res = {
                         "strategies": cand,
                         "k": len(cand),
-                        **{f"{k}_{typ}": v for k, v in m.items()},
-                        "max_correlation": max(corr_lst),
-                        "min_correlation": min(corr_lst),
-                        "avg_correlation": float(np.mean(corr_lst)),
+                        **{f"{k}_merged": v for k, v in m.items()},
+                        "max_correlation_merged": max(corr_lst),
+                        "min_correlation_merged": min(corr_lst),
+                        "avg_correlation_merged": float(np.mean(corr_lst)),
                     }
                     results.append(res)
 
