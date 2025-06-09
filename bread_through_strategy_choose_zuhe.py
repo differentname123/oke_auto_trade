@@ -68,7 +68,7 @@ def scoring_function(weekly_net_profit_detail: np.ndarray) -> float:
     score_MDD = 100 * np.exp(-mdd_pct / tau4)
     score_S = 100 * (1 - np.exp(-sortino / kappa)) if np.isfinite(sortino) else 100
 
-    w = {"W": 0.65, "L": 0.25, "DS": 0.01, "STD": 0.01, "MDD": 0.01, "S": 0.01}
+    w = {"W": 0.45, "L": 0.25, "DS": 0.05, "STD": 0.05, "MDD": 0.10, "S": 0.10}
     total_score = (
         w["W"] * score_W
         + w["L"] * score_L
@@ -319,7 +319,6 @@ def choose_zuhe_beam_opt():
                 if os.path.exists(elements_path):
                     print(f"结果文件 {elements_path} 已存在，跳过处理")
                     continue
-                print(f"开始处理 {inst} ({typ}) 数据，策略条数: {len(df)}  {elements_path}" )
                 weeks = len(df.iloc[0]["weekly_net_profit_detail"])
                 profit_mat = np.stack(df["weekly_net_profit_detail"].to_numpy()).astype(np.float32)
                 kai_mat = np.stack(df["weekly_kai_count_detail"].to_numpy()).astype(np.float32)
