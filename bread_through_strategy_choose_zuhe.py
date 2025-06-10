@@ -239,7 +239,7 @@ def choose_zuhe_beam_opt():
                 continue
             merged_df = pd.concat(df_list, ignore_index=True)
             merged_df.to_parquet(merged_file_path, index=False)
-            beam_width = int(1000 * 100000 / len(merged_df))
+            beam_width = int(2000 * 100000 / len(merged_df))
             print(f"写入合并文件 {merged_file_path}（{len(merged_df)} 行）  {beam_width}")
 
 
@@ -313,7 +313,7 @@ def choose_zuhe_beam_opt():
                 print(f"载入 {df_path}")
                 df = pd.read_parquet(df_path)
                 print(f"{df_path} 策略条数：{len(df)}")
-                beam_width = int(1000 * 100000 / len(df))
+                beam_width = int(2000 * 100000 / len(df))
                 print(f"\n==== 处理 {inst} ({typ}) ====")
                 elements_path = out_dir / f"result_elements_{inst}_adp_{typ}_op.parquet"
                 if os.path.exists(elements_path):
