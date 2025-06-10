@@ -24,7 +24,8 @@
 动态更新目标价格范围，确保信号判断与交易执行的准确性。
 总体而言，该系统结合了实时 WebSocket 数据、历史行情分析、多种技术指标计算以及自动下单执行，通过异步与多进程协同，实现了多个交易品种的实时自动化交易和订单管理。
 """
-
+import sys
+import subprocess
 import asyncio
 import os
 import time
@@ -35,6 +36,7 @@ import multiprocessing
 
 import numpy as np
 import pandas as pd
+import os, signal
 
 from trade_common import LatestDataManager, place_order, get_train_data, get_total_usdt_equity
 
@@ -77,8 +79,8 @@ def log_error(message, exc_info=False):
 # WebSocket 服务器地址
 OKX_WS_URL = "wss://ws.okx.com:8443/ws/v5/public"
 # 定义需要操作的多个交易对
-# INSTRUMENT_LIST = ["SOL-USDT-SWAP", "BTC-USDT-SWAP", "ETH-USDT-SWAP", "TON-USDT-SWAP", "DOGE-USDT-SWAP", "XRP-USDT-SWAP"]
-INSTRUMENT_LIST = ["BTC-USDT-SWAP"]
+INSTRUMENT_LIST = ["SOL-USDT-SWAP", "BTC-USDT-SWAP", "ETH-USDT-SWAP", "TON-USDT-SWAP", "DOGE-USDT-SWAP", "XRP-USDT-SWAP"]
+# INSTRUMENT_LIST = ["BTC-USDT-SWAP"]
 
 # 各交易对最小下单量映射
 min_count_map = {
@@ -109,17 +111,14 @@ true_leverage_map = {
 class InstrumentTrader:
     def __init__(self, instrument):
         self.instrument = instrument
-        self.min_count = min_count_map.get(instrument, 0) * 1
+        self.min_count = 0.01
         self.order_detail_map = {}
-        self.price = 0.0
-        self.price_list = []
         self.current_minute = None
         self.kai_target_price_info_map = {}
         self.pin_target_price_info_map = {}
         self.kai_pin_map = {}
         self.kai_reverse_map = {}
         self.strategy_df = None
-        self.is_new_minute = True
 
     @staticmethod
     def compute_last_signal(df, col_name):
@@ -338,9 +337,9 @@ class InstrumentTrader:
     def close_order(self, signal_name, price_val):
         keys_to_remove = []
         for kai_key, order in list(self.order_detail_map.items()):
-            current_time_human = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            if current_time_human == order["time"]:
-                log_info(f"当前时间与订单时间相同，跳过平仓: {current_time_human} == {order['time']}")
+            current_minute_timestamp = datetime.datetime.now().minute  # 或者从 df 中获取最新的K线时间
+            if current_minute_timestamp == order["time"]:
+                log_info(f"当前时间与订单时间相同，跳过平仓: {current_minute_timestamp} == {order['time']}")
                 continue
             pin_key = self.kai_pin_map.get(kai_key)
             if pin_key == signal_name:
@@ -392,7 +391,7 @@ class InstrumentTrader:
                         df = origin_df[origin_df["confirm"] == "1"]
                         latest_timestamp = df.iloc[-1]["timestamp"] if not df.empty else None
                         if previous_timestamp is None or latest_timestamp != previous_timestamp:
-                            log_info(f"✅ {self.instrument} 数据已更新, 最新 timestamp: {latest_timestamp} {origin_df.iloc[-1]['close']} 实时最新价格: {self.price} 最新数据的时间: {origin_df.iloc[-1]['timestamp']}")
+                            log_info(f"✅ {self.instrument} 数据已更新, 最新 timestamp: {latest_timestamp}  实时最新价格: {origin_df.iloc[-1]['close']} 最新数据的时间: {origin_df.iloc[-1]['timestamp']}")
                             exist_kai_keys = list(self.order_detail_map.keys())
                             exist_pin_keys = [self.kai_pin_map[k] for k in exist_kai_keys]
                             log_info(f"【{self.instrument}】当前持仓的开仓信号数量: {len(exist_kai_keys)} 平仓信号数量: {len(exist_pin_keys)}")
@@ -444,9 +443,7 @@ class InstrumentTrader:
                                 else:
                                     self.pin_target_price_info_map[pin] = (0, target_price)
 
-                            self.price_list.clear()
                             log_info(f"{self.instrument} 开仓信号个数 {len(self.kai_target_price_info_map)}  详细结果：{self.kai_target_price_info_map} 平仓信号个数{len(self.pin_target_price_info_map)}  详细结果：{self.pin_target_price_info_map}")
-                            self.is_new_minute = True
                             previous_timestamp = latest_timestamp
                             self.current_minute = now.minute
                             break
@@ -458,7 +455,6 @@ class InstrumentTrader:
             except Exception as e:
                 self.pin_target_price_info_map = {}
                 self.kai_target_price_info_map = {}
-                self.is_new_minute = True
                 log_error("Error in fetch_new_data", exc_info=True)
 
     def save_order_detail_map(self):
@@ -615,11 +611,22 @@ def init():
             elements_df = pd.read_parquet(elements_path)
             origin_df = pd.read_parquet(origin_df_path)
             elements_df = elements_df.sort_values(by='score_merged', ascending=False)
-            row = elements_df.iloc[0]
-            indices = row['strategies']
-            score_merged = row['score_merged']
-            weekly_net_profit_sum_merged = row['weekly_net_profit_sum_merged']
-            strategies = origin_df.iloc[list(indices)].copy()
+
+            check_flag = True
+            current_index = 0
+            while check_flag:
+                row = elements_df.iloc[current_index]
+                current_index += 1
+                indices = row['strategies']
+                score_merged = row['score_merged']
+                weekly_net_profit_sum_merged = row['weekly_net_profit_sum_merged']
+                strategies = origin_df.iloc[list(indices)].copy()
+                # 判断strategies是否有重复的kai_column
+                if strategies['kai_column'].duplicated().any():
+                    log_warning(f"❌ {inst} {type} 第{current_index} 的策略中存在重复的开仓信号，请检查数据")
+                    continue
+                else:
+                    check_flag = False
 
             # 将所有 weekly_net_profit_detail 堆叠成一个二维数组
             weekly_arrays = np.stack(strategies["weekly_net_profit_detail"].values)
@@ -662,14 +669,17 @@ def init():
             strategies = info['strategies']
             strategies_len = len(strategies)
             single_trade_count = int(int_number / strategies_len) * min_count
+            if single_trade_count < min_count:
+                single_trade_count = min_count
+                log_info(f"【{inst}】策略 {type} 的单次交易数量 {single_trade_count} 小于最小下单量 {min_count}，已调整为最小下单量")
             strategies['single_trade_count'] = single_trade_count
             log_info(f"【{inst}】策略 {type} 的最终得分: {final_score:.4f}, 占比: {percent:.4%}, 分配资金: {capital_no_leverage:.2f}  最优杠杆 {optimal_leverage} 最优资金 {optimal_capital_no_leverage} 实际杠杆{true_leverage} 最近价格{info['latest_close_price']} 能买的数量{can_buy_number} 策略数量{strategies_len} single_trade_count {single_trade_count}")
     print(f"总的 final_score: {final_score_total:.4f}")
     return inst_map_info
 
 
-
-if __name__ == "__main__":
+def main_logic():
+    """ 包含您原先在 if __name__ == "__main__": 中的所有代码 """
     inst_map_info = init()
     processes = []
     for instr in INSTRUMENT_LIST:
@@ -680,7 +690,11 @@ if __name__ == "__main__":
         p = multiprocessing.Process(target=run_instrument, args=(temp_inst_info,))
         p.start()
         processes.append(p)
-        time.sleep(10)  # 在启动下一个进程前暂停10秒
+        time.sleep(10)
 
     for p in processes:
         p.join()
+
+
+if __name__ == "__main__":
+    main_logic()
