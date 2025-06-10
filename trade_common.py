@@ -355,7 +355,82 @@ def place_order(inst_id, side, size, trade_action="open"):
         print(f"❌ {trade_action.upper()} {side.upper()} 市价单下单失败，错误信息：", e)
         log_order(log_entry)
         return False
+def get_total_usdt_equity():
+    """
+    获取账户总权益的USDT等值。
+    该函数会抓取账户所有币种的余额，并根据当前市价将其换算成USDT价值，最终汇总。
+
+    :param accountAPI: OKX账户API实例
+    :param marketAPI: OKX行情API实例
+    :return: 浮点数，表示账户总权益的USDT价值；如果出错则返回None。
+    """
+    total_usdt_equity = 0.0
+    try:
+        # 1. 获取账户余额信息
+        balance_res = accountAPI.get_account_balance()
+        if balance_res.get("code") != "0":
+            print(f"❌ 获取账户余额失败: {balance_res.get('msg')}")
+            return None
+
+        # 提取账户资产详情
+        details = balance_res.get("data", [{}])[0].get("details", [])
+        if not details:
+            print("ℹ️ 账户中没有资产。")
+            return 0.0
+
+        print("正在计算账户总USDT价值...")
+        # 2. 遍历所有资产并计算其USDT价值
+        for asset in details:
+            currency = asset.get("ccy")
+            equity = float(asset.get("eq", 0))
+
+            # 如果该币种权益为0，则跳过
+            if equity == 0:
+                continue
+
+            # 3. 如果是USDT，直接累加
+            if currency.upper() == "USDT":
+                total_usdt_equity += equity
+                print(f"  - {currency}: {equity:.2f} USDT")
+            else:
+                # 4. 如果是其他币种，获取其对USDT的最新价格并换算
+                inst_id_spot = f"{currency}-USDT"
+                inst_id_swap = f"{currency}-USDT-SWAP"
+                last_price = 0
+
+                try:
+                    # 优先查询现货价格
+                    ticker_res = marketAPI.get_ticker(instId=inst_id_spot)
+                    if ticker_res.get("code") == "0" and ticker_res.get("data"):
+                        last_price = float(ticker_res.get("data")[0].get("last", 0))
+                    else:
+                        # 如果现货价格获取失败，尝试查询永续合约价格
+                        ticker_res_swap = marketAPI.get_ticker(instId=inst_id_swap)
+                        if ticker_res_swap.get("code") == "0" and ticker_res_swap.get("data"):
+                            last_price = float(ticker_res_swap.get("data")[0].get("last", 0))
+                        else:
+                            print(f"⚠️ 无法获取 {inst_id_spot} 或 {inst_id_swap} 的价格，跳过 {currency}。")
+                            continue
+
+                    if last_price > 0:
+                        usdt_value = equity * last_price
+                        total_usdt_equity += usdt_value
+                        print(f"  - {currency}: {equity} * ${last_price:.4f} ≈ {usdt_value:.2f} USDT")
+
+                except Exception as e:
+                    print(f"获取 {currency} 价格时发生错误: {e}")
+
+        return total_usdt_equity
+
+    except Exception as e:
+        print(f"❌ 计算总权益时发生未知错误: {e}")
+        return None
+
 
 if __name__ == '__main__':
     # 获取最新数据
-    place_order("BTC-USDT-SWAP", "sell", 1, trade_action="close")  # 以最优价格开多 0.01 BTC
+    # place_order("BTC-USDT-SWAP", "sell", 1, trade_action="close")  # 以最优价格开多 0.01 BTC
+
+    total_equity = get_total_usdt_equity()
+    if total_equity is not None:
+        print(f"\n✅ 账户总权益 ≈ {total_equity:.2f} USDT")

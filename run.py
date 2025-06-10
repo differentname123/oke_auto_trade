@@ -35,10 +35,9 @@ import multiprocessing
 
 import numpy as np
 import pandas as pd
-import websockets
 
-from common_utils import select_strategies_optimized
-from trade_common import LatestDataManager, place_order
+from trade_common import LatestDataManager, place_order, get_train_data, get_total_usdt_equity
+
 
 # --------------------
 # 自定义日志函数，仅记录当前代码输出的日志
@@ -78,8 +77,8 @@ def log_error(message, exc_info=False):
 # WebSocket 服务器地址
 OKX_WS_URL = "wss://ws.okx.com:8443/ws/v5/public"
 # 定义需要操作的多个交易对
-INSTRUMENT_LIST = ["SOL-USDT-SWAP", "BTC-USDT-SWAP", "ETH-USDT-SWAP", "TON-USDT-SWAP", "DOGE-USDT-SWAP", "XRP-USDT-SWAP"]
-# INSTRUMENT_LIST = ["BTC-USDT-SWAP"]
+# INSTRUMENT_LIST = ["SOL-USDT-SWAP", "BTC-USDT-SWAP", "ETH-USDT-SWAP", "TON-USDT-SWAP", "DOGE-USDT-SWAP", "XRP-USDT-SWAP"]
+INSTRUMENT_LIST = ["BTC-USDT-SWAP"]
 
 # 各交易对最小下单量映射
 min_count_map = {
@@ -374,74 +373,6 @@ class InstrumentTrader:
                 self.order_detail_map.pop(k, None)
             self.save_order_detail_map()
 
-    def process_open_orders(self, price_val):
-        for key, target_info in self.kai_target_price_info_map.items():
-            if target_info is not None:
-                min_price, max_price = target_info
-                is_reverse = self.kai_reverse_map.get(key, False)
-                side = "buy" if "long" in key else "sell"
-                if is_reverse:
-                    side = "buy" if side == "sell" else "sell"
-                pin_side = "sell" if side == "buy" else "buy"
-                if min_price < price_val < max_price:
-                    result = place_order(self.instrument, side, self.min_count)
-                    current_time_human = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    if result:
-                        self.order_detail_map[key] = {
-                            "open_time": current_time_human,
-                            "price": price_val,
-                            "side": side,
-                            "pin_side": pin_side,
-                            "time": self.current_minute,
-                            "size": self.min_count,
-                        }
-                        log_info(f"开仓成功 {key} for {self.instrument} 成交, 价格: {price_val}, 时间: {datetime.datetime.now()} 最小价格: {min_price}, 最大价格: {max_price}")
-                        self.save_order_detail_map()
-
-    def process_close_orders(self, price_val):
-        keys_to_remove = []
-        for kai_key, order in list(self.order_detail_map.items()):
-            current_time_human = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            if current_time_human == order["time"]:
-                log_info(f"当前时间与订单时间相同，跳过平仓: {current_time_human} == {order['time']}")
-                continue
-            pin_key = self.kai_pin_map.get(kai_key)
-            if not pin_key:
-                continue
-            kai_price = order["price"]
-            side = order["side"]
-            if pin_key in self.pin_target_price_info_map:
-                target_info = self.pin_target_price_info_map[pin_key]
-                if target_info is not None:
-                    min_price, max_price = target_info
-                    if min_price < price_val < max_price:
-                        result = place_order(
-                            self.instrument, order["pin_side"], order["size"], trade_action="close"
-                        )
-                        if result:
-                            keys_to_remove.append(kai_key)
-                            log_info(f"【平仓成功】 {pin_key} for {self.instrument} 开仓方向 {side}成交, 开仓价格: {kai_price} 平仓价格: {price_val}, 开仓时间: {order['open_time']} 平仓时间: {datetime.datetime.now()}")
-                            # 记录平仓订单详情
-                            close_record = {
-                                "instrument": self.instrument,
-                                'kai_signal': kai_key,
-                                "pin_signal": pin_key,
-                                "open_time": order["open_time"],
-                                "close_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                "open_price": kai_price,
-                                "close_price": price_val,
-                                "side": side,
-                                "pin_side": order["pin_side"],
-                                "size": order["size"],
-                            }
-                            self.record_closed_order(close_record)
-                        else:
-                            log_error(f"❌ {pin_key} for {self.instrument} 平仓失败, 价格: {price_val}, 开仓价格: {kai_price}, 时间: {datetime.datetime.now()}")
-        if keys_to_remove:
-            for k in keys_to_remove:
-                self.order_detail_map.pop(k, None)
-            self.save_order_detail_map()
-
     async def fetch_new_data(self, max_period):
         kai_column_list = self.strategy_df["kai_column"].unique().tolist()
         pin_column_list = self.strategy_df["pin_column"].unique().tolist()
@@ -530,45 +461,6 @@ class InstrumentTrader:
                 self.is_new_minute = True
                 log_error("Error in fetch_new_data", exc_info=True)
 
-    async def subscribe_channel(self, ws):
-        subscribe_msg = {
-            "op": "subscribe",
-            "args": [{"channel": "trades", "instId": self.instrument}],
-        }
-        await ws.send(json.dumps(subscribe_msg))
-        log_info(f"📡 {self.instrument} 已订阅实时数据")
-
-    async def websocket_listener(self):
-        while True:
-            try:
-                async with websockets.connect(OKX_WS_URL) as ws:
-                    log_info(f"✅ {self.instrument} 连接到 OKX WebSocket")
-                    await self.subscribe_channel(ws)
-                    while True:
-                        try:
-                            response = await ws.recv()
-                            data = json.loads(response)
-                            if "data" not in data:
-                                continue
-                            for trade in data["data"]:
-                                price_val = float(trade["px"])
-                                if self.is_new_minute:
-                                    self.is_new_minute = False
-                                if price_val in self.price_list:
-                                    continue
-                                self.price_list.append(price_val)
-                                self.price = price_val
-                                self.process_open_orders(price_val)
-                                self.process_close_orders(price_val)
-                        except websockets.exceptions.ConnectionClosed:
-                            log_warning(f"🔴 {self.instrument} WebSocket 连接断开，重连中...")
-                            await asyncio.sleep(2)  # 休息2秒再尝试连接
-                            break
-                        except Exception as e:
-                            log_error("Error in websocket_listener inner loop", exc_info=True)
-            except Exception as e:
-                log_error("Error in websocket_listener", exc_info=True)
-
     def save_order_detail_map(self):
         try:
             if not os.path.exists("temp"):
@@ -631,6 +523,9 @@ class InstrumentTrader:
             log_error(f"❌ {self.instrument} 策略数据不存在!")
             return
 
+        # 删除strategy_df中kai_column重复的行
+        self.strategy_df = self.strategy_df.drop_duplicates(subset=["kai_column"])
+
         # 构造 kai_pin_map 与 kai_reverse_map
         period_list = []
         for idx, row in self.strategy_df.iterrows():
@@ -647,11 +542,10 @@ class InstrumentTrader:
         max_period = int(np.ceil(max(period_list) / 100) * 100) if period_list else 100
         max_period = max_period * 2
         log_info(f"【{self.instrument}】最大周期: {max_period}")
-
+        self.min_count = self.strategy_df["single_trade_count"].max() if "single_trade_count" in self.strategy_df.columns else 1
         # 同时启动数据更新任务和 WebSocket 监听任务
         await asyncio.gather(
             self.fetch_new_data(max_period),
-            # self.websocket_listener(),
         )
 
 def run_instrument(inst_info):
@@ -700,7 +594,7 @@ def init():
     进行初始化，主要是进行资金的分配，以及每个策略的单次买入数量
     :return:
     """
-    total_capital = 1000000  # 总资金
+    total_capital = get_total_usdt_equity()
     final_score_total = 0
     beam_width = 100000
     out_dir = 'temp_back'
@@ -708,6 +602,10 @@ def init():
     for type in ['all_short', 'all']:
         temp_info = {}
         for inst in INSTRUMENT_LIST:
+            # 获取最新的inst价格
+            kline_data_df = get_train_data(max_candles=100, inst_id=inst)
+            latest_close_price = kline_data_df['close'].iloc[-1] if not kline_data_df.empty else None
+
             inst_id = inst.split("-")[0]
             elements_path = f"{out_dir}/result_elements_{inst_id}_{beam_width}_{type}_op.parquet"
             origin_df_path = f"{out_dir}/{inst_id}_True_{type}_filter_similar_strategy.parquet"
@@ -734,6 +632,7 @@ def init():
 
 
             final_score = weekly_net_profit_sum_merged / score_merged
+            final_score = np.log1p(final_score)
             temp_info[inst] = {
                 'strategies': strategies,
                 'score_merged': score_merged,
@@ -741,7 +640,8 @@ def init():
                 'final_score': final_score,
                 'optimal_leverage':optimal_leverage,
                 'optimal_capital':optimal_capital,
-                'no_leverage_capital': no_leverage_capital
+                'no_leverage_capital': no_leverage_capital,
+                'latest_close_price': latest_close_price
             }
             final_score_total += final_score
         inst_map_info[type] = temp_info
@@ -749,10 +649,21 @@ def init():
     for type, inst_info in inst_map_info.items():
         for inst, info in inst_info.items():
             final_score = info['final_score']
+            optimal_leverage = info['optimal_leverage']
+            true_leverage = true_leverage_map.get(inst, 100)
+            max_leverage = max_leverage_map.get(inst, 100)
+            min_count = min_count_map.get(inst, 1)
             percent = final_score / final_score_total
             capital_no_leverage = total_capital * percent
             info['capital_no_leverage'] = capital_no_leverage
-            log_info(f"【{inst}】策略 {type} 的最终得分: {final_score:.4f}, 占比: {percent:.4%}, 分配资金: {capital_no_leverage:.2f}")
+            optimal_capital_no_leverage = optimal_leverage / max_leverage * capital_no_leverage
+            can_buy_number = optimal_capital_no_leverage * true_leverage / info['latest_close_price']
+            int_number = int(can_buy_number / min_count)
+            strategies = info['strategies']
+            strategies_len = len(strategies)
+            single_trade_count = int(int_number / strategies_len) * min_count
+            strategies['single_trade_count'] = single_trade_count
+            log_info(f"【{inst}】策略 {type} 的最终得分: {final_score:.4f}, 占比: {percent:.4%}, 分配资金: {capital_no_leverage:.2f}  最优杠杆 {optimal_leverage} 最优资金 {optimal_capital_no_leverage} 实际杠杆{true_leverage} 最近价格{info['latest_close_price']} 能买的数量{can_buy_number} 策略数量{strategies_len} single_trade_count {single_trade_count}")
     print(f"总的 final_score: {final_score_total:.4f}")
     return inst_map_info
 
