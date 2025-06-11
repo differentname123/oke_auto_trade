@@ -313,7 +313,7 @@ def choose_zuhe_beam_opt():
 
                 print(f"载入 {df_path}")
                 df = pd.read_parquet(df_path)
-                beam_width = int(np.power(2000, 0.8)  * 100000 / np.power(len(df), 0.8))
+                beam_width = int(np.power(2000, 0.7)  * 100000 / np.power(len(df), 0.7))
 
                 print(f"{df_path} 策略条数：{len(df)} beam_width: {beam_width}")
                 print(f"\n==== 处理 {inst} ({typ}) ====")
