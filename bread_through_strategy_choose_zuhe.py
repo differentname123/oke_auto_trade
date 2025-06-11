@@ -211,7 +211,7 @@ def choose_zuhe_beam_opt():
     inst_id_list = ['BTC', 'ETH', 'SOL', 'TON', 'DOGE', 'XRP']
     # 待合并的类型（如果 is_merged=False，则对每种类型单独处理）
     type_list = ["all", "all_short"]
-    max_k = 100
+    max_k = 20
     beam_width = 100000
     objective = lambda m: -m["score"]
     out_dir = Path("temp_back")
