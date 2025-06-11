@@ -163,11 +163,11 @@ def beam_search_multi_k(profit_mat: np.ndarray,
 
     ctx = get_context("spawn")
     with concurrent.futures.ProcessPoolExecutor(
-        max_workers=min(os.cpu_count(), 30),
-        mp_context=ctx,
-        initializer=init_worker_shared,
-        initargs=(shm_profit.name, *profit_meta,
-                  shm_kai.name, *kai_meta),
+            max_workers=min(os.cpu_count(), 30),
+            mp_context=ctx,
+            initializer=init_worker_shared,
+            initargs=(shm_profit.name, *profit_meta,
+                      shm_kai.name, *kai_meta),
     ) as pool:
         # 初始化 k=1
         beam = []
@@ -178,12 +178,20 @@ def beam_search_multi_k(profit_mat: np.ndarray,
         beam = heapq.nsmallest(beam_width, beam, key=lambda x: objective_func(x[2]))
         layer_results = {1: beam}
 
-        # 逐层扩展
+        # 计算k=1层的最优得分，并初始化全局最高得分及连续未提升计数器
+        current_best_score = -objective_func(beam[0][2])
+        global_best_score = current_best_score
+        print(f"k=1: 最优得分: {current_best_score:.4f}, 全局最高得分: {global_best_score:.4f}")
+        consecutive_no_improve = 0
+
+        # 逐层扩展 k=2 ... max_k
         for current_k in range(2, max_k + 1):
             if not beam:
                 break
             t0 = time.time()
-            print(f"Layer {current_k}: 扩展 {len(beam)} 个父节点 … 当前时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t0))}")
+            print(
+                f"Layer {current_k}: 扩展 {len(beam)} 个父节点 … 当前时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t0))}")
+
             tasks = [
                 (parent[0], parent[1], n_strategies, current_k, n_weeks)
                 for parent in beam
@@ -192,14 +200,40 @@ def beam_search_multi_k(profit_mat: np.ndarray,
             new_candidates = list(itertools.chain.from_iterable(futures))
             if not new_candidates:
                 break
+
             beam = heapq.nsmallest(beam_width, new_candidates, key=lambda x: objective_func(x[2]))
             layer_results[current_k] = beam
             gc.collect()
+
+            # 取得当前层最优得分
+            current_best_score = -objective_func(beam[0][2])
+
+            # 如果当前 k > 20，则判断连续5个k没有提升的情况
+            if current_k > 20:
+                if current_best_score > global_best_score:
+                    global_best_score = current_best_score
+                    consecutive_no_improve = 0
+                else:
+                    consecutive_no_improve += 1
+            else:
+                # k<=20时，始终更新全局最高得分（以便后续比较方便）
+                if current_best_score > global_best_score:
+                    global_best_score = current_best_score
+
+            # 打印每个 k 的最优得分以及全局最高得分
+            print(f"k={current_k}: 最优得分: {current_best_score:.4f}, 全局最高得分: {global_best_score:.4f}")
+
+            if current_k > 20 and consecutive_no_improve >= 5:
+                print("连续5个 k 的最优得分没有提升，提前退出……")
+                break
+
             print(f"完成 Layer {current_k}，用时 {time.time() - t0:.2f}s，保留 {len(beam)} 条")
 
     # 清理共享内存
-    shm_profit.close(); shm_profit.unlink()
-    shm_kai.close(); shm_kai.unlink()
+    shm_profit.close();
+    shm_profit.unlink()
+    shm_kai.close();
+    shm_kai.unlink()
     return layer_results
 
 # -------------------- 主流程 -------------------- #
