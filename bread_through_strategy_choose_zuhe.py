@@ -183,7 +183,7 @@ def beam_search_multi_k(profit_mat: np.ndarray,
             if not beam:
                 break
             t0 = time.time()
-            print(f"Layer {current_k}: 扩展 {len(beam)} 个父节点 …")
+            print(f"Layer {current_k}: 扩展 {len(beam)} 个父节点 … 当前时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t0))}")
             tasks = [
                 (parent[0], parent[1], n_strategies, current_k, n_weeks)
                 for parent in beam
@@ -239,7 +239,8 @@ def choose_zuhe_beam_opt():
                 continue
             merged_df = pd.concat(df_list, ignore_index=True)
             merged_df.to_parquet(merged_file_path, index=False)
-            beam_width = int(2000 * 100000 / len(merged_df))
+            beam_width = int(np.log1p(2000) * 100000 / np.log1p(len(merged_df)))
+
             print(f"写入合并文件 {merged_file_path}（{len(merged_df)} 行）  {beam_width}")
 
 
@@ -312,8 +313,9 @@ def choose_zuhe_beam_opt():
 
                 print(f"载入 {df_path}")
                 df = pd.read_parquet(df_path)
-                print(f"{df_path} 策略条数：{len(df)}")
-                beam_width = int(2000 * 100000 / len(df))
+                beam_width = int(np.power(2000, 0.8)  * 100000 / np.power(len(df), 0.8))
+
+                print(f"{df_path} 策略条数：{len(df)} beam_width: {beam_width}")
                 print(f"\n==== 处理 {inst} ({typ}) ====")
                 elements_path = out_dir / f"result_elements_{inst}_adp_{typ}_op.parquet"
                 if os.path.exists(elements_path):

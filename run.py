@@ -592,7 +592,7 @@ def init():
     """
     total_capital = get_total_usdt_equity()
     final_score_total = 0
-    beam_width = 100000
+    beam_width = 'adp'
     out_dir = 'temp_back'
     inst_map_info = {}
     for type in ['all_short', 'all']:
