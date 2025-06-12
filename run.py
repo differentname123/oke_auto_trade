@@ -102,7 +102,7 @@ max_leverage_map = {
 true_leverage_map = {
     "BTC-USDT-SWAP": 10000,
     "ETH-USDT-SWAP": 1000,
-    "SOL-USDT-SWAP": 5000,
+    "SOL-USDT-SWAP": 50,
     "TON-USDT-SWAP": 20,
     "DOGE-USDT-SWAP": 0.05,
     "XRP-USDT-SWAP": 0.5
@@ -690,7 +690,7 @@ def main_logic():
         p = multiprocessing.Process(target=run_instrument, args=(temp_inst_info,))
         p.start()
         processes.append(p)
-        time.sleep(10)
+        time.sleep(60)
 
     for p in processes:
         p.join()
