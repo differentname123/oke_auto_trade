@@ -233,7 +233,7 @@ def beam_search_multi_k(weekly_profit_mat: np.ndarray,
 
     ctx = get_context("spawn")
     with concurrent.futures.ProcessPoolExecutor(
-            max_workers=min(os.cpu_count(), 30),
+            max_workers=min(os.cpu_count(), 25),
             mp_context=ctx,
             initializer=init_worker_shared,
             initargs=(shm_profit.name, *profit_meta,
@@ -465,7 +465,7 @@ def choose_zuhe_beam_opt():
 
                 from concurrent.futures import ThreadPoolExecutor
                 corr_dict = {}
-                with ThreadPoolExecutor(max_workers=32) as th_pool:
+                with ThreadPoolExecutor(max_workers=25) as th_pool:
                     for key, val in th_pool.map(
                             lambda pair: (pair, compute_robust_correlation(
                                 weekly_profit_mat[pair[0]], weekly_profit_mat[pair[1]]
