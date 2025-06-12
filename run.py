@@ -321,7 +321,7 @@ class InstrumentTrader:
         pin_side = "sell" if side == "buy" else "buy"
         result = place_order(self.instrument, side, self.min_count)
         # 获取易读的当前时间
-        current_time_human = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        current_time_human = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         if result:
             self.order_detail_map[signal_name] = {
                 "open_time": current_time_human,
@@ -337,8 +337,8 @@ class InstrumentTrader:
     def close_order(self, signal_name, price_val):
         keys_to_remove = []
         for kai_key, order in list(self.order_detail_map.items()):
-            current_minute_timestamp = datetime.datetime.now().minute  # 或者从 df 中获取最新的K线时间
-            if current_minute_timestamp == order["time"]:
+            current_minute_timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")  # 或者从 df 中获取最新的K线时间
+            if current_minute_timestamp == order["open_time"]:
                 log_info(f"当前时间与订单时间相同，跳过平仓: {current_minute_timestamp} == {order['time']}")
                 continue
             pin_key = self.kai_pin_map.get(kai_key)
