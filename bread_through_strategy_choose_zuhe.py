@@ -219,6 +219,9 @@ def beam_search_multi_k(profit_mat: np.ndarray,
                 # k<=20时，始终更新全局最高得分（以便后续比较方便）
                 if current_best_score > global_best_score:
                     global_best_score = current_best_score
+                    consecutive_no_improve = 0
+                else:
+                    consecutive_no_improve += 1
 
             # 打印每个 k 的最优得分以及全局最高得分
             print(f"k={current_k}: 最优得分: {current_best_score:.4f}, 全局最高得分: {global_best_score:.4f}")
