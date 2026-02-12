@@ -452,6 +452,7 @@ def get_config(key):
 
     # 获取指定字段的值
     if key not in config_data:
+        return ''
         raise KeyError(f"配置文件中缺少字段: {key}")
 
     return config_data[key]
