@@ -1,3 +1,5 @@
+import io
+
 import pandas as pd
 import numpy as np
 import os
@@ -1708,9 +1710,56 @@ def run_backtest():
                 continue
 
 
+def read_last_n_lines(file_path, n=100):
+    """
+    高效读取大文件最后 n 行，无需加载整个文件。
+    """
+    with open(file_path, 'r', encoding='utf-8') as f:
+        # 1. 获取表头（第一行）
+        header = f.readline()
+
+    # 2. 以二进制模式打开，跳转到文件末尾
+    with open(file_path, 'rb') as f:
+        f.seek(0, 2)  # 移动到文件末尾
+        file_size = f.tell()
+
+        # 预估读取量：假设每行不超过 200 字节（根据实际数据调整），多读一点作为缓冲区
+        # 100行 * 200字节 = 20000字节，这里设置 50KB 以防万一
+        buffer_size = 50 * 1024
+
+        # 如果文件比 buffer 小，就从头读
+        seek_pos = max(0, file_size - buffer_size)
+        f.seek(seek_pos)
+
+        # 读取末尾数据并解码
+        tail_data = f.read().decode('utf-8', errors='ignore')
+
+        # 按换行符分割
+        lines = tail_data.splitlines()
+
+        # 因为我们是随机截断的，tail_data 的第一行通常是不完整的，需要丢弃
+        # 取最后 n 行
+        if len(lines) > n:
+            last_lines = lines[-n:]
+        else:
+            # 如果 buffer 不够大导致行数不足，这里会返回读取到的所有行（通常50KB足够涵盖几百行数据）
+            last_lines = lines[1:]  # 丢弃可能损坏的第一行
+
+    # 3. 拼接表头和数据，转为 DataFrame
+    csv_content = header + "\n".join(last_lines)
+
+    # 使用 io.StringIO 包装字符串，传给 pandas
+    df = pd.read_csv(io.StringIO(csv_content))
+    return df
+
+
 if __name__ == '__main__':
-    example()
-    # file_name = 'BTC-USDT-SWAP_1m_20230124_20241218.csv'
+    file_path = r"W:\project\python_project\oke_auto_trade\kline_data\origin_data_1m_10000000_BTC-USDT-SWAP_2026-02-13.csv"
+
+    # 只读前100行
+    df = read_last_n_lines(file_path, 100)
+    df.columns
+    print()
     # long_df = get_dist(file_name)
     # # short_df = get_dist('BTC-USDT-SWAP_1m_20240627_20241212.csv')
     # # pass
