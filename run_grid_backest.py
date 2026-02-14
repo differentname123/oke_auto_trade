@@ -389,9 +389,9 @@ def run_single_backtest(params):
 
     print(f"开始回测 [进程ID: {os.getpid()}]，网格={grid_pct}, 杠杆={leverage} 当前时间: {datetime.now()}")
 
-    # 构造文件名
-    result_df_file = f'backtest/paired_trades_grid_{int(grid_pct * 1000)}_lev_{leverage}_{line_count}_{stop_loss_pct}_{lookback_period}_{int(offset_ratio * 100)}.csv'
-    minute_df_file = f'backtest/minute_stats_grid_{int(grid_pct * 1000)}_lev_{leverage}_{line_count}_{stop_loss_pct}_{lookback_period}_{int(offset_ratio * 100)}.csv'
+    # 构造文件名 (修改：将后缀从 .csv 改为 .parquet)
+    result_df_file = f'backtest/paired_trades_grid_{int(grid_pct * 1000)}_lev_{leverage}_{line_count}_{stop_loss_pct}_{lookback_period}_{int(offset_ratio * 100)}.parquet'
+    minute_df_file = f'backtest/minute_stats_grid_{int(grid_pct * 1000)}_lev_{leverage}_{line_count}_{stop_loss_pct}_{lookback_period}_{int(offset_ratio * 100)}.parquet'
 
     # 检查文件是否存在
     if os.path.exists(result_df_file) and os.path.exists(minute_df_file):
@@ -408,8 +408,9 @@ def run_single_backtest(params):
         # 确保目录存在
         os.makedirs('backtest', exist_ok=True)
 
-        result_df.to_csv(result_df_file, index=False)
-        minute_df.to_csv(minute_df_file, index=False)
+        # 修改：使用 to_parquet 替代 to_csv
+        result_df.to_parquet(result_df_file, index=False)
+        minute_df.to_parquet(minute_df_file, index=False)
 
         print(f"回测完成 [进程ID: {os.getpid()}]，网格={grid_pct}, 杠杆={leverage}，耗时: {datetime.now() - start_time}")
     except Exception as e:
