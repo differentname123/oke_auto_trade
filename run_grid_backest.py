@@ -61,17 +61,26 @@ def get_minute_triggers(row, last_close, initial_base, current_level, grid_pct):
 # ==========================================
 # 主回测程序 (模块 2 & 模块 3 的整合)
 # ==========================================
-def backtest_dynamic_grid(df, grid_pct=0.005, margin=10000.0, leverage=10.0, fee_rate=0.001, stop_loss_pct=0.02):
+def backtest_dynamic_grid(df, grid_pct=0.005, margin=10000.0, leverage=10.0, fee_rate=0.001, stop_loss_pct=0.02,
+                          lookback_period=1000, offset_ratio=0.1):
     """
     修改说明：
     1. 新增 stop_loss_pct 参数，用于计算止损价格。
     2. 在主循环开始处新增“止损检查”逻辑。
+    3. 【新增】lookback_period (统计周期) 和 offset_ratio (偏移比例)，用于限制极端位置开仓。
     """
     # 【性能优化 1：向量化处理时间】
     if isinstance(df['timestamp'].iloc[0], str):
         df['timestamp'] = pd.to_datetime(df['timestamp'])
 
     df = df.sort_values('timestamp').reset_index(drop=True)
+
+    # =========================================================
+    # --- 新增步骤：向量化计算统计周期内的最高价与最低价 ---
+    # 使用 min_periods=1 保证最开始的数据也能有极值，不产生 NaN
+    # =========================================================
+    df['rolling_high'] = df['high'].rolling(window=lookback_period, min_periods=1).max()
+    df['rolling_low'] = df['low'].rolling(window=lookback_period, min_periods=1).min()
 
     initial_base = df['open'].iloc[0]
     current_level = 0
@@ -93,6 +102,17 @@ def backtest_dynamic_grid(df, grid_pct=0.005, margin=10000.0, leverage=10.0, fee
     total_short_cost = 0.0
 
     for row in df.itertuples():
+
+        # =========================================================
+        # --- 新增步骤：提取当前周期的极值并计算开仓阈值 ---
+        # =========================================================
+        current_max_high = row.rolling_high
+        current_min_low = row.rolling_low
+
+        # 最高做多价格：(最高价 - 最低价) * (1 - 偏移比例) + 最低价
+        max_long_price = (current_max_high - current_min_low) * (1 - offset_ratio) + current_min_low
+        # 最低做空价格：(最高价 - 最低价) * 偏移比例 + 最低价
+        min_short_price = (current_max_high - current_min_low) * offset_ratio + current_min_low
 
         # =========================================================
         # --- 新增步骤：止损检查 (Stop Loss Check) ---
@@ -227,22 +247,23 @@ def backtest_dynamic_grid(df, grid_pct=0.005, margin=10000.0, leverage=10.0, fee
                         })
                 else:
                     # 开空单
-                    qty = notional / exec_price
-                    # 【新增】：计算止损价格
-                    sl_price = exec_price * (1 + stop_loss_pct)
+                    # 【修改点】：增加条件判断，价格必须 >= 最低做空价格 才能开空
+                    if exec_price >= min_short_price:
+                        qty = notional / exec_price
+                        sl_price = exec_price * (1 + stop_loss_pct)
 
-                    shorts_stack.append({
-                        'time': exec_time,
-                        'price': exec_price,
-                        'qty': qty,
-                        'fee': notional * fee_rate,
-                        'target_price': initial_base * (1 + (trigger_level - 1) * grid_pct),
-                        'stop_loss_price': sl_price  # 存储止损价
-                    })
+                        shorts_stack.append({
+                            'time': exec_time,
+                            'price': exec_price,
+                            'qty': qty,
+                            'fee': notional * fee_rate,
+                            'target_price': initial_base * (1 + (trigger_level - 1) * grid_pct),
+                            'stop_loss_price': sl_price
+                        })
 
-                    # 同步维护全局变量
-                    total_short_qty += qty
-                    total_short_cost += (exec_price * qty)
+                        # 同步维护全局变量
+                        total_short_qty += qty
+                        total_short_cost += (exec_price * qty)
 
             elif t['type'] == 'DOWN':
                 # 跌了：优先平空。
@@ -285,28 +306,28 @@ def backtest_dynamic_grid(df, grid_pct=0.005, margin=10000.0, leverage=10.0, fee
                         })
                 else:
                     # 开多单
-                    qty = notional / exec_price
-                    # 【新增】：计算止损价格
-                    sl_price = exec_price * (1 - stop_loss_pct)
+                    # 【修改点】：增加条件判断，价格必须 <= 最高做多价格 才能开多
+                    if exec_price <= max_long_price:
+                        qty = notional / exec_price
+                        sl_price = exec_price * (1 - stop_loss_pct)
 
-                    longs_stack.append({
-                        'time': exec_time,
-                        'price': exec_price,
-                        'qty': qty,
-                        'fee': notional * fee_rate,
-                        'target_price': initial_base * (1 + (trigger_level + 1) * grid_pct),
-                        'stop_loss_price': sl_price  # 存储止损价
-                    })
+                        longs_stack.append({
+                            'time': exec_time,
+                            'price': exec_price,
+                            'qty': qty,
+                            'fee': notional * fee_rate,
+                            'target_price': initial_base * (1 + (trigger_level + 1) * grid_pct),
+                            'stop_loss_price': sl_price
+                        })
 
-                    # 同步维护全局变量
-                    total_long_qty += qty
-                    total_long_cost += (exec_price * qty)
+                        # 同步维护全局变量
+                        total_long_qty += qty
+                        total_long_cost += (exec_price * qty)
 
         # --- 步骤 C：模块 3 - 每分钟最低资产值核算 ---
         current_orders = len(longs_stack) + len(shorts_stack)
         invested_capital = current_orders * margin
         if len(longs_stack) > 0 and len(shorts_stack) > 0:
-            # 这里可能会有短暂的同时持仓（刚开仓尚未处理完），但在网格策略中是允许锁仓的，或者逻辑检查
             pass
 
         if longs_stack:
@@ -360,7 +381,7 @@ def run_single_backtest(params):
     单个回测任务的包装函数
     params: (grid_pct, leverage, line_count)
     """
-    grid_pct, leverage, line_count, stop_loss_pct = params
+    grid_pct, leverage, line_count, stop_loss_pct, lookback_period, offset_ratio = params
 
     # 获取当前进程内存中的 df
     global worker_df
@@ -369,8 +390,8 @@ def run_single_backtest(params):
     print(f"开始回测 [进程ID: {os.getpid()}]，网格={grid_pct}, 杠杆={leverage} 当前时间: {datetime.now()}")
 
     # 构造文件名
-    result_df_file = f'backtest/paired_trades_grid_{int(grid_pct * 1000)}_lev_{leverage}_{line_count}_{stop_loss_pct}.csv'
-    minute_df_file = f'backtest/minute_stats_grid_{int(grid_pct * 1000)}_lev_{leverage}_{line_count}_{stop_loss_pct}.csv'
+    result_df_file = f'backtest/paired_trades_grid_{int(grid_pct * 1000)}_lev_{leverage}_{line_count}_{stop_loss_pct}_{lookback_period}_{int(offset_ratio * 100)}.csv'
+    minute_df_file = f'backtest/minute_stats_grid_{int(grid_pct * 1000)}_lev_{leverage}_{line_count}_{stop_loss_pct}_{lookback_period}_{int(offset_ratio * 100)}.csv'
 
     # 检查文件是否存在
     if os.path.exists(result_df_file) and os.path.exists(minute_df_file):
@@ -380,7 +401,9 @@ def run_single_backtest(params):
     start_time = datetime.now()
 
     try:
-        result_df, minute_df = backtest_dynamic_grid(df, grid_pct=grid_pct, leverage=leverage, stop_loss_pct=stop_loss_pct)
+        # 默认采用 lookback_period=1000, offset_ratio=0.1
+        result_df, minute_df = backtest_dynamic_grid(df, grid_pct=grid_pct, leverage=leverage,
+                                                     stop_loss_pct=stop_loss_pct, lookback_period=lookback_period, offset_ratio=offset_ratio)
 
         # 确保目录存在
         os.makedirs('backtest', exist_ok=True)
@@ -413,13 +436,17 @@ if __name__ == '__main__':
     grid_pct_list = [0.003, 0.005, 0.008, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.2, 0.3]
     stop_loss_pct_list = [0.003, 0.005, 0.008, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.2, 0.3]
     leverage_list = [1, 3, 5, 10, 20, 50, 100]
+    lookback_period_list = [500, 1000, 2000, 4000, 8000, 16000]  # 可选的统计周期列表
+    offset_ratio_list = [0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4]
 
     # 1. 准备任务列表
     tasks = []
     for grid_pct in grid_pct_list:
         for leverage in leverage_list:
             for stop_loss_pct in stop_loss_pct_list:
-                tasks.append((grid_pct, leverage, line_count, stop_loss_pct))
+                for lookback_period in lookback_period_list:
+                    for offset_ratio in offset_ratio_list:
+                        tasks.append((grid_pct, leverage, line_count, stop_loss_pct, lookback_period, offset_ratio))
 
     print(f"总任务数: {len(tasks)}，准备启动 3 个进程...")
 
