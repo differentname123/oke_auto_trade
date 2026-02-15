@@ -405,6 +405,17 @@ def run_single_backtest(params):
         result_df, minute_df = backtest_dynamic_grid(df, grid_pct=grid_pct, leverage=leverage,
                                                      stop_loss_pct=stop_loss_pct, lookback_period=lookback_period, offset_ratio=offset_ratio)
 
+        # --- 新增逻辑：仅保留前100行和后100行 ---
+        def clip_df(dataframe, n=100):
+            if len(dataframe) <= n * 2:
+                return dataframe
+            else:
+                return pd.concat([dataframe.head(n), dataframe.tail(n)])
+
+        result_df = clip_df(result_df, 100)
+        minute_df = clip_df(minute_df, 100)
+        # -------------------------------------
+
         # 确保目录存在
         os.makedirs('backtest', exist_ok=True)
 
@@ -452,7 +463,7 @@ if __name__ == '__main__':
     print(f"总任务数: {len(tasks)}，准备启动 3 个进程...")
 
     if not main_df.empty:
-        with Pool(processes=3, initializer=init_worker, initargs=(main_df,)) as pool:
+        with Pool(processes=5, initializer=init_worker, initargs=(main_df,)) as pool:
             pool.map(run_single_backtest, tasks)
 
     print("所有回测任务完成。")
