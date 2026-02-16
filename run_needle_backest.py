@@ -1,271 +1,373 @@
+import traceback
+
 import pandas as pd
 import numpy as np
 from datetime import timedelta
+import itertools  # 新增：用于生成参数组合
+import os
+
 
 # ==========================================
-# 1. 策略配置与数据准备
+# 1. 核心计算函数 (已修改为接收 config 参数)
 # ==========================================
-CONFIG = {
-    'ma_period': 20,  # 均线周期
-    'std_dev_mult': 3.2,  # 布林带宽度 (接针建议宽一点)
-    'vol_mult': 2.5,  # 成交量放大倍数
-    'sl_pct': 0.01,  # 止损百分比 (1%)
-    'fee_rate': 0.0005,  # 单边手续费 (0.05%)
-    'capital_per_trade': 10000  # 单笔投入资金 (USDT)
-}
 
-
-def calculate_indicators(df):
+def calculate_indicators(df, config):
     """
     计算技术指标，生成原始信号
+    Args:
+        df: 原始数据
+        config: 当前回测的参数字典
     """
     df = df.copy()
 
+    # 提取参数
+    ma_period = config['ma_period']
+    std_dev_mult = config['std_dev_mult']
+    vol_mult = config['vol_mult']
+
     # 基础指标
-    df['ma'] = df['close'].rolling(CONFIG['ma_period']).mean()
-    df['std'] = df['close'].rolling(CONFIG['ma_period']).std()
-    df['lower_band'] = df['ma'] - (CONFIG['std_dev_mult'] * df['std'])
-    df['vol_ma'] = df['volume'].rolling(CONFIG['ma_period']).mean()
+    df['ma'] = df['close'].rolling(ma_period).mean()
+    df['std'] = df['close'].rolling(ma_period).std()
+    df['lower_band'] = df['ma'] - (std_dev_mult * df['std'])
+    df['vol_ma'] = df['volume'].rolling(ma_period).mean()
 
     # --- 信号计算逻辑 (基于上一根K线收盘确认) ---
     # 1. 价格极其便宜 (Low 击穿下轨)
     cond_price = df['low'] < df['lower_band']
 
     # 2. 恐慌性抛售 (成交量放大)
-    cond_vol = df['volume'] > (df['vol_ma'] * CONFIG['vol_mult'])
+    cond_vol = df['volume'] > (df['vol_ma'] * vol_mult)
 
     # 3. 拒绝下跌形态 (收盘收回下轨上方 或 长下影线)
-    # 这里使用简单的判定：收盘价必须 > 下轨 (代表虚破)
     cond_shape = df['close'] > df['lower_band']
 
-    # 综合信号 (Signal 为 1 代表该分钟收盘后出现了买入机会)
+    # 综合信号
     df['signal_long'] = cond_price & cond_vol & cond_shape
 
     return df
 
 
 # ==========================================
-# 2. 核心回测引擎 (路径模拟)
+# 2. 核心回测引擎 (已修改支持多种退出模式)
 # ==========================================
-def run_backtest(df):
-    # 预计算指标
-    df = calculate_indicators(df)
+def run_backtest(df, config):
+    """
+    执行回测
+    Args:
+        df: 包含OHLCV的原始数据
+        config: 参数字典
+    """
+    # 预计算指标 (传入当前配置)
+    df = calculate_indicators(df, config)
 
-    # 转换为列表或字典以提高迭代速度 (Pandas iterrows 较慢)
+    # 转换为列表加速
     records = df.to_dict('records')
 
-    trades = []  # 交易记录
-    stats = []  # 分钟快照
+    trades = []
+    stats = []
 
     # 账户状态变量
-    position = False  # 是否持仓
+    position = False
     entry_price = 0.0
     entry_time = None
     stop_loss_price = 0.0
-    take_profit_price = 0.0  # 动态止盈目标
 
-    cum_realized_profit = 0.0  # 累计已平仓利润
+    # 新增：固定止盈价格 (仅在 fixed_rr 模式下使用)
+    fixed_take_profit_price = 0.0
 
-    # 从第20根K线开始遍历
-    for i in range(CONFIG['ma_period'], len(records)):
+    cum_realized_profit = 0.0
+
+    # 提取配置参数
+    ma_period = config['ma_period']
+    capital = config['capital_per_trade']
+    fee_rate = config['fee_rate']
+    sl_pct = config['sl_pct']
+
+    # 策略核心参数
+    exit_mode = config['exit_mode']  # 'ma' 或 'rr'
+    tp_ratio = config.get('tp_ratio', 2.0)  # 盈亏比，默认2.0
+
+    # 遍历K线
+    for i in range(ma_period, len(records)):
         curr_bar = records[i]
-        prev_bar = records[i - 1]  # 信号来源
-
+        prev_bar = records[i - 1]
         last_close = prev_bar['close']
 
-        # --- A. 构建分钟内的价格路径 ---
-        # 逻辑：阳线(Close>=Open) -> 先跌后涨 -> [Last_Close, Open, Low, High, Close]
-        #       阴线(Close<Open)  -> 先涨后跌 -> [Last_Close, Open, High, Low, Close]
-        # 注意：Entry通常发生在 Open 时刻，所以 Open 在路径中非常重要
-
+        # --- A. 构建价格路径 (保持不变) ---
         price_path = []
-        path_types = []  # 标记路径点的类型，用于判断是哪个价格触发了事件
+        path_types = []
 
         if curr_bar['close'] >= curr_bar['open']:
-            # 阳线路径
             price_path = [last_close, curr_bar['open'], curr_bar['low'], curr_bar['high'], curr_bar['close']]
             path_types = ['last_close', 'open', 'low', 'high', 'close']
         else:
-            # 阴线路径
             price_path = [last_close, curr_bar['open'], curr_bar['high'], curr_bar['low'], curr_bar['close']]
             path_types = ['last_close', 'open', 'high', 'low', 'close']
 
-        # --- B. 路径游走与交易逻辑 ---
-
-        # 记录本分钟内是否发生了交易（防止一分钟内开平多次，简化逻辑）
+        # --- B. 路径游走 ---
         trade_action_this_min = False
 
-        # 临时变量，用于计算本分钟最低资产
-        min_equity_in_bar = cum_realized_profit + (
-            CONFIG['capital_per_trade'] if position else CONFIG['capital_per_trade'])
+        # 计算当前MA (如果 exit_mode == 'ma' 需要用到)
+        current_ma = curr_bar['ma']
 
-        # 遍历路径点
         for idx, price in enumerate(price_path):
             p_type = path_types[idx]
 
-            # 1. 检查持仓止盈止损 (如果我们有持仓)
+            # 1. 检查持仓 (止盈/止损)
             if position:
-                # 动态止盈更新: 如果当前价格均线发生变化(虽然分钟内ma通常视为固定，但这里用Bar的ma值)
-                # 策略设定：价格触及当根K线的MA即止盈
-                current_ma = curr_bar['ma']
+                # ---------------------------------------------------
+                # 动态决定止盈目标
+                # ---------------------------------------------------
+                target_price = 0.0
+                if exit_mode == 'ma':
+                    target_price = current_ma  # 回归均线即止盈
+                elif exit_mode == 'rr':
+                    target_price = fixed_take_profit_price  # 等待达到盈亏比价格
 
                 # --- 检查止损 ---
                 if price <= stop_loss_price:
-                    # 触发止损
                     exit_price = stop_loss_price
-                    # 如果是跳空低开直接穿过止损 (例如 Open 就低于 SL)
                     if p_type == 'open' and price < stop_loss_price:
-                        exit_price = price
+                        exit_price = price  # 跳空低开
 
-                    pnl = (exit_price - entry_price) * (CONFIG['capital_per_trade'] / entry_price)
-                    pnl -= CONFIG['capital_per_trade'] * CONFIG['fee_rate'] * 2
-
-                    trades.append({
-                        '开仓时间': entry_time,
-                        '平仓时间': curr_bar['open_time'],  # 简化为分钟级时间
-                        '持仓时间': curr_bar['open_time'] - entry_time,
-                        '目标价格': current_ma,
-                        '止损价格': stop_loss_price,
-                        '方向': "做多(止损)",
-                        '开仓价': entry_price,
-                        '平仓价': exit_price,
-                        '净盈亏': pnl
-                    })
-                    cum_realized_profit += pnl
-                    position = False
-                    trade_action_this_min = True
-                    break  # 本分钟路径结束 (已平仓)
-
-                # --- 检查止盈 ---
-                elif price >= current_ma:
-                    # 触发止盈
-                    exit_price = current_ma
-                    # 如果跳空高开
-                    if p_type == 'open' and price > current_ma:
-                        exit_price = price
-
-                    pnl = (exit_price - entry_price) * (CONFIG['capital_per_trade'] / entry_price)
-                    pnl -= CONFIG['capital_per_trade'] * CONFIG['fee_rate'] * 2
+                    pnl = (exit_price - entry_price) * (capital / entry_price)
+                    pnl -= capital * fee_rate * 2
+                    duration_seconds = (curr_bar['open_time'] - entry_time).total_seconds()
 
                     trades.append({
                         '开仓时间': entry_time,
                         '平仓时间': curr_bar['open_time'],
-                        '持仓时间': curr_bar['open_time'] - entry_time,
-                        '目标价格': current_ma,
-                        '止损价格': stop_loss_price,
-                        '方向': "做多(止盈)",
+                        '持仓时间':duration_seconds,  # 转字符串方便保存
+                        '退出模式': "止损",
                         '开仓价': entry_price,
                         '平仓价': exit_price,
-                        '净盈亏': pnl
+                        '净盈亏': pnl,
+                        '参数组合': str(config)  # 记录该笔交易属于哪个参数
                     })
                     cum_realized_profit += pnl
                     position = False
                     trade_action_this_min = True
-                    break  # 本分钟路径结束
+                    break
 
-            # 2. 检查开仓 (如果我们没持仓，且允许开仓)
-            # 只有在 'open' 时刻才能执行开仓动作 (模拟实盘：看到上一根信号，这根开盘买入)
+                # --- 检查止盈 ---
+                elif price >= target_price:
+                    exit_price = target_price
+                    # 如果是跳空高开 (Open > Target)
+                    if p_type == 'open' and price > target_price:
+                        exit_price = price
+
+                    # 在 MA 模式下，如果 Bar 内 High 穿过 MA，我们假设在 MA 成交
+                    # 但如果是 RR 模式，Target 是固定的
+
+                    pnl = (exit_price - entry_price) * (capital / entry_price)
+                    pnl -= capital * fee_rate * 2
+                    duration_seconds = (curr_bar['open_time'] - entry_time).total_seconds()
+                    trades.append({
+                        '开仓时间': entry_time,
+                        '平仓时间': curr_bar['open_time'],
+                        '持仓时间': duration_seconds,
+                        '退出模式': f"止盈({exit_mode})",
+                        '开仓价': entry_price,
+                        '平仓价': exit_price,
+                        '净盈亏': pnl,
+                        '参数组合': str(config)
+                    })
+                    cum_realized_profit += pnl
+                    position = False
+                    trade_action_this_min = True
+                    break
+
+            # 2. 检查开仓
             if not position and not trade_action_this_min and p_type == 'open':
-                # 【修改点】增加 filter: 只有当开盘价低于均线一定幅度时才开仓，
-                # 防止跳空高开直接在止盈线上方买入，导致 "止盈但亏手续费" 的情况。
-                # 简单修复：确保价格小于 MA
+                # 过滤逻辑：信号存在 且 开盘价在均线下方 (避免高开直接触碰止盈)
                 if prev_bar['signal_long'] and price < curr_bar['ma']:
                     position = True
-                    entry_price = price  # 即 Open Price
+                    entry_price = price
                     entry_time = curr_bar['open_time']
-                    stop_loss_price = entry_price * (1 - CONFIG['sl_pct'])
-                    # 止盈是动态的，不需要存固定值，但为了记录可以存一个初始目标
-                    take_profit_price = prev_bar['ma']
 
-                    # --- C. 计算分钟统计数据 (Stats) ---
+                    # 设定止损
+                    stop_loss_price = entry_price * (1 - sl_pct)
 
-        # 计算本分钟内账户权益的最低点 (压力测试)
-        # 这里的逻辑：遍历刚才的 path，计算每一个点的浮动盈亏
+                    # 设定固定止盈价格 (仅用于 RR 模式)
+                    # 利润 = 本金 * (涨幅) => 涨幅 = sl_pct * tp_ratio
+                    # 举例: SL 1%, Ratio 3 => TP 涨幅 3%
+                    fixed_take_profit_price = entry_price * (1 + (sl_pct * tp_ratio))
 
-        current_equity = CONFIG['capital_per_trade']  # 假设只操作这一笔本金
-        worst_equity = current_equity  # 默认
-
+        # --- C. 统计数据 (略微简化，仅保留关键字段) ---
+        worst_equity = capital + cum_realized_profit
         if position:
-            # 如果这分钟结束时还持仓，我们要看这一分钟内最惨跌到哪
-            # 或者是这分钟中间持仓，后来平掉了，也要看持仓期间最惨跌到哪
-            # 简化算法：直接取本分钟 Low 计算最差浮盈 (如果持多单)
-
             worst_price = curr_bar['low']
-            # 如果 Low 比开仓价还低，计算最大浮亏
-            float_pnl = (worst_price - entry_price) * (CONFIG['capital_per_trade'] / entry_price)
-            worst_equity = current_equity + float_pnl
-        else:
-            # 如果当前空仓，最低资产就是本金
-            worst_equity = current_equity
+            float_pnl = (worst_price - entry_price) * (capital / entry_price)
+            worst_equity += float_pnl
 
-        # 资产比例
-        invested = CONFIG['capital_per_trade'] if position else 0
-        ratio = 1.0
-        if invested > 0:
-            ratio = worst_equity / invested
+        # 为了节省内存，Stats 可以根据需要决定是否每分钟都存
+        # 这里保留逻辑，但建议大数据量时只存每日/每小时快照
+        # stats.append({...})
 
-        stats.append({
-            '时间': curr_bar['open_time'],  # 使用收盘时间或开盘时间皆可，统一即可
-            '收盘价': curr_bar['close'],
-            '持仓方向': '多单' if position else '空仓',
-            '持仓单数': 1 if position else 0,
-            '投入资金': invested,
-            '本分钟最低资产值': worst_equity + cum_realized_profit,  # 加上已落袋的钱
-            '资产比例': ratio,
-            '累计利润': cum_realized_profit
-        })
+    # 返回Trades列表 (转DataFrame在外部做，方便合并)
+    return trades
 
-    # 【修改点】返回 df (包含技术指标列), trades, stats
-    return df, pd.DataFrame(trades), pd.DataFrame(stats)
+
+import pandas as pd
+import numpy as np
+import itertools
+import os
+import time
+from multiprocessing import Pool
 
 
 # ==========================================
-# 3. 执行部分
+# 独立的工作函数 (必须定义在 if __name__ 之外)
 # ==========================================
+def execute_single_backtest(args):
+    """
+    单个进程执行的各种逻辑：回测、统计、截取数据、保存
+    Args:
+        args: 一个元组 (df_raw, config, output_dir)
+              注意：为了在多进程中传递，这里打包成一个参数
+    """
+    df_raw, config, output_dir = args
 
-# 假设你已经读取了数据到 df 变量中
-# df 必须包含列: ['open_time', 'open', 'high', 'low', 'close', 'volume']
-# open_time 必须是 datetime 对象
+    start_time = time.time()
+    process_name = f"[P-{os.getpid()}]"  # 打印进程ID方便调试
+    filename = (f"MA{config['ma_period']}_"
+                f"STD{config['std_dev_mult']}_"
+                f"Vol{config['vol_mult']}_"
+                f"SL{config['sl_pct']}_"
+                f"Mode-{config['exit_mode']}_"
+                f"Ratio{config['tp_ratio']}.parquet")
 
-if __name__ == "__main__":
-
-    file_path = r"W:\project\python_project\oke_auto_trade\kline_data\origin_data_1m_10000000_BTC-USDT-SWAP_2026-02-13.csv"
-    line_count = 10000
-    # 注意：这里读取时确保有 volume 列
-    df = pd.read_csv(file_path, nrows=line_count)
-    df['open_time'] = pd.to_datetime(df['timestamp'])
-
-    # 只保留 df 的 ['open_time', 'open', 'high', 'low', 'close', 'volume']这几个字段
-    df = df[['open_time', 'open', 'high', 'low', 'close', 'volume']]
-    debug_df = pd.read_csv('debug_data_with_indicators.csv')  # 读取一份完整数据用于调试验证
-    # 原始代码中读取了 parquet，这里保留逻辑，但实际回测依赖上面的 df
-    # 如果是为了复用之前的 trades 结构，可以保留，但 run_backtest 会生成新的
-    df_trades_df = pd.read_parquet('paired_trades_needle.parquet')
-    df_stats_df = pd.read_parquet('minute_stats_needle.parquet')
-
+    save_path = os.path.join(output_dir, filename)
+    if os.path.exists(save_path):
+        print(f"{process_name} 文件已存在，跳过: {filename}")
+        return None
     try:
-        print("开始回测...")
-        if 'df' in locals():
-            # 【修改点】接收三个返回值
-            df_with_indicators, df_trades, df_stats = run_backtest(df)
+        # 1. 执行回测
+        trades_list = run_backtest(df_raw, config)
 
-            # 输出文件
-            df_trades.to_parquet('paired_trades_needle.parquet', index=False)
-            df_stats.to_parquet('minute_stats_needle.parquet', index=False)
+        # 如果没有交易，直接返回 None
+        if not trades_list:
+            print(f"{process_name} 参数 {config} -> 无交易触发")
+            return None
 
-            # 你可以将带有指标的原始数据也保存，方便验证
-            df_with_indicators.to_csv('debug_data_with_indicators.csv', index=False)
+        # 2. 数据处理与统计
+        df_trades = pd.DataFrame(trades_list)
 
-            print(f"回测完成。")
-            print(f"交易笔数: {len(df_trades)}")
-            print(f"最终累计利润: {df_stats.iloc[-1]['累计利润']:.2f}")
+        # 计算核心统计指标
+        total_profit = df_trades['净盈亏'].sum()
+        trade_count = len(df_trades)
+        win_rate = len(df_trades[df_trades['净盈亏'] > 0]) / trade_count if trade_count > 0 else 0
+        avg_pnl = df_trades['净盈亏'].mean()
 
-            # 简单的验证打印
-            print("\n--- 指标数据验证 (前1行) ---")
-            print(df_with_indicators[['open_time', 'close', 'ma', 'lower_band', 'signal_long']].tail(1))
-
+        # 3. 空间优化：只保留最后 100 条
+        # 注意：先统计完总体的指标，再截取，否则统计数据就不对了
+        if len(df_trades) > 100:
+            df_trades_saved = df_trades.iloc[-100:].copy()
         else:
-            print("错误：未找到数据变量 df，请先加载数据。")
+            df_trades_saved = df_trades.copy()
+
+        # 4. 将统计汇总信息写入数据列 (方便单文件查看上下文)
+        df_trades_saved['统计_总利润'] = total_profit
+        df_trades_saved['统计_总交易数'] = trade_count
+        df_trades_saved['统计_胜率'] = win_rate
+        df_trades_saved['统计_平均盈亏'] = avg_pnl
+        # 把配置参数也转为字符串存进去，防丢失
+        # df_trades_saved['策略_配置详情'] = str(config)
+        avg_seconds = df_trades['持仓时间'].mean()
+        max_seconds = df_trades['持仓时间'].max()
+        max_hours = round(max_seconds / 3600, 4)
+        avg_hours = round(avg_seconds / 3600, 4)
+        df_trades_saved['统计_平均持仓时间'] = avg_hours
+        df_trades_saved['统计_最大持仓时间'] = max_hours
+        # 5. 生成文件名并保存
+
+        df_trades_saved.to_parquet(save_path, index=False)
+
+        # 6. 计算耗时并打印
+        elapsed = time.time() - start_time
+        print(
+            f"{process_name} 完成 | 耗时:{elapsed:.2f}s | 利润:{total_profit:.1f} | 胜率:{win_rate:.1%} | 统计_平均持仓时间：{avg_duration_str}  统计_最大持仓时间：{max_duration_str}   耗时 ：{elapsed:.2f}s")
+
+        # 7. 返回汇总字典 (给主进程做总表用)
+        summary = config.copy()
+        summary.update({
+            'total_trades': trade_count,
+            'total_profit': total_profit,
+            'win_rate': win_rate,
+            'avg_pnl': avg_pnl,
+            'filename': filename,
+            'execution_time': elapsed
+        })
+        return summary
 
     except Exception as e:
-        print(f"发生错误: {e}")
+        traceback.print_exc()
+        print(f"{process_name} 错误: {e} | 参数: {config}")
+        return None
+
+
+# ==========================================
+# 主程序入口
+# ==========================================
+if __name__ == "__main__":
+    # 配置
+    FILE_PATH = r"W:\project\python_project\oke_auto_trade\kline_data\origin_data_1m_10000000_BTC-USDT-SWAP_2026-02-13.csv"
+    LINE_COUNT = 10000000
+    RESULTS_DIR = "backtest_needle"
+    PROCESS_NUM = 5  # 进程数量
+
+    print("正在加载数据...")
+    df_raw = pd.read_csv(FILE_PATH, nrows=LINE_COUNT)
+    df_raw['open_time'] = pd.to_datetime(df_raw['timestamp'])  # 根据实际列名调整
+    df_raw = df_raw[['open_time', 'open', 'high', 'low', 'close', 'volume']]
+    print(f"数据加载完毕: {len(df_raw)} 行")
+
+    # 2. 参数设置
+    param_grid = {
+        'ma_period': [20, 60, 120, 180, 300],
+        'std_dev_mult': [2, 2.5, 3.0, 3.5, 4, 5],
+        'vol_mult': [2.5, 3, 4.0, 5, 6],
+        'sl_pct': [0.05, 0.01, 0.015, 0.02, 0.03],
+        'exit_mode': ['ma', 'rr'],
+        'tp_ratio': [2.0, 3.0, 4.0, 5.0, 6.0],
+        'fee_rate': [0.0005],
+        'capital_per_trade': [10000]
+    }
+
+    # 生成参数组合
+    keys, values = zip(*param_grid.items())
+    combinations = [dict(zip(keys, v)) for v in itertools.product(*values)]
+    print(f"共生成 {len(combinations)} 组参数组合，准备启用 {PROCESS_NUM} 个进程并行回测...")
+
+    # 准备结果目录
+    if not os.path.exists(RESULTS_DIR):
+        os.makedirs(RESULTS_DIR)
+
+    tasks = [(df_raw, config, RESULTS_DIR) for config in combinations]
+
+    # 4. 多进程执行
+    t_start_all = time.time()
+
+    # 使用 with 语句自动管理 Pool 的关闭
+    with Pool(processes=PROCESS_NUM) as pool:
+        results = pool.map(execute_single_backtest, tasks)
+
+    # 5. 汇总结果
+    # 过滤掉 None (即报错或无交易的结果)
+    valid_summaries = [res for res in results if res is not None]
+
+    if valid_summaries:
+        df_summary = pd.DataFrame(valid_summaries)
+        # 按利润倒序
+        df_summary = df_summary.sort_values(by='total_profit', ascending=False)
+
+        summary_path = os.path.join(RESULTS_DIR, "FINAL_SUMMARY_REPORT.csv")
+        df_summary.to_csv(summary_path, index=False)
+
+        print("\n" + "=" * 50)
+        print(f"全部完成! 总耗时: {time.time() - t_start_all:.2f}s")
+        print(f"最佳参数组合 Top 3:")
+        print(df_summary[['ma_period', 'std_dev_mult', 'exit_mode', 'tp_ratio', 'total_profit']].head(3).to_string())
+        print(f"汇总报表已保存: {summary_path}")
+    else:
+        print("\n警告: 所有组合均未产生有效交易或发生错误。")
