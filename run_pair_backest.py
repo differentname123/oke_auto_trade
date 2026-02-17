@@ -338,16 +338,25 @@ def init_worker(df_to_share):
 
 
 def process_strategy(args):
-    # 【修改】解包时增加 ve 参数
-    z_entry, z_exit, delta, ve = args
+    # 【修改】解包时增加 granularity 参数
+    z_entry, z_exit, delta, ve, granularity = args
     window = 60
     if z_exit >= z_entry:
         return
     global shared_df
-    merged_df = shared_df
 
-    # 【修改】保存的文件名中增加 ve 参数标识，防止不同 ve 的结果相互覆盖
-    back_df_file = f'backtest_pair/result_w{window}_entry{z_entry}_exit{z_exit}_delta{delta}_ve{ve}_kalman.csv'
+    # 【新增】K线数据合并粒度逻辑
+    if granularity > 1:
+        df_to_use = shared_df.copy()
+        df_to_use.set_index('open_time', inplace=True)
+        # 按分钟进行重采样，对于收盘价等状态数据，直接取周期的最后一条记录（last）
+        df_to_use = df_to_use.resample(f'{granularity}min').last().dropna().reset_index()
+        merged_df = df_to_use
+    else:
+        merged_df = shared_df.copy()
+
+    # 【修改】保存的文件名中增加 g{granularity} 参数标识，防止不同粒度的结果相互覆盖
+    back_df_file = f'backtest_pair/result_w{window}_entry{z_entry}_exit{z_exit}_delta{delta}_ve{ve}_g{granularity}_kalman.csv'
 
     if os.path.exists(back_df_file):
         # print(f"Skipping existing file: {back_df_file}")
@@ -355,7 +364,7 @@ def process_strategy(args):
 
     start_time = time.time()
 
-    # 【修改】运行策略时传入 ve
+    # 【修改】运行策略时传入 ve，并使用重采样后的 merged_df
     full_df = generate_pair_trading_signals(merged_df=merged_df, window=window, z_entry=z_entry,
                                             z_exit=z_exit, delta=delta, ve=ve)
 
@@ -392,17 +401,19 @@ if __name__ == '__main__':
     print(f"Data loaded. Rows: {len(original_df)}. Starting multiprocessing...")
 
     window_list = [60]
-    z_entry_list = [1, 1.25, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5,5.5, 6, 7, 8, 9, 10]
+    z_entry_list = [1, 1.25, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 7, 8, 9, 10]
     z_exit_list = [0.0, 0.2, 0.5, 0.8, 1.0, 1.2, 1.5]
     delta_list = [1e-4, 5e-5, 1e-5, 5e-6, 1e-7, 1e-8]
     ve_list = [1e-3, 5e-4, 1e-4, 5e-5, 1e-5]
+    granularity_list = [1, 2, 5, 10, 20, 60, 120, 240, 480, 1440]  # 【新增】合并的粒度列表，1代表1分钟。你可以随意修改添加如 [1, 5, 15, 60] 等粒度
 
     tasks = []
     for z_entry in z_entry_list:
         for z_exit in z_exit_list:
             for delta in delta_list:
-                for ve in ve_list:  # 【新增】再增加一层 ve 的循环
-                    tasks.append((z_entry, z_exit, delta, ve))
+                for ve in ve_list:
+                    for granularity in granularity_list:  # 【新增】增加一层粒度的循环
+                        tasks.append((z_entry, z_exit, delta, ve, granularity))
 
     print(f"Total tasks: {len(tasks)}")
 
