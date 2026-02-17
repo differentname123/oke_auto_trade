@@ -2,7 +2,11 @@ import pandas as pd
 import numpy as np
 import statsmodels.api as sm
 from statsmodels.regression.rolling import RollingOLS
-
+import pandas as pd
+import os
+import time
+from multiprocessing import Pool
+from datetime import datetime
 # 假设 get_feature 是你本地的模块，保持引用
 from get_feature import read_last_n_lines
 
@@ -10,7 +14,7 @@ from get_feature import read_last_n_lines
 # -----------------------------------------------------------------------------
 # 1. 核心策略函数
 # -----------------------------------------------------------------------------
-def generate_pair_trading_signals(df_btc, df_eth, window=60, z_entry=3.0, z_exit=0.5):
+def generate_pair_trading_signals(df_btc, df_eth, merged_df=None, window=60, z_entry=3.0, z_exit=0.5):
     """
     输入:
         df_btc, df_eth: 包含 'open_time' 和 'close' 的 DataFrame
@@ -23,13 +27,16 @@ def generate_pair_trading_signals(df_btc, df_eth, window=60, z_entry=3.0, z_exit
 
     # --- 1. 数据对齐 ---
     # 确保时间戳是索引且格式正确
-    df_btc = df_btc.sort_values('open_time').set_index('open_time')
-    df_eth = df_eth.sort_values('open_time').set_index('open_time')
+    if merged_df is not None:  # 必须明确判断是否为 None
+        df = merged_df
+    else:
+        df_btc = df_btc.sort_values('open_time').set_index('open_time')
+        df_eth = df_eth.sort_values('open_time').set_index('open_time')
 
-    # 合并数据，只保留两者都有的时间点 (Inner Join)
-    df = pd.merge(df_btc[['close']], df_eth[['close']], left_index=True, right_index=True, suffixes=('_btc', '_eth'))
+        # 合并数据，只保留两者都有的时间点 (Inner Join)
+        df = pd.merge(df_btc[['close']], df_eth[['close']], left_index=True, right_index=True, suffixes=('_btc', '_eth'))
 
-    df.to_csv('kline/btc_eth.csv')
+        df.to_csv('kline_data/btc_eth.csv')
     print(len(df))
     # --- 2. 计算对数价格 ---
     df['log_btc'] = np.log(df['close_btc'])
@@ -321,52 +328,86 @@ def extract_trades_from_signals(full_df):
     return pd.DataFrame(trades)
 
 
-if __name__ == '__main__':
-    # 配置你的文件路径
-    btc_file = r"W:\project\python_project\oke_auto_trade\kline_data\origin_data_1m_10000000_BTC-USDT-SWAP_2026-02-13.csv"
-    eth_file = r'W:\project\python_project\oke_auto_trade\kline_data\origin_data_1m_10000000_ETH-USDT-SWAP_2026-02-13.csv'
-    back_df_file = 'backtest/pair_trading_results.csv'
+import pandas as pd
+import os
+import time
+from multiprocessing import Pool
+from datetime import datetime
 
-    # 这里原代码有一行读取 back_df_file，如果该文件不存在会报错，建议根据需要保留或注释
-    backtest_df = pd.read_csv(back_df_file)
-    print_backtest_stats(backtest_df)
+# ==========================================
+# 1. 定义一个全局变量，用于在子进程中存放数据
+# ==========================================
+shared_df = None
 
-    # 读取数据
-    df_btc = read_last_n_lines(btc_file, 10000000)
-    df_btc['open_time'] = pd.to_datetime(df_btc['timestamp'])
 
-    df_eth = read_last_n_lines(eth_file, 10000000)
-    df_eth['open_time'] = pd.to_datetime(df_eth['timestamp'])
+def init_worker(df_to_share):
+    """
+    进程初始化函数：
+    每个子进程启动时只运行一次，把数据存为全局变量。
+    这样就不需要在每个任务里重复传递巨大的 DataFrame 了。
+    """
+    global shared_df
+    shared_df = df_to_share
+
+
+def process_strategy(args):
+    """
+    单个策略组合的处理函数
+    """
+    # 这里的 args 不再包含 df，直接使用全局变量 shared_df
+    window, z_entry, z_exit = args
+
+    # 使用全局变量中的数据
+    global shared_df
+    merged_df = shared_df
+
+    # 构造包含参数的文件名
+    back_df_file = f'backtest_pair/result_w{window}_entry{z_entry}_exit{z_exit}.csv'
+
+    # 3. 已存在就跳过
+    if os.path.exists(back_df_file):
+        print(f"Skipping existing file: {back_df_file}")
+        return
+
+    start_time = time.time()
 
     # --- 运行策略 ---
-    full_df = generate_pair_trading_signals(df_btc, df_eth, window=6000)
+    # 注意：确保 generate_pair_trading_signals 内部使用的是 if merged_df is not None:
+    full_df = generate_pair_trading_signals(None, None, merged_df=merged_df, window=window, z_entry=z_entry,
+                                            z_exit=z_exit)
 
-
-    trade_cols = [
-        'close_btc',  # BTC价格
-        'close_eth',  # ETH价格
-        'signal',  # 信号数值
-        'trade_direction',  # 交易方向 (中文描述)
-        'z_score',  # 判断依据：Z-Score
-        'beta',  # 动态对冲比率
-        'alpha', # [新增] 截距
-        'spread'  # 原始价差 (残差)
-    ]
-
-    # 过滤出有信号的行（如果想看全部数据，去掉这个过滤即可）
+    # 过滤出有信号的行
     detailed_result_df = extract_trades_from_signals(full_df)
 
-    # 如果 detailed_result_df 为空，说明没有触发交易，打印后5行原始数据查看状态
-    if detailed_result_df.empty:
-        print("当前数据范围内未触发交易信号。以下是最近的市场状态：")
-        print(full_df[trade_cols].tail())
-    else:
-        print(f"策略运行结束，共捕捉到 {len(detailed_result_df)} 个持仓周期数据点。")
-        print("\n--- 详细交易数据预览 (前10行) ---")
-        print(detailed_result_df.head(10))
-
-        print("\n--- 最近的交易状态 (后10行) ---")
-        print(detailed_result_df.tail(10))
-
-    # 你可以将结果保存为CSV以便深度分析
+    # 2. 保存文件
+    os.makedirs(os.path.dirname(back_df_file), exist_ok=True)
     detailed_result_df.to_csv(back_df_file)
+
+    end_time = time.time()
+    duration = end_time - start_time
+
+    # 3. 打印时间
+    current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{current_time_str}] Saved: {back_df_file} | Time Cost: {duration:.4f}s")
+
+
+if __name__ == '__main__':
+    # 读取数据（只在主进程读取一次）
+    print("Loading data...")
+    original_df = pd.read_csv('kline_data/btc_eth.csv')
+    print("Data loaded. Starting multiprocessing...")
+
+    window_list = [60, 600, 6000, 10000, 20000, 40000, 60000, 100000]
+    z_entry_list = [1.5, 2, 2.5, 3, 4, 5, 6, 7, 10, 15, 20]
+    z_exit_list = [0.5, 1, 1.25]
+
+    # 准备参数列表（注意：这里不再传递 merged_df）
+    tasks = []
+    for window in window_list:
+        for z_entry in z_entry_list:
+            for z_exit in z_exit_list:
+                tasks.append((window, z_entry, z_exit))
+
+    print(len(tasks))
+    with Pool(processes=10, initializer=init_worker, initargs=(original_df,)) as pool:
+        pool.map(process_strategy, tasks)
