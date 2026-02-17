@@ -1710,47 +1710,21 @@ def run_backtest():
                 continue
 
 
-def read_last_n_lines(file_path, n=100):
+def read_last_n_lines(file_path, n=10000):
     """
-    高效读取大文件最后 n 行，无需加载整个文件。
+    最稳定方案：
+    直接用 pandas 读取整个文件，然后截取最后 n 行。
+    适用于文件大小可接受（能放入内存）的情况。
     """
-    with open(file_path, 'r', encoding='utf-8') as f:
-        # 1. 获取表头（第一行）
-        header = f.readline()
+    # 1. 读取整个 CSV 文件
+    df = pd.read_csv(file_path)
 
-    # 2. 以二进制模式打开，跳转到文件末尾
-    with open(file_path, 'rb') as f:
-        f.seek(0, 2)  # 移动到文件末尾
-        file_size = f.tell()
+    # 2. 如果文件行数小于 n，则返回全部
+    if len(df) <= n:
+        return df
 
-        # 预估读取量：假设每行不超过 200 字节（根据实际数据调整），多读一点作为缓冲区
-        # 100行 * 200字节 = 20000字节，这里设置 50KB 以防万一
-        buffer_size = 50 * 1024
-
-        # 如果文件比 buffer 小，就从头读
-        seek_pos = max(0, file_size - buffer_size)
-        f.seek(seek_pos)
-
-        # 读取末尾数据并解码
-        tail_data = f.read().decode('utf-8', errors='ignore')
-
-        # 按换行符分割
-        lines = tail_data.splitlines()
-
-        # 因为我们是随机截断的，tail_data 的第一行通常是不完整的，需要丢弃
-        # 取最后 n 行
-        if len(lines) > n:
-            last_lines = lines[-n:]
-        else:
-            # 如果 buffer 不够大导致行数不足，这里会返回读取到的所有行（通常50KB足够涵盖几百行数据）
-            last_lines = lines[1:]  # 丢弃可能损坏的第一行
-
-    # 3. 拼接表头和数据，转为 DataFrame
-    csv_content = header + "\n".join(last_lines)
-
-    # 使用 io.StringIO 包装字符串，传给 pandas
-    df = pd.read_csv(io.StringIO(csv_content))
-    return df
+    # 3. 返回最后 n 行
+    return df.tail(n)
 
 
 if __name__ == '__main__':

@@ -6,6 +6,9 @@
       <excludeFolder url="file://$MODULE_DIR$/temp" />
       <excludeFolder url="file://$MODULE_DIR$/../a_auto_trade/daily_data_exclude_new_can_buy" />
       <excludeFolder url="file://$MODULE_DIR$/backtest" />
+      <excludeFolder url="file://$MODULE_DIR$/backtest_needle" />
+      <excludeFolder url="file://$MODULE_DIR$/backtest_needle_multi" />
+      <excludeFolder url="file://$MODULE_DIR$/backtest_needle_multi_SHORT" />
     </content>
     <content url="file://$MODULE_DIR$/../../we_project/ShopFusion/llm_service/text_to_video/models/src">
       <sourceFolder url="file://$MODULE_DIR$/../../we_project/ShopFusion/llm_service/text_to_video/models/src" isTestSource="false" />
