@@ -84,11 +84,15 @@ def calculate_kalman_hedge_ratio(x, y, delta=1e-5, ve=1e-3):
 # -----------------------------------------------------------------------------
 # 1. 核心策略函数 (无滚动窗口的纯卡尔曼 Z-Score 优化版)
 # -----------------------------------------------------------------------------
-def generate_pair_trading_signals(df_btc, df_eth, merged_df=None, window=60, z_entry=3.0, z_exit=0.5, delta=1e-5):
+# -----------------------------------------------------------------------------
+# 1. 核心策略函数 (无滚动窗口的纯卡尔曼 Z-Score 优化版)
+# -----------------------------------------------------------------------------
+def generate_pair_trading_signals(df_btc, df_eth, merged_df=None, window=60, z_entry=3.0, z_exit=0.5, delta=1e-5, ve=1e-3):
     """
     输入:
         window: 不再用于计算移动平均，仅作为卡尔曼滤波的“预热期(Burn-in Period)”，
                 跳过最开始不稳定的一段时期，避免产生错误信号。这样也不用修改外层的调用代码。
+        ve: 【新增】卡尔曼滤波测量噪声方差，作为搜索参数传入。
     """
 
     # --- 1. 数据对齐 ---
@@ -105,12 +109,12 @@ def generate_pair_trading_signals(df_btc, df_eth, merged_df=None, window=60, z_e
     df['log_eth'] = np.log(df['close_eth'])
 
     # --- 3. 动态计算 Hedge Ratio (Kalman Filter) ---
-    # 获取新增的 kf_std_devs (卡尔曼原生标准差)
+    # 【修改】将传入的 ve 赋值给卡尔曼滤波函数的 ve 参数
     betas, alphas, kf_spreads, kf_std_devs = calculate_kalman_hedge_ratio(
         df['log_eth'],
         df['log_btc'],
         delta=delta,
-        ve=1e-3
+        ve=ve
     )
 
     df['beta'] = betas
@@ -339,14 +343,16 @@ def init_worker(df_to_share):
 
 
 def process_strategy(args):
-    z_entry, z_exit, delta = args
+    # 【修改】解包时增加 ve 参数
+    z_entry, z_exit, delta, ve = args
     window = 60
     if z_exit >= z_entry:
         return
     global shared_df
     merged_df = shared_df
 
-    back_df_file = f'backtest_pair/result_w{window}_entry{z_entry}_exit{z_exit}_delta{delta}_kalman.csv'
+    # 【修改】保存的文件名中增加 ve 参数标识，防止不同 ve 的结果相互覆盖
+    back_df_file = f'backtest_pair/result_w{window}_entry{z_entry}_exit{z_exit}_delta{delta}_ve{ve}_kalman.csv'
 
     if os.path.exists(back_df_file):
         # print(f"Skipping existing file: {back_df_file}")
@@ -354,9 +360,9 @@ def process_strategy(args):
 
     start_time = time.time()
 
-    # 运行优化后的策略
+    # 【修改】运行策略时传入 ve
     full_df = generate_pair_trading_signals(None, None, merged_df=merged_df, window=window, z_entry=z_entry,
-                                            z_exit=z_exit, delta=delta)
+                                            z_exit=z_exit, delta=delta, ve=ve)
 
     # 运行优化后的提取
     detailed_result_df = extract_trades_from_signals(full_df)
@@ -394,11 +400,14 @@ if __name__ == '__main__':
     z_entry_list = [1, 1.25, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5,5.5, 6, 7, 8, 9, 10]
     z_exit_list = [0.0, 0.2, 0.5, 0.8, 1.0, 1.2, 1.5]
     delta_list = [1e-4, 5e-5, 1e-5, 5e-6, 1e-7, 1e-8]
+    ve_list = [1e-3, 5e-4, 1e-4, 5e-5, 1e-5]
+
     tasks = []
     for z_entry in z_entry_list:
         for z_exit in z_exit_list:
-            for delta in delta_list:  # 增加一层循环
-                tasks.append((z_entry, z_exit, delta))
+            for delta in delta_list:
+                for ve in ve_list:  # 【新增】再增加一层 ve 的循环
+                    tasks.append((z_entry, z_exit, delta, ve))
 
     print(f"Total tasks: {len(tasks)}")
 
