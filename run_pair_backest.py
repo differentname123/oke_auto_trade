@@ -7,19 +7,102 @@ from datetime import datetime
 # 保持原本的引用
 from get_feature import read_last_n_lines
 
+import pandas as pd
+import numpy as np
+
 
 # -----------------------------------------------------------------------------
-# 1. 核心策略函数 (深度优化版)
+# 0. 辅助算法: 卡尔曼滤波计算动态对冲比率 (新增核心)
 # -----------------------------------------------------------------------------
-def generate_pair_trading_signals(df_btc, df_eth, merged_df=None, window=60, z_entry=3.0, z_exit=0.5):
+def calculate_kalman_hedge_ratio(x, y, delta=1e-5, ve=1e-3):
+    """
+    使用卡尔曼滤波计算动态的 Alpha (截距) 和 Beta (斜率)
+    模型: y = alpha + beta * x
+
+    参数:
+        x: 解释变量 (如 ETH log price)
+        y: 被解释变量 (如 BTC log price)
+        delta: 过程噪声协方差系数 (Process Noise Covariance).
+               值越小，Beta变化越慢/越平滑；值越大，Beta越敏感。
+               建议范围 1e-5 到 1e-4。
+        ve: 测量噪声方差 (Measurement Noise Variance).
+
+    返回:
+        beta_series, alpha_series, spread_series
+    """
+    n_obs = len(x)
+
+    # 初始化状态向量 [alpha, beta]
+    state_mean = np.zeros(2)
+    # 初始化状态协方差矩阵 (初始不确定性设大一点)
+    state_cov = np.ones((2, 2)) * 1.0
+
+    # 过程噪声矩阵 Q (控制参数变化的灵活性)
+    # 假设 alpha 和 beta 遵循随机游走
+    Q = np.eye(2) * delta
+
+    # 测量噪声方差 R
+    R = ve
+
+    # 存放结果
+    betas = np.zeros(n_obs)
+    alphas = np.zeros(n_obs)
+    spreads = np.zeros(n_obs)  # 这里的 spread 即预测残差 (Innovation)
+
+    # 转换为 numpy 数组以提高循环速度
+    x_arr = x.values if isinstance(x, pd.Series) else x
+    y_arr = y.values if isinstance(y, pd.Series) else y
+
+    # --- Kalman Filter 递归更新 ---
+    # 由于前后依赖，无法向量化，但 Numpy 循环对于 10万行数据通常只需 1-2秒
+    for t in range(n_obs):
+        # 1. 预测阶段 (Prediction)
+        # 状态预测: x(t|t-1) = x(t-1|t-1) (随机游走假设，预测值等于上一时刻值)
+        state_pred = state_mean
+        # 协方差预测: P(t|t-1) = P(t-1|t-1) + Q
+        cov_pred = state_cov + Q
+
+        # 2. 构建观测矩阵 H
+        # y_t = alpha + beta * x_t
+        # H = [1, x_t]
+        H = np.array([1.0, x_arr[t]])
+
+        # 3. 计算预测误差 (Innovation) 和 误差方差
+        # y_pred = H @ state_pred
+        y_pred = state_pred[0] + state_pred[1] * x_arr[t]
+        error = y_arr[t] - y_pred  # 这就是未经标准化的 Spread
+
+        # S = H P H.T + R
+        S = H @ cov_pred @ H.T + R
+
+        # 4. 计算卡尔曼增益 (Kalman Gain)
+        # K = P H.T * S^-1
+        K = cov_pred @ H.T / S
+
+        # 5. 更新阶段 (Update)
+        # state_new = state_pred + K * error
+        state_mean = state_pred + K * error
+
+        # cov_new = (I - K H) P
+        # 这种写法数值上更稳定: P = (I - KH)P(I - KH)' + KRK'，但简易版通常够用
+        state_cov = cov_pred - np.outer(K, H) @ cov_pred
+
+        # 记录结果
+        alphas[t] = state_mean[0]
+        betas[t] = state_mean[1]
+        spreads[t] = error
+
+    return betas, alphas, spreads
+
+
+# -----------------------------------------------------------------------------
+# 1. 核心策略函数 (卡尔曼滤波优化版)
+# -----------------------------------------------------------------------------
+def generate_pair_trading_signals(df_btc, df_eth, merged_df=None, window=60, z_entry=3.0, z_exit=0.5, delta=1e-5):
     """
     输入:
-        df_btc, df_eth: 包含 'open_time' 和 'close' 的 DataFrame
-        window: 滚动窗口大小 (例如 60 分钟)
-        z_entry: 入场阈值 (标准差倍数)
-        z_exit: 出场阈值
-    输出:
-        处理后的完整 DataFrame，包含信号、方向描述、Z-score等详细数据
+        window: 这里的 window 仅用于计算 Spread 的 Z-Score (均值回归的周期)，
+                不再用于计算 Beta (Beta由卡尔曼滤波全量历史决定)。
     """
 
     # --- 1. 数据对齐 ---
@@ -28,71 +111,65 @@ def generate_pair_trading_signals(df_btc, df_eth, merged_df=None, window=60, z_e
     else:
         df_btc = df_btc.sort_values('open_time').set_index('open_time')
         df_eth = df_eth.sort_values('open_time').set_index('open_time')
-        # 合并数据，只保留两者都有的时间点 (Inner Join)
         df = pd.merge(df_btc[['close']], df_eth[['close']], left_index=True, right_index=True,
                       suffixes=('_btc', '_eth'))
-        df.to_csv('kline_data/btc_eth.csv')
 
     # --- 2. 计算对数价格 ---
     df['log_btc'] = np.log(df['close_btc'])
     df['log_eth'] = np.log(df['close_eth'])
 
-    # --- 3. 滚动计算动态对冲比率 (Rolling Beta) [优化核心] ---
-    # 替换掉了缓慢的 statsmodels RollingOLS
-    # 使用公式: Beta = Cov(x, y) / Var(x)
-    #           Alpha = Mean(y) - Beta * Mean(x)
+    # --- 3. 动态计算 Hedge Ratio (Kalman Filter) [核心替换] ---
+    # 使用卡尔曼滤波替代原本的 Rolling OLS
+    # 这里的 delta 控制 Beta 变化的灵活性，1e-5 是经验值，对应较平滑的变化
+    betas, alphas, kf_spreads = calculate_kalman_hedge_ratio(
+        df['log_eth'],
+        df['log_btc'],
+        delta=delta,  # 过程噪声 (可调: 1e-4 更灵敏, 1e-5 更平滑)
+        ve=1e-3  # 观测噪声
+    )
 
-    # 预计算滚动统计量 (Pandas C底层优化，速度极快)
-    rolling_cov = df['log_btc'].rolling(window=window).cov(df['log_eth'])
-    rolling_var = df['log_eth'].rolling(window=window).var()
-    rolling_mean_y = df['log_btc'].rolling(window=window).mean()
-    rolling_mean_x = df['log_eth'].rolling(window=window).mean()
+    df['beta'] = betas
+    df['alpha'] = alphas
 
-    # 计算 Beta 和 Alpha
-    df['beta'] = rolling_cov / rolling_var
-    df['alpha'] = rolling_mean_y - (df['beta'] * rolling_mean_x)
+    # 注意: 卡尔曼滤波直接产出的 spread (error) 是 "当前价格 - 预测价格"
+    # 也就是纯粹的残差，这比手动计算 log_btc - (beta*log_eth + alpha) 更准确，
+    # 因为它是基于 t-1 时刻的预测参数计算 t 时刻的残差，避免了未来函数引入。
+    df['spread'] = kf_spreads
 
-    # --- 4. 构建价差 (Spread) 和 Z-Score ---
-    # Spread = Residual (残差)
-    df['spread'] = df['log_btc'] - (df['beta'] * df['log_eth'] + df['alpha'])
+    # --- 4. Z-Score 计算 ---
+    # 虽然 Beta 不需要窗口，但判断 Spread 是否偏离均值，仍然需要一个基准窗口
+    # 来定义"什么是正常波动范围"。
 
-    # 计算价差的滚动均值和标准差
     df['spread_mean'] = df['spread'].rolling(window=window).mean()
     df['spread_std'] = df['spread'].rolling(window=window).std()
 
-    # Z-Score
+    # 计算 Z-Score
     df['z_score'] = (df['spread'] - df['spread_mean']) / df['spread_std']
 
     # --- 5. 生成交易信号 (State Machine) ---
-    # 使用 numpy 数组进行循环，避免 DataFrame 索引访问开销
-
     signals = np.zeros(len(df))
-    current_position = 0  # 初始空仓
-
-    # 转换为 numpy 数组加速读取
+    current_position = 0
     z_values = df['z_score'].values
-    # 填充 NaN 为 0 避免判断错误 (前 window 行通常是 NaN)
     z_values = np.nan_to_num(z_values, nan=0.0)
 
-    # 循环优化: 纯数值比较
+    # 从 window 开始循环 (虽然 Beta 有值，但 Z-Score 前 window 个是 NaN)
     for i in range(window, len(df)):
         z = z_values[i]
 
-        # 逻辑判断
         if current_position == 0:
-            # 入场逻辑
+            # 入场
             if z > z_entry:
-                current_position = 1  # 卖BTC / 买ETH
+                current_position = 1
             elif z < -z_entry:
-                current_position = -1  # 买BTC / 卖ETH
+                current_position = -1
 
         elif current_position == 1:
-            # 多头平仓逻辑
+            # 多头平仓
             if z < z_exit:
                 current_position = 0
 
         elif current_position == -1:
-            # 空头平仓逻辑
+            # 空头平仓
             if z > -z_exit:
                 current_position = 0
 
@@ -100,15 +177,9 @@ def generate_pair_trading_signals(df_btc, df_eth, merged_df=None, window=60, z_e
 
     df['signal'] = signals
 
-    # --- 6. 生成人类可读的交易方向描述 ---
-    # 为了速度，只在最后输出时映射，或者如果后续不需要该列可以省略，这里保留以防万一
-    # (如果这步耗时，可以放到 extract 之后只对交易行做，但目前 vector map 很快)
-    direction_map = {
-        1: '做空价差 (卖BTC/买ETH)',
-        -1: '做多价差 (买BTC/卖ETH)',
-        0: '空仓观望'
-    }
-    df['trade_direction'] = df['signal'].map(direction_map)
+    # 映射方向描述 (可选)
+    # direction_map = {1: '做空价差', -1: '做多价差', 0: '空仓'}
+    # df['trade_direction'] = df['signal'].map(direction_map)
 
     return df
 
@@ -183,6 +254,7 @@ def print_backtest_stats(trade_df):
 def extract_trades_from_signals(full_df):
     """
     优化后的交易提取函数：
+    修正了盈亏计算逻辑，严格按照卡尔曼滤波计算出的入场 Beta 进行资金分配对冲。
     移除循环中的 DataFrame 切片操作 (.loc[i:]), 改为线性扫描
     """
     # --- 1. 数据预处理 ---
@@ -195,7 +267,6 @@ def extract_trades_from_signals(full_df):
             df.rename(columns={'timestamp': 'open_time'}, inplace=True)
 
     # 提取需要的 numpy 数组，避免循环中访问 DataFrame
-    # 这样速度极快
     signals = df['signal'].values
     times = df['open_time'].values
     close_btc = df['close_btc'].values
@@ -205,18 +276,7 @@ def extract_trades_from_signals(full_df):
     betas = df['beta'].values
     alphas = df['alpha'].values
 
-    # 识别状态变化点
-    # 0 -> 1/-1 (开仓)
-    # 1/-1 -> 0 (平仓)
-    # 我们只需要遍历那些状态发生变化的行，而不是所有行
-
     trades = []
-
-    # 寻找开仓点索引 (当前不为0，前一个为0)
-    # 加上 [0] 是因为 np.where 返回 tuple
-    # shift logic: 比较 signal[i] 和 signal[i-1]
-    # np.diff 可以快速找到变化点，但为了逻辑清晰，我们使用简单的线性扫描
-    # 因为已经转为 numpy array，for 循环即使跑 100万次也只需 0.x 秒
 
     open_idx = -1
     in_trade = False
@@ -243,23 +303,26 @@ def extract_trades_from_signals(full_df):
             op_btc, cl_btc = close_btc[open_idx], close_btc[close_idx]
             op_eth, cl_eth = close_eth[open_idx], close_eth[close_idx]
 
-            # 收益率
+            # 单腿基础收益率
             btc_roi = (cl_btc - op_btc) / op_btc
             eth_roi = (cl_eth - op_eth) / op_eth
 
+            # 获取入场当时的 Beta 值 (作为对冲比率)
+            entry_beta = betas[open_idx]
+
+            # 【核心修正】：利用动态 Beta 计算净盈亏 (Net PnL)
             if signal_dir == -1:
-                # Long Spread: Long BTC, Short ETH
-                net_pnl = btc_roi - eth_roi
-                direction_str = '做多价差 (Long BTC/Short ETH)'
+                # Long Spread: 做多 1 单位 BTC, 做空 Beta 单位 ETH
+                net_pnl = btc_roi - (entry_beta * eth_roi)
+                direction_str = f'做多价差 (Long BTC / Short {entry_beta:.3f} ETH)'
             else:
-                # Short Spread: Short BTC, Long ETH
-                net_pnl = eth_roi - btc_roi
-                direction_str = '做空价差 (Short BTC/Long ETH)'
+                # Short Spread: 做空 1 单位 BTC, 做多 Beta 单位 ETH
+                net_pnl = (entry_beta * eth_roi) - btc_roi
+                direction_str = f'做空价差 (Short BTC / Long {entry_beta:.3f} ETH)'
 
             trade_record = {
                 'open_time': times[open_idx],
                 'close_time': times[close_idx],
-                # 假设 times 是 datetime 对象，如果不确定需转换，这里假设已经是 pandas Timestamp
                 'duration_mins': (pd.Timestamp(times[close_idx]) - pd.Timestamp(times[open_idx])).total_seconds() / 60,
                 'direction': direction_str,
                 'btc_roi': f"{btc_roi * 100:.2f}",
@@ -299,13 +362,13 @@ def init_worker(df_to_share):
 
 
 def process_strategy(args):
-    window, z_entry, z_exit = args
+    window, z_entry, z_exit, delta = args
     if z_exit >= z_entry:
         return
     global shared_df
     merged_df = shared_df
 
-    back_df_file = f'backtest_pair/result_w{window}_entry{z_entry}_exit{z_exit}.csv'
+    back_df_file = f'backtest_pair/result_w{window}_entry{z_entry}_exit{z_exit}_delta{delta}_kalman.csv'
 
     if os.path.exists(back_df_file):
         # print(f"Skipping existing file: {back_df_file}")
@@ -315,7 +378,7 @@ def process_strategy(args):
 
     # 运行优化后的策略
     full_df = generate_pair_trading_signals(None, None, merged_df=merged_df, window=window, z_entry=z_entry,
-                                            z_exit=z_exit)
+                                            z_exit=z_exit, delta=delta)
 
     # 运行优化后的提取
     detailed_result_df = extract_trades_from_signals(full_df)
@@ -349,15 +412,16 @@ if __name__ == '__main__':
 
     print(f"Data loaded. Rows: {len(original_df)}. Starting multiprocessing...")
 
-    window_list = [60, 600, 1000, 2000, 4000, 6000, 10000, 20000, 40000, 60000, 100000]
+    window_list = [60, 120, 240, 600, 1000, 2000, 4000, 6000, 10000, 20000, 40000, 60000, 100000]
     z_entry_list = [1.5, 2, 2.5, 3, 4, 5, 6, 7, 10, 15, 20]
-    z_exit_list = [0.5, 1, 1.25, 1.5, 2, 3, 4]
-
+    z_exit_list = [0.0, 0.2, 0.5, 0.8, 1.0, 1.2, 1.5]
+    delta_list = [1e-4, 5e-5, 1e-5, 5e-6, 1e-6]
     tasks = []
     for window in window_list:
         for z_entry in z_entry_list:
             for z_exit in z_exit_list:
-                tasks.append((window, z_entry, z_exit))
+                for delta in delta_list:  # 增加一层循环
+                    tasks.append((window, z_entry, z_exit, delta))
 
     print(f"Total tasks: {len(tasks)}")
 
