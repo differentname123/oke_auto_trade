@@ -87,7 +87,7 @@ def calculate_kalman_hedge_ratio(x, y, delta=1e-5, ve=1e-3):
 # -----------------------------------------------------------------------------
 # 1. 核心策略函数 (无滚动窗口的纯卡尔曼 Z-Score 优化版)
 # -----------------------------------------------------------------------------
-def generate_pair_trading_signals(df_btc, df_eth, merged_df=None, window=60, z_entry=3.0, z_exit=0.5, delta=1e-5, ve=1e-3):
+def generate_pair_trading_signals(merged_df=None, window=60, z_entry=3.0, z_exit=0.5, delta=1e-5, ve=1e-3):
     """
     输入:
         window: 不再用于计算移动平均，仅作为卡尔曼滤波的“预热期(Burn-in Period)”，
@@ -98,11 +98,6 @@ def generate_pair_trading_signals(df_btc, df_eth, merged_df=None, window=60, z_e
     # --- 1. 数据对齐 ---
     if merged_df is not None:
         df = merged_df
-    else:
-        df_btc = df_btc.sort_values('open_time').set_index('open_time')
-        df_eth = df_eth.sort_values('open_time').set_index('open_time')
-        df = pd.merge(df_btc[['close']], df_eth[['close']], left_index=True, right_index=True,
-                      suffixes=('_btc', '_eth'))
 
     # --- 2. 计算对数价格 ---
     df['log_btc'] = np.log(df['close_btc'])
@@ -361,7 +356,7 @@ def process_strategy(args):
     start_time = time.time()
 
     # 【修改】运行策略时传入 ve
-    full_df = generate_pair_trading_signals(None, None, merged_df=merged_df, window=window, z_entry=z_entry,
+    full_df = generate_pair_trading_signals(merged_df=merged_df, window=window, z_entry=z_entry,
                                             z_exit=z_exit, delta=delta, ve=ve)
 
     # 运行优化后的提取
