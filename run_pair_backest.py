@@ -14,21 +14,13 @@ import numpy as np
 # -----------------------------------------------------------------------------
 # 0. 辅助算法: 卡尔曼滤波计算动态对冲比率 (新增核心)
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# 0. 辅助算法: 卡尔曼滤波计算动态对冲比率 (纯血卡尔曼升级版)
+# -----------------------------------------------------------------------------
 def calculate_kalman_hedge_ratio(x, y, delta=1e-5, ve=1e-3):
     """
-    使用卡尔曼滤波计算动态的 Alpha (截距) 和 Beta (斜率)
+    使用卡尔曼滤波计算动态的 Alpha (截距)、Beta (斜率) 及其自带的测量方差
     模型: y = alpha + beta * x
-
-    参数:
-        x: 解释变量 (如 ETH log price)
-        y: 被解释变量 (如 BTC log price)
-        delta: 过程噪声协方差系数 (Process Noise Covariance).
-               值越小，Beta变化越慢/越平滑；值越大，Beta越敏感。
-               建议范围 1e-5 到 1e-4。
-        ve: 测量噪声方差 (Measurement Noise Variance).
-
-    返回:
-        beta_series, alpha_series, spread_series
     """
     n_obs = len(x)
 
@@ -38,7 +30,6 @@ def calculate_kalman_hedge_ratio(x, y, delta=1e-5, ve=1e-3):
     state_cov = np.ones((2, 2)) * 1.0
 
     # 过程噪声矩阵 Q (控制参数变化的灵活性)
-    # 假设 alpha 和 beta 遵循随机游走
     Q = np.eye(2) * delta
 
     # 测量噪声方差 R
@@ -47,44 +38,36 @@ def calculate_kalman_hedge_ratio(x, y, delta=1e-5, ve=1e-3):
     # 存放结果
     betas = np.zeros(n_obs)
     alphas = np.zeros(n_obs)
-    spreads = np.zeros(n_obs)  # 这里的 spread 即预测残差 (Innovation)
+    spreads = np.zeros(n_obs)
+    std_devs = np.zeros(n_obs)  # 【新增】存放卡尔曼原生预测误差的标准差
 
     # 转换为 numpy 数组以提高循环速度
     x_arr = x.values if isinstance(x, pd.Series) else x
     y_arr = y.values if isinstance(y, pd.Series) else y
 
-    # --- Kalman Filter 递归更新 ---
-    # 由于前后依赖，无法向量化，但 Numpy 循环对于 10万行数据通常只需 1-2秒
     for t in range(n_obs):
         # 1. 预测阶段 (Prediction)
-        # 状态预测: x(t|t-1) = x(t-1|t-1) (随机游走假设，预测值等于上一时刻值)
         state_pred = state_mean
-        # 协方差预测: P(t|t-1) = P(t-1|t-1) + Q
         cov_pred = state_cov + Q
 
         # 2. 构建观测矩阵 H
-        # y_t = alpha + beta * x_t
-        # H = [1, x_t]
         H = np.array([1.0, x_arr[t]])
 
         # 3. 计算预测误差 (Innovation) 和 误差方差
-        # y_pred = H @ state_pred
         y_pred = state_pred[0] + state_pred[1] * x_arr[t]
-        error = y_arr[t] - y_pred  # 这就是未经标准化的 Spread
+        error = y_arr[t] - y_pred  # 纯粹残差
 
-        # S = H P H.T + R
+        # 【核心提取】S = H P H.T + R，这就是当前时刻预测误差的理论方差
         S = H @ cov_pred @ H.T + R
 
+        # 记录当前的标准差 (方差开根号)
+        std_devs[t] = np.sqrt(S)
+
         # 4. 计算卡尔曼增益 (Kalman Gain)
-        # K = P H.T * S^-1
         K = cov_pred @ H.T / S
 
         # 5. 更新阶段 (Update)
-        # state_new = state_pred + K * error
         state_mean = state_pred + K * error
-
-        # cov_new = (I - K H) P
-        # 这种写法数值上更稳定: P = (I - KH)P(I - KH)' + KRK'，但简易版通常够用
         state_cov = cov_pred - np.outer(K, H) @ cov_pred
 
         # 记录结果
@@ -92,17 +75,20 @@ def calculate_kalman_hedge_ratio(x, y, delta=1e-5, ve=1e-3):
         betas[t] = state_mean[1]
         spreads[t] = error
 
-    return betas, alphas, spreads
+    return betas, alphas, spreads, std_devs
 
 
 # -----------------------------------------------------------------------------
 # 1. 核心策略函数 (卡尔曼滤波优化版)
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# 1. 核心策略函数 (无滚动窗口的纯卡尔曼 Z-Score 优化版)
+# -----------------------------------------------------------------------------
 def generate_pair_trading_signals(df_btc, df_eth, merged_df=None, window=60, z_entry=3.0, z_exit=0.5, delta=1e-5):
     """
     输入:
-        window: 这里的 window 仅用于计算 Spread 的 Z-Score (均值回归的周期)，
-                不再用于计算 Beta (Beta由卡尔曼滤波全量历史决定)。
+        window: 不再用于计算移动平均，仅作为卡尔曼滤波的“预热期(Burn-in Period)”，
+                跳过最开始不稳定的一段时期，避免产生错误信号。这样也不用修改外层的调用代码。
     """
 
     # --- 1. 数据对齐 ---
@@ -118,33 +104,28 @@ def generate_pair_trading_signals(df_btc, df_eth, merged_df=None, window=60, z_e
     df['log_btc'] = np.log(df['close_btc'])
     df['log_eth'] = np.log(df['close_eth'])
 
-    # --- 3. 动态计算 Hedge Ratio (Kalman Filter) [核心替换] ---
-    # 使用卡尔曼滤波替代原本的 Rolling OLS
-    # 这里的 delta 控制 Beta 变化的灵活性，1e-5 是经验值，对应较平滑的变化
-    betas, alphas, kf_spreads = calculate_kalman_hedge_ratio(
+    # --- 3. 动态计算 Hedge Ratio (Kalman Filter) ---
+    # 获取新增的 kf_std_devs (卡尔曼原生标准差)
+    betas, alphas, kf_spreads, kf_std_devs = calculate_kalman_hedge_ratio(
         df['log_eth'],
         df['log_btc'],
-        delta=delta,  # 过程噪声 (可调: 1e-4 更灵敏, 1e-5 更平滑)
-        ve=1e-3  # 观测噪声
+        delta=delta,
+        ve=1e-3
     )
 
     df['beta'] = betas
     df['alpha'] = alphas
-
-    # 注意: 卡尔曼滤波直接产出的 spread (error) 是 "当前价格 - 预测价格"
-    # 也就是纯粹的残差，这比手动计算 log_btc - (beta*log_eth + alpha) 更准确，
-    # 因为它是基于 t-1 时刻的预测参数计算 t 时刻的残差，避免了未来函数引入。
     df['spread'] = kf_spreads
 
-    # --- 4. Z-Score 计算 ---
-    # 虽然 Beta 不需要窗口，但判断 Spread 是否偏离均值，仍然需要一个基准窗口
-    # 来定义"什么是正常波动范围"。
+    # --- 4. Z-Score 计算 (抛弃 Rolling，使用卡尔曼原生方差) ---
+    df['spread_std'] = kf_std_devs
 
-    df['spread_mean'] = df['spread'].rolling(window=window).mean()
-    df['spread_std'] = df['spread'].rolling(window=window).std()
-
-    # 计算 Z-Score
-    df['z_score'] = (df['spread'] - df['spread_mean']) / df['spread_std']
+    # 卡尔曼滤波预测误差的数学期望（均值）天然为 0
+    # 所以 Z-Score 直接等于: 残差 / 卡尔曼标准差
+    # 加上 np.divide 是为了防止极早期标准差为 0 导致计算报错
+    df['z_score'] = np.divide(df['spread'], df['spread_std'],
+                              out=np.zeros_like(df['spread']),
+                              where=df['spread_std'] != 0)
 
     # --- 5. 生成交易信号 (State Machine) ---
     signals = np.zeros(len(df))
@@ -152,7 +133,7 @@ def generate_pair_trading_signals(df_btc, df_eth, merged_df=None, window=60, z_e
     z_values = df['z_score'].values
     z_values = np.nan_to_num(z_values, nan=0.0)
 
-    # 从 window 开始循环 (虽然 Beta 有值，但 Z-Score 前 window 个是 NaN)
+    # 循环从 window 开始，单纯为了跳过卡尔曼刚初始化的震荡期
     for i in range(window, len(df)):
         z = z_values[i]
 
@@ -176,10 +157,6 @@ def generate_pair_trading_signals(df_btc, df_eth, merged_df=None, window=60, z_e
         signals[i] = current_position
 
     df['signal'] = signals
-
-    # 映射方向描述 (可选)
-    # direction_map = {1: '做空价差', -1: '做多价差', 0: '空仓'}
-    # df['trade_direction'] = df['signal'].map(direction_map)
 
     return df
 
@@ -362,7 +339,8 @@ def init_worker(df_to_share):
 
 
 def process_strategy(args):
-    window, z_entry, z_exit, delta = args
+    z_entry, z_exit, delta = args
+    window = 60
     if z_exit >= z_entry:
         return
     global shared_df
@@ -412,16 +390,15 @@ if __name__ == '__main__':
 
     print(f"Data loaded. Rows: {len(original_df)}. Starting multiprocessing...")
 
-    window_list = [60, 120, 240, 600, 1000, 2000, 4000, 6000, 10000, 20000, 40000, 60000, 100000]
-    z_entry_list = [1.5, 2, 2.5, 3, 4, 5, 6, 7, 10, 15, 20]
+    window_list = [60]
+    z_entry_list = [1, 1.25, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5,5.5, 6, 7, 8, 9, 10]
     z_exit_list = [0.0, 0.2, 0.5, 0.8, 1.0, 1.2, 1.5]
-    delta_list = [1e-4, 5e-5, 1e-5, 5e-6, 1e-6]
+    delta_list = [1e-4, 5e-5, 1e-5, 5e-6, 1e-7, 1e-8]
     tasks = []
-    for window in window_list:
-        for z_entry in z_entry_list:
-            for z_exit in z_exit_list:
-                for delta in delta_list:  # 增加一层循环
-                    tasks.append((window, z_entry, z_exit, delta))
+    for z_entry in z_entry_list:
+        for z_exit in z_exit_list:
+            for delta in delta_list:  # 增加一层循环
+                tasks.append((z_entry, z_exit, delta))
 
     print(f"Total tasks: {len(tasks)}")
 
