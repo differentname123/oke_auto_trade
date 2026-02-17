@@ -1959,7 +1959,7 @@ def download_data():
     inst_id_list = ['BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'XRP-USDT-SWAP', 'TON-USDT-SWAP', 'DOGE-USDT-SWAP']
     if not os.path.exists(backtest_path):
         os.makedirs(backtest_path)
-    bar_list = ['1m']
+    bar_list = ['1s']
     #获取当前时间，精确到天
     now = datetime.datetime.now()
     # 转换为可读性格式

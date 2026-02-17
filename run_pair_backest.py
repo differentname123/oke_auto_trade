@@ -1,3 +1,5 @@
+import re
+
 import pandas as pd
 import numpy as np
 import os
@@ -162,20 +164,27 @@ def generate_pair_trading_signals(merged_df=None, window=60, z_entry=3.0, z_exit
 
 def print_backtest_stats(trade_df):
     """
-    保持原样
+    输入: extract_trades_from_signals 生成的 trade_df
+    输出: 打印详细的策略回测绩效报告
     """
     if trade_df.empty:
-        # print("【统计报告】无交易记录，无法计算指标。")
+        print("【统计报告】无交易记录，无法计算指标。")
         return
 
-    print("-" * 50)
-    print("             策略回测绩效报告 (Performance Report)")
-    print("-" * 50)
+    # print("-" * 50)
+    # print("             策略回测绩效报告 (Performance Report)")
+    # print("-" * 50)
 
+    # --- 1. 基础数据 ---
     total_trades = len(trade_df)
+
+    # 累计收益 (所有单次收益率的简单累加，模拟复利需更复杂计算，这里用单利近似)
     total_return = trade_df['net_pnl'].sum()
+
+    # 平均每笔收益
     avg_return = trade_df['net_pnl'].mean()
 
+    # --- 2. 胜率分析 (Win Rate) ---
     winning_trades = trade_df[trade_df['net_pnl'] > 0]
     losing_trades = trade_df[trade_df['net_pnl'] <= 0]
 
@@ -183,49 +192,73 @@ def print_backtest_stats(trade_df):
     loss_count = len(losing_trades)
     win_rate = win_count / total_trades if total_trades > 0 else 0
 
+    # --- 3. 盈亏比 (Profit Factor) ---
+    # 总盈利 / 总亏损的绝对值
     gross_profit = winning_trades['net_pnl'].sum()
     gross_loss = abs(losing_trades['net_pnl'].sum())
 
     if gross_loss == 0:
-        profit_factor = float('inf')
+        profit_factor = float('inf')  # 无亏损，盈亏比无穷大
     else:
         profit_factor = gross_profit / gross_loss
 
+    # --- 4. 最大回撤 (Max Drawdown) ---
+    # 构建资金曲线 (Cumulative PnL Curve)
     trade_df['cum_pnl'] = trade_df['net_pnl'].cumsum()
+
+    # 计算历史最高点 (High Water Mark)
     trade_df['peak'] = trade_df['cum_pnl'].cummax()
+
+    # 计算当前回撤
     trade_df['drawdown'] = trade_df['cum_pnl'] - trade_df['peak']
+
+    # 找到最大回撤 (最小值)
     max_drawdown = trade_df['drawdown'].min()
 
+    # 发生最大回撤的交易索引
     dd_idx = trade_df['drawdown'].idxmin()
     max_dd_time = trade_df.loc[dd_idx, 'close_time'] if pd.notna(dd_idx) else "N/A"
 
+    # --- 5. 持仓时间分析 ---
     avg_duration = trade_df['duration_mins'].mean()
     max_duration = trade_df['duration_mins'].max()
+    avg_profit_per_trade = trade_df['net_pnl'].mean()
 
-    print(f"1. 交易概况")
-    print(f"   - 总交易次数: {total_trades} 次")
-    print(f"   - 盈利次数:   {win_count} 次")
-    print(f"   - 胜率 (Win Rate): {win_rate:.2%}")
-    print(f"")
-    print(f"2. 收益表现")
-    print(f"   - 累计总收益率: {total_return:.2%} (单利累加)")
-    print(f"   - 盈亏比 (Profit Factor): {profit_factor:.2f}")
-    print(f"")
-    print(f"3. 风险评估")
-    print(f"   - 最大回撤 (Max Drawdown): {max_drawdown:.2%}")
-    print(f"")
-    print("-" * 50)
+    # # --- 6. 打印结果 ---
+    # print(f"1. 交易概况")
+    # print(f"   - 总交易次数: {total_trades} 次")
+    # print(f"   - 盈利次数:   {win_count} 次")
+    # print(f"   - 亏损次数:   {loss_count} 次")
+    # print(f"   - 胜率 (Win Rate): {win_rate:.2%}")
+    # print(f"")
+    #
+    # print(f"2. 收益表现")
+    # print(f"   - 累计总收益率: {total_return:.2%} (单利累加)")
+    # print(f"   - 平均单笔收益: {avg_return:.4%}")
+    # print(f"   - 盈亏比 (Profit Factor): {profit_factor:.2f} (建议 > 1.5)")
+    # print(f"")
+    #
+    # print(f"3. 风险评估")
+    # print(f"   - 最大回撤 (Max Drawdown): {max_drawdown:.2%} (资金曲线峰值回落幅度)")
+    # print(f"   - 最糟糕的交易时刻: {max_dd_time}")
+    # print(f"")
+    #
+    # print(f"4. 时间效率")
+    # print(f"   - 平均持仓时间: {avg_duration:.1f} 分钟")
+    # print(f"   - 最长持仓时间: {max_duration:.1f} 分钟")
+    # print("-" * 50)
 
+    # 可选：返回关键指标字典供后续使用
     return {
         'Total Return': total_return,
-        'total_trades': total_trades,
+        'total_trades':total_trades,
         'Win Rate': win_rate,
+        'avg_profit_per_trade':avg_profit_per_trade,
         'Max Drawdown': max_drawdown,
         'Profit Factor': profit_factor,
-        'avg_duration': avg_duration,
+        'avg_duration':avg_duration,
         '最长持仓时间': max_duration
     }
-
 
 def extract_trades_from_signals(full_df):
     """
@@ -383,7 +416,80 @@ def process_strategy(args):
     print(f"[{current_time_str}] Saved: {back_df_file} | Time Cost: {duration:.4f}s")
 
 
+def parse_backtest_filename(filepath):
+    filename = os.path.basename(filepath)
+
+    # 正则表达式不变，依然完美匹配你的格式
+    pattern = (
+        r"result_"
+        r"w(?P<window>.+?)_"
+        r"entry(?P<z_entry>.+?)_"
+        r"exit(?P<z_exit>.+?)_"
+        r"delta(?P<delta>.+?)_"
+        r"ve(?P<ve>.+?)_"
+        r"g(?P<granularity>.+?)_"
+        r"kalman\.csv"
+    )
+
+    match = re.search(pattern, filename)
+
+    if match:
+        raw_data = match.groupdict()
+        parsed_data = {}
+
+        # --- 优化的类型转换逻辑 ---
+        for key, value in raw_data.items():
+            try:
+                # 1. 优先尝试转换为整数 (例如 w60, g1)
+                parsed_data[key] = int(value)
+            except ValueError:
+                try:
+                    # 2. 如果不是整数，尝试转换为浮点数
+                    # 这能自动处理 '2.5', '0.0001', 以及科学计数法 '1e-07'
+                    parsed_data[key] = float(value)
+                except ValueError:
+                    # 3. 如果都不是，保留为字符串 (例如 '5m', 'True')
+                    parsed_data[key] = value
+
+        return parsed_data
+    else:
+        print(f"解析失败: {filename}")
+        return None
+
+def run_good_params():
+    original_df = pd.read_csv('kline_data/sol_xrp.csv')
+    final_df_path = 'kline_data/result_df.csv'
+    df = pd.read_csv(final_df_path)
+    df['score'] = -(df['avg_profit_per_trade'] - 0.1) * df['total_trades'] / (df['Max Drawdown'] - 0.5)
+    df_filtered = df[df['score'] > 10]
+    tasks = []
+    for index, row in df_filtered.iterrows():
+        # 从该行的 'file_name' 列解析参数
+        params = parse_backtest_filename(row['file_name'])
+
+        if params:
+            # 严格按照你要求的顺序组装任务元组
+            # tasks.append((z_entry, z_exit, delta, ve, granularity))
+            task_tuple = (
+                params['z_entry'],
+                params['z_exit'],
+                params['delta'],
+                params['ve'],
+                params['granularity']
+            )
+            if params['granularity'] == 1:
+                tasks.append(task_tuple)
+
+    print(f"Total filtered tasks: {len(tasks)}")
+
+    # 适当调整进程数，根据你 CPU 核心数决定
+    with Pool(processes=10, initializer=init_worker, initargs=(original_df,)) as pool:
+        pool.map(process_strategy, tasks)
+
+
 if __name__ == '__main__':
+
+
     # 读取数据（只在主进程读取一次）
     print("Loading data...")
     # 确保这里的路径和你本地文件一致
@@ -420,3 +526,5 @@ if __name__ == '__main__':
     # 适当调整进程数，根据你 CPU 核心数决定
     with Pool(processes=10, initializer=init_worker, initargs=(original_df,)) as pool:
         pool.map(process_strategy, tasks)
+
+    # run_good_params()
