@@ -89,27 +89,32 @@ def calculate_kalman_hedge_ratio(x, y, delta=1e-5, ve=1e-3):
 # -----------------------------------------------------------------------------
 # 1. 核心策略函数 (无滚动窗口的纯卡尔曼 Z-Score 优化版)
 # -----------------------------------------------------------------------------
-def generate_pair_trading_signals(merged_df=None, window=60, z_entry=3.0, z_exit=0.5, delta=1e-5, ve=1e-3):
+def generate_pair_trading_signals(merged_df=None, main_col='close_btc', sub_col='close_eth', window=60, z_entry=3.0, z_exit=0.5, delta=1e-5, ve=1e-3):
     """
     输入:
+        merged_df: 包含价格数据的 DataFrame。
+        main_col: 【新增】主资产列名（对应原代码中的 close_eth，作为 Y 变量）。
+        sub_col:  【新增】从资产列名（对应原代码中的 close_btc，作为 X 变量）。
         window: 不再用于计算移动平均，仅作为卡尔曼滤波的“预热期(Burn-in Period)”，
-                跳过最开始不稳定的一段时期，避免产生错误信号。这样也不用修改外层的调用代码。
-        ve: 【新增】卡尔曼滤波测量噪声方差，作为搜索参数传入。
+                跳过最开始不稳定的一段时期，避免产生错误信号。
+        ve: 卡尔曼滤波测量噪声方差。
     """
 
     # --- 1. 数据对齐 ---
     if merged_df is not None:
         df = merged_df
 
-    # --- 2. 计算对数价格 ---
-    df['log_btc'] = np.log(df['close_btc'])
-    df['log_eth'] = np.log(df['close_eth'])
+    # --- 2. 计算对数价格 (通用化处理) ---
+    # 使用通用的列名存储对数价格，避免硬编码特定币种
+    df['log_main'] = np.log(df[main_col])
+    df['log_sub'] = np.log(df[sub_col])
 
     # --- 3. 动态计算 Hedge Ratio (Kalman Filter) ---
-    # 【修改】将传入的 ve 赋值给卡尔曼滤波函数的 ve 参数
+    # 【修改】使用通用的 log_main 和 log_sub 作为输入
+    # 注意：根据原代码逻辑，main (原eth) 是第一个参数，sub (原btc) 是第二个参数
     betas, alphas, kf_spreads, kf_std_devs = calculate_kalman_hedge_ratio(
-        df['log_eth'],
-        df['log_btc'],
+        df['log_sub'],
+        df['log_main'],
         delta=delta,
         ve=ve
     )
