@@ -528,7 +528,7 @@ def get_train_data(inst_id="BTC-USDT-SWAP", bar="1m", limit=100, max_candles=100
         # kline_data = add_time_features(kline_data)
 
         # 添加目标变量
-        kline_data = add_target_variables_op(kline_data)
+        # kline_data = add_target_variables_op(kline_data)
 
         # 重置索引
         kline_data.reset_index(drop=True, inplace=True)
