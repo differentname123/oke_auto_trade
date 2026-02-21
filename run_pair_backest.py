@@ -495,6 +495,7 @@ def run_good_params():
 def get_good_tasks(base_tasks):
     import itertools
     tasks = []
+    base_tasks_set = set(base_tasks)  # 转换为集合，极大提高查找效率
     final_df_path = 'kline_data/result_df.csv'
     df = pd.read_csv(final_df_path)
     df = df[df['avg_profit_per_trade'] > 0.2]
@@ -504,9 +505,11 @@ def get_good_tasks(base_tasks):
     df['profit'] = (df['avg_profit_per_trade']) * df['total_trades']
     df = df[df['profit'] > 20]
     df = df[df['trades_this_year'] > 0]
-    df['score'] = np.log(df['avg_profit_per_trade'] + 1) * df['profit'] * (df['avg_profit_per_trade']) * df['total_trades'] / -(df['Max Drawdown'] - 0.5) / np.log(df['最长持仓时间'] + 1)
-
-
+    df['score'] = np.log(df['avg_profit_per_trade'] + 1) * df['profit'] * (df['avg_profit_per_trade']) * df[
+        'total_trades'] / -(df['Max Drawdown'] - 0.5) / np.log(df['最长持仓时间'] + 1)
+    count = 0
+    no_params_count = 0
+    keep_count = 0
     for index, row in df.iterrows():
         # 从该行的 'file_name' 列解析参数
         params = parse_backtest_filename(row['file_name'])
@@ -521,22 +524,33 @@ def get_good_tasks(base_tasks):
                 params['ve'],
                 params['granularity']
             )
-            variable_keys = ['z_entry', 'z_exit', 'delta', 've']
-            variations = []
-            for key in variable_keys:
-                base_val = params[key]
-                # 生成：[原值-10%, 原值, 原值+10%]
-                variations.append([base_val * 0.9, base_val, base_val * 1.1])
 
-            # 2. 添加不需要变动的参数 (granularity)
-            # 注意：为了配合 product，必须放入列表中，哪怕只有一个元素
-            variations.append([params['granularity']])
+            # 判断解析出的任务是否在 base_tasks 中，只有存在才进行拓展搜寻
+            if task_tuple in base_tasks_set:
+                count += 1
+                variable_keys = ['z_entry', 'z_exit', 'delta', 've']
+                variations = []
+                for key in variable_keys:
+                    base_val = params[key]
+                    # 生成：[原值-10%, 原值, 原值+10%]
+                    variations.append([base_val * 0.9, base_val, base_val * 1.1])
 
-            # 3. 使用 itertools.product 进行全量组合
-            # *variations 表示将列表解包传入，相当于传入了5个列表
-            for combo in itertools.product(*variations):
-                # combo 此时已经是 (z_entry, z_exit, delta, ve, granularity) 的格式
-                tasks.append(combo)
+                # 2. 添加不需要变动的参数 (granularity)
+                # 注意：为了配合 product，必须放入列表中，哪怕只有一个元素
+                variations.append([params['granularity']])
+
+                # 3. 使用 itertools.product 进行全量组合
+                # *variations 表示将列表解包传入，相当于传入了5个列表
+                for combo in itertools.product(*variations):
+                    # combo 此时已经是 (z_entry, z_exit, delta, ve, granularity) 的格式
+                    tasks.append(combo)
+            else:
+                # 如果不在 base_tasks 中，则不扩展，直接将原组合加入任务集
+                tasks.append(task_tuple)
+                keep_count += 1
+        else:
+            no_params_count += 1
+    print(f"Filtered {len(df)} tasks from Filtered {count} keep_count {keep_count} base tasks from DataFrame. Total tasks after expansion: {len(tasks)} (No params found for {no_params_count} rows).")
     return tasks
 
 if __name__ == '__main__':
@@ -572,14 +586,13 @@ if __name__ == '__main__':
                 for ve in ve_list:
                     for granularity in granularity_list:  # 【新增】增加一层粒度的循环
                         tasks.append((z_entry, z_exit, delta, ve, granularity))
-    get_tasks = get_good_tasks(tasks)
-
+    tasks = get_good_tasks(tasks)
 
 
     print(f"Total tasks: {len(tasks)}")
 
     # 适当调整进程数，根据你 CPU 核心数决定
-    with Pool(processes=15, initializer=init_worker, initargs=(original_df,)) as pool:
+    with Pool(processes=5, initializer=init_worker, initargs=(original_df,)) as pool:
         pool.map(process_strategy, tasks)
 
     # run_good_params()
