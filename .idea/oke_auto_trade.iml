@@ -10,6 +10,7 @@
       <excludeFolder url="file://$MODULE_DIR$/backtest_needle_multi" />
       <excludeFolder url="file://$MODULE_DIR$/backtest_needle_multi_SHORT" />
       <excludeFolder url="file://$MODULE_DIR$/backtest_pair" />
+      <excludeFolder url="file://$MODULE_DIR$/backtest_pair_1s" />
     </content>
     <content url="file://$MODULE_DIR$/../../we_project/ShopFusion/llm_service/text_to_video/models/src">
       <sourceFolder url="file://$MODULE_DIR$/../../we_project/ShopFusion/llm_service/text_to_video/models/src" isTestSource="false" />

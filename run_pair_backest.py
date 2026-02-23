@@ -385,6 +385,7 @@ def process_strategy(args):
 
     # 【新增】K线数据合并粒度逻辑
     if granularity > 1:
+        return
         df_to_use = shared_df.copy()
         df_to_use.set_index('open_time', inplace=True)
         # 按分钟进行重采样，对于收盘价等状态数据，直接取周期的最后一条记录（last）
@@ -394,7 +395,7 @@ def process_strategy(args):
         merged_df = shared_df.copy()
 
     # 【修改】保存的文件名中增加 g{granularity} 参数标识，防止不同粒度的结果相互覆盖
-    back_df_file = f'backtest_pair/result_w{window}_entry{z_entry}_exit{z_exit}_delta{delta}_ve{ve}_g{granularity}_kalman.csv'
+    back_df_file = f'backtest_pair_1s/btc_eth_w{window}_entry{z_entry}_exit{z_exit}_delta{delta}_ve{ve}_g{granularity}_kalman.csv'
 
     if os.path.exists(back_df_file):
         # print(f"Skipping existing file: {back_df_file}")
@@ -504,9 +505,10 @@ def get_good_tasks(base_tasks):
     df['avg_profit_per_trade'] = df['avg_profit_per_trade'] - 0.1
     df['profit'] = (df['avg_profit_per_trade']) * df['total_trades']
     df = df[df['profit'] > 20]
+
     df = df[df['trades_this_year'] > 0]
-    df['score'] = np.log(df['avg_profit_per_trade'] + 1) * df['profit'] * (df['avg_profit_per_trade']) * df[
-        'total_trades'] / -(df['Max Drawdown'] - 0.5) / np.log(df['最长持仓时间'] + 1)
+
+    df['score'] = np.log(df['avg_profit_per_trade'] + 1) * df['profit'] * (df['avg_profit_per_trade']) * df['total_trades'] / -(df['Max Drawdown'] - 0.5) / np.log(df['最长持仓时间'] + 1)
     count = 0
     no_params_count = 0
     keep_count = 0
@@ -559,8 +561,8 @@ if __name__ == '__main__':
     # 读取数据（只在主进程读取一次）
     print("Loading data...")
     # 确保这里的路径和你本地文件一致
-    if os.path.exists('kline_data/btc_eth.csv'):
-        original_df = pd.read_csv('kline_data/btc_eth.csv')
+    if os.path.exists('kline_data/btc_eth_1s.csv'):
+        original_df = pd.read_csv('kline_data/btc_eth_1s.csv')
         # 确保时间列格式正确，这步很重要
         if 'open_time' in original_df.columns:
             original_df['open_time'] = pd.to_datetime(original_df['open_time'])
@@ -592,7 +594,7 @@ if __name__ == '__main__':
     print(f"Total tasks: {len(tasks)}")
 
     # 适当调整进程数，根据你 CPU 核心数决定
-    with Pool(processes=5, initializer=init_worker, initargs=(original_df,)) as pool:
+    with Pool(processes=10, initializer=init_worker, initargs=(original_df,)) as pool:
         pool.map(process_strategy, tasks)
 
     # run_good_params()
