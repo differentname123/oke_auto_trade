@@ -486,5 +486,5 @@ if __name__ == '__main__':
 
     print(f"Total tasks: {len(tasks)}")
 
-    with Pool(processes=5, initializer=init_worker, initargs=(original_df,)) as pool:
+    with Pool(processes=2, initializer=init_worker, initargs=(original_df,)) as pool:
         pool.map(process_strategy, tasks)
