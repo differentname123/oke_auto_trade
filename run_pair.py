@@ -9,6 +9,7 @@ import json
 import os
 import time
 
+import numpy as np
 import okx.Trade as Trade
 import okx.MarketData as Market
 import okx.Account as Account
@@ -60,20 +61,67 @@ def log_error(inst_id, msg):
     print(f"[{now}] [{inst_id}] [ERROR] {msg}")
 
 
+def calculate_score_and_target_str(df):
+    """
+    从 file_name 计算 target_str（按 'w60' 分割取第二个值），
+    并计算 score（要求前面的 filter、avg_profit_per_trade 调整、profit 计算已完成）
+    """
+    # 计算 target_str
+    df['target_str'] = df['file_name'].str.split('w60').str[1]
+    df = df[df['Max Drawdown'] > -20]
+    df = df[df['最长持仓时间'] < 10000]
 
-def get_good_param(final_df_path='kline_data/result_df.csv'):
+    # 计算 score（保持原公式不变）
+    df['score'] = (
+            np.log(df['avg_profit_per_trade'] + 1)
+            * df['profit']
+            * df['avg_profit_per_trade']
+            * df['total_trades']
+            / -(df['Max Drawdown'] - 0.5)
+            / np.log(df['最长持仓时间'] + 1)
+    )
+    return df
+
+
+def get_good_param(final_df_path='kline_data/result_df.csv',
+                   final_df_path_1s='kline_data/result_df_1s.csv'):
+    # ====================== 1. 处理 1min 数据 ======================
     df = pd.read_csv(final_df_path)
-    df = df[df['avg_profit_per_trade'] > 0.1]
-    df = df[df['total_trades'] > 100]
-    df['profit'] = (df['avg_profit_per_trade'] - 0.1) * df['total_trades']
-    df['score'] = df['profit'] / -(df['Max Drawdown'] - 0.5) / -(df['Max Drawdown'] - 0.5)
-    df_filtered = df.sort_values(by='score', ascending=False).head(150)
-    params_list = []
-    for index, row in df_filtered.iterrows():
-        # 从该行的 'file_name' 列解析参数
-        params = parse_backtest_filename(row['file_name'])
-        params_list.append(params)
-    return params_list
+    df = df[df['avg_profit_per_trade'] > 0.1].copy()
+    df['avg_profit_per_trade'] = df['avg_profit_per_trade'] - 0.1
+    df['profit'] = df['avg_profit_per_trade'] * df['total_trades']
+    df = calculate_score_and_target_str(df)
+
+    # ====================== 2. 处理 1s 数据 ======================
+    df_1s = pd.read_csv(final_df_path_1s)
+    df_1s = df_1s[df_1s['avg_profit_per_trade'] > 0.1].copy()
+    df_1s['avg_profit_per_trade'] = df_1s['avg_profit_per_trade'] - 0.1
+    df_1s['profit'] = df_1s['avg_profit_per_trade'] * df_1s['total_trades']
+    df_1s = calculate_score_and_target_str(df_1s)
+
+    # ====================== 3. 给所有冲突字段加上后缀（除 target_str 外全部加） ======================
+    # 1min 数据全部加上 _1min
+    rename_1min = {col: f"{col}_1min" for col in df.columns if col != 'target_str'}
+    df = df.rename(columns=rename_1min)
+
+    # 1s 数据全部加上 _1s
+    rename_1s = {col: f"{col}_1s" for col in df_1s.columns if col != 'target_str'}
+    df_1s = df_1s.rename(columns=rename_1s)
+
+    # ====================== 4. 合并成一行一个 target_str ======================
+    # outer 合并，任何一个 df 有的 target_str 都会保留
+    result = pd.merge(df, df_1s, on='target_str', how='inner')
+
+    # ====================== 5. 计算同一个 target_str 下两个 df 的聚合值 ======================
+    result['score_sum'] = result['score_1min'].fillna(0) + result['score_1s'].fillna(0)
+    result['score_mul'] = result['score_1min'].fillna(0) * result['score_1s'].fillna(0)
+
+    result['min_score'] = result[['score_1min', 'score_1s']].min(axis=1)
+
+    # ====================== 6. 按 score_sum 降序排序（推荐） ======================
+    result = result.sort_values(by='score_sum', ascending=False).reset_index(drop=True)
+
+    return result
 
 
 def monitor_worker(inst_id_list):
@@ -164,6 +212,8 @@ def main():
 
 
 if __name__ == "__main__":
+    get_good_param()
+
     try:
         main()
     except KeyboardInterrupt:

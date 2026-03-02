@@ -6,6 +6,7 @@ import time
 from multiprocessing import Pool
 from datetime import datetime
 import numba as nb  # 【新增】引入 Numba 用于核心加速
+import concurrent.futures
 
 # 保持原本的引用
 from get_feature import read_last_n_lines
@@ -122,7 +123,7 @@ def fast_generate_signals(z_values, window, z_entry, z_exit):
     return signals
 
 
-def generate_pair_trading_signals(merged_df=None, main_col='close_btc', sub_col='close_eth', window=60, z_entry=3.0,
+def generate_pair_trading_signals(merged_df=None, main_col='close_main', sub_col='close_sub', window=60, z_entry=3.0,
                                   z_exit=0.5, delta=1e-5, ve=1e-3):
     if merged_df is not None:
         df = merged_df
@@ -156,16 +157,27 @@ def generate_pair_trading_signals(merged_df=None, main_col='close_btc', sub_col=
 
 def print_backtest_stats(trade_df):
     """
-    保持原版逻辑完全不变
+    输入: extract_trades_from_signals 生成的 trade_df
+    输出: 打印详细的策略回测绩效报告
     """
     if trade_df.empty:
-        print("【统计报告】无交易记录，无法计算指标。")
+        # print("【统计报告】无交易记录，无法计算指标。")
         return
 
+    # print("-" * 50)
+    # print("             策略回测绩效报告 (Performance Report)")
+    # print("-" * 50)
+
+    # --- 1. 基础数据 ---
     total_trades = len(trade_df)
+
+    # 累计收益 (所有单次收益率的简单累加，模拟复利需更复杂计算，这里用单利近似)
     total_return = trade_df['net_pnl'].sum()
+
+    # 平均每笔收益
     avg_return = trade_df['net_pnl'].mean()
 
+    # --- 2. 胜率分析 (Win Rate) ---
     winning_trades = trade_df[trade_df['net_pnl'] > 0]
     losing_trades = trade_df[trade_df['net_pnl'] <= 0]
 
@@ -173,36 +185,54 @@ def print_backtest_stats(trade_df):
     loss_count = len(losing_trades)
     win_rate = win_count / total_trades if total_trades > 0 else 0
 
+    # --- 3. 盈亏比 (Profit Factor) ---
+    # 总盈利 / 总亏损的绝对值
     gross_profit = winning_trades['net_pnl'].sum()
     gross_loss = abs(losing_trades['net_pnl'].sum())
 
     if gross_loss == 0:
-        profit_factor = float('inf')
+        profit_factor = float('inf')  # 无亏损，盈亏比无穷大
     else:
         profit_factor = gross_profit / gross_loss
 
+    # --- 4. 最大回撤 (Max Drawdown) ---
+    # 构建资金曲线 (Cumulative PnL Curve)
     trade_df['cum_pnl'] = trade_df['net_pnl'].cumsum()
+
+    # 计算历史最高点 (High Water Mark)
     trade_df['peak'] = trade_df['cum_pnl'].cummax()
+
+    # 计算当前回撤
     trade_df['drawdown'] = trade_df['cum_pnl'] - trade_df['peak']
 
+    # 找到最大回撤 (最小值)
     max_drawdown = trade_df['drawdown'].min()
+
+    # 发生最大回撤的交易索引
     dd_idx = trade_df['drawdown'].idxmin()
     max_dd_time = trade_df.loc[dd_idx, 'close_time'] if pd.notna(dd_idx) else "N/A"
 
+    # --- 5. 持仓时间分析 ---
     avg_duration = trade_df['duration_mins'].mean()
     max_duration = trade_df['duration_mins'].max()
     avg_profit_per_trade = trade_df['net_pnl'].mean()
 
+    current_year = 2026
+    trade_df['open_year'] = trade_df['open_time'].str[:4].astype(int)
+    trades_this_year = len(trade_df[trade_df['open_year'] == current_year])
+
     return {
         'Total Return': total_return,
-        'total_trades': total_trades,
+        'total_trades':total_trades,
         'Win Rate': win_rate,
-        'avg_profit_per_trade': avg_profit_per_trade,
+        'avg_profit_per_trade':avg_profit_per_trade,
         'Max Drawdown': max_drawdown,
         'Profit Factor': profit_factor,
-        'avg_duration': avg_duration,
-        '最长持仓时间': max_duration
+        'avg_duration':avg_duration,
+        '最长持仓时间': max_duration,
+        'trades_this_year':trades_this_year
     }
+
 
 
 def extract_trades_from_signals(full_df):
@@ -219,8 +249,8 @@ def extract_trades_from_signals(full_df):
 
     signals = df['signal'].values
     times = df['open_time'].values
-    close_btc = df['close_btc'].values
-    close_eth = df['close_eth'].values
+    close_main = df['close_main'].values
+    close_sub = df['close_sub'].values
     z_scores = df['z_score'].values
     spreads = df['spread'].values
     betas = df['beta'].values
@@ -243,11 +273,11 @@ def extract_trades_from_signals(full_df):
             close_idx = i
             signal_dir = signals[open_idx]
 
-            op_btc, cl_btc = close_btc[open_idx], close_btc[close_idx]
-            op_eth, cl_eth = close_eth[open_idx], close_eth[close_idx]
+            op_main, cl_main = close_main[open_idx], close_main[close_idx]
+            op_sub, cl_sub = close_sub[open_idx], close_sub[close_idx]
 
-            btc_roi = (cl_btc - op_btc) / op_btc
-            eth_roi = (cl_eth - op_eth) / op_eth
+            btc_roi = (cl_main - op_main) / op_main
+            eth_roi = (cl_sub - op_sub) / op_sub
 
             entry_beta = betas[open_idx]
 
@@ -258,6 +288,10 @@ def extract_trades_from_signals(full_df):
                 net_pnl = (entry_beta * eth_roi) - btc_roi
                 direction_str = f'做空价差 (Short BTC / Long {entry_beta:.3f} ETH)'
 
+            # 计算真实的总资金收益率 (假设非杠杆全额交易)
+            total_exposure = 1.0 + abs(entry_beta)
+            true_roi = net_pnl / total_exposure
+            net_pnl = round(true_roi, 2)
             trade_record = {
                 'open_time': times[open_idx],
                 'close_time': times[close_idx],
@@ -266,8 +300,8 @@ def extract_trades_from_signals(full_df):
                 'btc_roi': f"{btc_roi * 100:.2f}",
                 'eth_roi': f"{eth_roi * 100:.2f}",
                 'net_pnl': round(net_pnl * 100, 2),
-                'open_btc': op_btc, 'close_btc': cl_btc,
-                'open_eth': op_eth, 'close_eth': cl_eth,
+                'open_main': op_main, 'close_main': cl_main,
+                'open_sub': op_sub, 'close_sub': cl_sub,
                 'entry_z': z_scores[open_idx],
                 'exit_z': z_scores[close_idx],
                 'entry_spread': spreads[open_idx],
@@ -334,7 +368,7 @@ def process_strategy(args):
     duration = end_time - start_time
 
     current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{current_time_str}] Saved: {back_df_file} | Time Cost: {duration:.4f}s")
+    print(f"[{current_time_str}] Saved: {back_df_file} | Time Cost: {duration:.4f}s len: {len(detailed_result_df)}")
 
 
 def parse_backtest_filename(filepath):
@@ -393,7 +427,7 @@ def run_good_params():
         pool.map(process_strategy, tasks)
 
 
-def get_good_tasks(base_tasks, key_word):
+def get_good_tasks(base_tasks, key_word, result_df, need_expand=True):
     import itertools
     tasks = []
     temp_tasks = []
@@ -401,8 +435,7 @@ def get_good_tasks(base_tasks, key_word):
     for task in copy_base_tasks:
         temp_tasks.append(task[:5])
     base_tasks_set = set(temp_tasks)
-    final_df_path = f'kline_data/result_df_{key_word}.csv'
-    df = pd.read_csv(final_df_path)
+    df = result_df
     df = df[df['avg_profit_per_trade'] > 0.2]
     df = df[df['Max Drawdown'] > -20]
 
@@ -428,13 +461,16 @@ def get_good_tasks(base_tasks, key_word):
                 params['granularity']
             )
 
-            if task_tuple in base_tasks_set:
+            # 修改点：在原有条件上增加了 need_expand 的判断
+            if need_expand and task_tuple in base_tasks_set:
                 count += 1
                 variable_keys = ['z_entry', 'z_exit', 'delta', 've']
                 variations = []
                 for key in variable_keys:
                     base_val = params[key]
-                    variations.append([base_val * 0.7, base_val * 0.8, base_val * 0.9, base_val, base_val * 1.1, base_val * 1.2, base_val * 1.3])
+                    variations.append(
+                        [base_val * 0.7, base_val * 0.8, base_val * 0.9, base_val, base_val * 1.1, base_val * 1.2,
+                         base_val * 1.3])
 
                 variations.append([params['granularity']])
 
@@ -454,37 +490,175 @@ def get_good_tasks(base_tasks, key_word):
     return tasks
 
 
-if __name__ == '__main__':
-    key_word = 'btc_sol'
+def gen_result_df(key_word):
+    backtest_dir = './backtest_pair'
+    final_df_path = f'kline_data/result_df_{key_word}.csv'
+    result_dict_list = []
+    def process_file(filename):
+        file_path = os.path.join(backtest_dir, filename)
+        # 这里原代码有一行读取 back_df_file，如果该文件不存在会报错，建议根据需要保留或注释
+        backtest_df = pd.read_csv(file_path)
+        result_dict = print_backtest_stats(backtest_df)
+        if result_dict:
+            result_dict['file_name'] = filename
+            return result_dict
+        return None
 
-    print("Loading data...")
-    if os.path.exists(f'kline_data/{key_word}.csv'):
-        original_df = pd.read_csv(f'kline_data/{key_word}.csv')
-        if 'open_time' in original_df.columns:
-            original_df['open_time'] = pd.to_datetime(original_df['open_time'])
-    else:
-        print("Error: kline_data/btc_sol.csv not found.")
-        exit()
+    # 1. 筛选出需要处理的文件列表
+    valid_files = [f for f in os.listdir(backtest_dir) if f.endswith('.csv') and f"{key_word}_" in f]
+    print(f"找到 {len(valid_files)} 个符合条件的文件，准备进行多线程处理...")
+
+    # 2. 开启多线程并行加载和处理
+    with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
+        # executor.map 自动调度并在主线程中按序返回结果，无需加锁就能安全 append
+        for result in executor.map(process_file, valid_files):
+            if result is not None:
+                result_dict_list.append(result)
+
+    result_df = pd.DataFrame(result_dict_list)
+    result_df.to_csv(final_df_path)
+    return result_df
+
+
+def merge_df(main_df_file, sub_df_file, merged_file_path):
+    """
+    进行交易对的合并
+    :param main_df_file: 主交易对CSV路径
+    :param sub_df_file: 从属交易对CSV路径
+    :param merged_file_path: 合并后保存的路径
+    """
+    if os.path.exists(merged_file_path):
+        print(f"Merged file already exists: {merged_file_path}")
+        return
+
+    try:
+        main_df = pd.read_csv(main_df_file, usecols=['timestamp', 'close'], parse_dates=['timestamp'])
+        main_df = main_df.sort_values('timestamp').set_index('timestamp')
+
+        sub_df = pd.read_csv(sub_df_file, usecols=['timestamp', 'close'], parse_dates=['timestamp'])
+        sub_df = sub_df.sort_values('timestamp').set_index('timestamp')
+
+        merged_df = pd.merge(
+            main_df[['close']],
+            sub_df[['close']],
+            left_index=True,
+            right_index=True,
+            suffixes=('_main', '_sub'),
+            how='inner'  # 明确指定内连接
+        )
+
+        # 检查合并后是否有数据，防止因时间范围不重合导致生成空文件
+        if not merged_df.empty:
+            # 将 timestamp 重命名为 open_time 并重置索引
+            merged_df = merged_df.rename_axis('open_time').reset_index()
+            merged_df.to_csv(merged_file_path, index=False)
+            print(f"Successfully merged: {merged_file_path} 总共行数: {len(merged_df)}")
+        else:
+            print(f"Warning: No overlapping time points found for {merged_file_path}")
+
+    except Exception as e:
+        print(f"Error merging files: {e}")
+
+
+def gen_all_merged_df():
+    """"""
+    base_dir = 'kline_data'
+    # 扫描目录下的所有CSV文件，寻找主交易对和从属交易对的组合
+    all_csv_files = [f for f in os.listdir(base_dir) if f.endswith('.csv') and 'origin_data' in f]
+
+    # 分为两个时间维度，判断标准为文件名中是否包含 '1s' 或 '1m'
+    all_1m_files = [f for f in all_csv_files if '1m' in f]
+    all_1s_files = [f for f in all_csv_files if '1s' in f]
+
+    # 根据all_1m_files生成两两的组合
+
+    num_files = len(all_1m_files)
+    for i in range(num_files):
+        main_file = all_1m_files[i]
+        main_name = main_file.split('-USDT')[0].split('0000_')[1]
+
+        # 关键点：j 从 i + 1 开始，这样就不会碰到重复的组合
+        for j in range(i + 1, num_files):
+            sub_file = all_1m_files[j]
+            sub_name = sub_file.split('-USDT')[0].split('0000_')[1]
+
+            merged_file_path = f'{base_dir}/{main_name}_{sub_name}_1m.csv'
+            merge_df(f'{base_dir}/{main_file}', f'{base_dir}/{sub_file}', merged_file_path)
+    num_files = len(all_1s_files)
+    for i in range(num_files):
+        main_file = all_1s_files[i]
+        main_name = main_file.split('-USDT')[0].split('0000_')[1]
+
+        # 关键点：j 从 i + 1 开始，这样就不会碰到重复的组合
+        for j in range(i + 1, num_files):
+            sub_file = all_1s_files[j]
+            sub_name = sub_file.split('-USDT')[0].split('0000_')[1]
+
+            merged_file_path = f'{base_dir}/{main_name}_{sub_name}_1s.csv'
+            merge_df(f'{base_dir}/{main_file}', f'{base_dir}/{sub_file}', merged_file_path)
+
+def process_single_pair(df_file):
+    """
+    处理单个交易对
+    :return:
+    """
+    key_word = df_file.split('/')[1].split('.csv')[0]
+    original_df = pd.read_csv(df_file)
+    if 'open_time' in original_df.columns:
+        original_df['open_time'] = pd.to_datetime(original_df['open_time'])
 
     print(f"Data loaded. Rows: {len(original_df)}. Starting multiprocessing...")
 
-    window_list = [60]
     z_entry_list = [1, 1.25, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 7, 8, 9, 10]
     z_exit_list = [0.0, 0.2, 0.5, 0.8, 1.0, 1.2, 1.5]
     delta_list = [1e-3, 1e-4, 5e-5, 1e-5, 5e-6, 1e-7, 1e-8, 1e-9, 1e-10, 1e-11]
     ve_list = [1e-2, 1e-3, 5e-4, 1e-4, 5e-5, 1e-5]
     granularity_list = [1]
 
-    tasks = []
+    base_tasks = []
     for z_entry in z_entry_list:
         for z_exit in z_exit_list:
             for delta in delta_list:
                 for ve in ve_list:
                     for granularity in granularity_list:
-                        tasks.append((z_entry, z_exit, delta, ve, granularity, key_word))
-    tasks = get_good_tasks(tasks, key_word)
-
+                        base_tasks.append((z_entry, z_exit, delta, ve, granularity, key_word))
+    # tasks = get_good_tasks(tasks, key_word)
+    tasks = base_tasks.copy()
     print(f"Total tasks: {len(tasks)}")
 
-    with Pool(processes=2, initializer=init_worker, initargs=(original_df,)) as pool:
+    with Pool(processes=1, initializer=init_worker, initargs=(original_df,)) as pool:
         pool.map(process_strategy, tasks)
+
+    result_df = gen_result_df(key_word)
+    tasks = get_good_tasks(base_tasks, key_word, result_df)
+
+    with Pool(processes=1, initializer=init_worker, initargs=(original_df,)) as pool:
+        pool.map(process_strategy, tasks)
+
+    result_df = gen_result_df(key_word)
+
+
+
+    df_file = df_file.replace('1m', '1s')
+    key_word = df_file.split('/')[1].split('.csv')[0]
+    original_df = pd.read_csv(df_file)
+    if 'open_time' in original_df.columns:
+        original_df['open_time'] = pd.to_datetime(original_df['open_time'])
+
+
+    tasks = get_good_tasks(base_tasks, key_word, result_df, need_expand=False)
+    with Pool(processes=1, initializer=init_worker, initargs=(original_df,)) as pool:
+        pool.map(process_strategy, tasks)
+
+    result_df = gen_result_df(key_word)
+
+
+
+
+
+
+if __name__ == '__main__':
+    # gen_all_merged_df()
+
+    df_file = 'kline_data/BTC_ETH_1m.csv'
+    process_single_pair(df_file)
