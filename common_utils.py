@@ -3,6 +3,8 @@ import os
 
 import numpy as np
 import pandas as pd
+from filelock import FileLock
+
 
 def select_strategies_optimized(
     strategy_df: pd.DataFrame,
@@ -456,3 +458,42 @@ def get_config(key):
         raise KeyError(f"配置文件中缺少字段: {key}")
 
     return config_data[key]
+
+
+
+def read_json(json_path):
+    """
+    读取 JSON 文件并返回内容。
+
+    Args:
+        json_path (str): JSON 文件的路径。
+
+    Returns:
+        dict: 解析后的 JSON 内容。
+    """
+    if not os.path.exists(json_path):
+        return {}
+
+    with open(json_path, 'r', encoding='utf-8') as f:
+        try:
+            data = json.load(f)
+            return data
+        except json.JSONDecodeError as e:
+            raise ValueError(f"无法解析 JSON 文件 '{json_path}': {e}")
+
+
+def save_json(json_path, data):
+    dir_path = os.path.dirname(json_path)
+    if dir_path:
+        os.makedirs(dir_path, exist_ok=True)
+
+    # 锁文件通常以 .lock 结尾
+    lock_path = json_path + ".lock"
+
+    # FileLock 会在文件系统层面创建锁，支持多进程和多线程安全
+    with FileLock(lock_path):
+        # 原子写入
+        tmp_path = json_path + ".tmp"
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=4, default=str)
+        os.replace(tmp_path, json_path)

@@ -14,19 +14,20 @@ import okx.Trade as Trade
 import okx.MarketData as Market
 import okx.Account as Account
 import pandas as pd
-from common_utils import get_config
+from common_utils import get_config, read_json, save_json
 import pandas as pd
 
 from run_pair_backest import parse_backtest_filename, generate_pair_trading_signals
 from trade_common import LatestDataManager
 
 INSTRUMENT_PAIR_LIST = [["BTC-USDT-SWAP", "ETH-USDT-SWAP"]]
+base_order_file = "history_order/order_history.json"
 
 # 设置代理（如果需要）
 os.environ['HTTP_PROXY'] = 'http://127.0.0.1:7890'
 os.environ['HTTPS_PROXY'] = 'http://127.0.0.1:7890'
 
-flag = "0"  # 实盘: 0, 模拟盘: 1
+flag = "1"  # 实盘: 0, 模拟盘: 1
 
 # API 初始化
 if flag == "1":
@@ -83,7 +84,32 @@ def calculate_score_and_target_str(df):
     return df
 
 
-def get_good_param(final_df_path='kline_data/result_df.csv',
+def get_good_param():
+    key_word = 'BTC_ETH_1m'
+    final_df_path = f'kline_data/result_df_{key_word}.csv'
+    df = pd.read_csv(final_df_path)
+    df = df[df['avg_profit_per_trade'] > 0.2]
+    df = df[df['Max Drawdown'] > -20]
+
+    df['avg_profit_per_trade'] = df['avg_profit_per_trade'] - 0.1
+    df['profit'] = (df['avg_profit_per_trade']) * df['total_trades']
+    df = df[df['profit'] > 20]
+
+    df = df[df['trades_this_year'] > 0]
+
+    df['score'] = np.log(df['avg_profit_per_trade'] + 1) * df['profit'] * (df['avg_profit_per_trade']) * df['total_trades'] / -(df['Max Drawdown'] - 0.5)
+
+
+    # 按照 score 降序排序取前100
+    df = df.sort_values(by='score', ascending=False).head(100)
+    params_list = []
+    print(f"筛选后剩余 {len(df)} 个参数组合")
+    for index, row in df.iterrows():
+        params = parse_backtest_filename(row['file_name'])
+        params_list.append(params)
+    return params_list
+
+def get_good_param_new(final_df_path='kline_data/result_df.csv',
                    final_df_path_1s='kline_data/result_df_1s.csv'):
     # ====================== 1. 处理 1min 数据 ======================
     df = pd.read_csv(final_df_path)
@@ -123,6 +149,112 @@ def get_good_param(final_df_path='kline_data/result_df.csv',
 
     return result
 
+def generate_trade_instruction(action, row, signal_dir, inst_id_list, is_recovery=False):
+    """
+    生成标准化的交易指令数据字典
+    """
+    main_inst = inst_id_list[0] if len(inst_id_list) > 0 else 'MAIN'
+    sub_inst = inst_id_list[1] if len(inst_id_list) > 1 else 'SUB'
+    beta = row.get('beta', 1.0)
+
+    # 确定文字描述
+    if action == 'open':
+        direction = "做多" if signal_dir == -1 else "做空"
+        desc = f"{direction}价差 (Main: {main_inst}, Sub: {beta:.3f} {sub_inst})"
+    else:
+        desc = "平仓 (Close Positions)"
+
+    if is_recovery:
+        desc = f"[恢复模式补发] {desc}"
+
+    return {
+        "time": str(row['open_time']),
+        "action": action,
+        "signal_dir": int(signal_dir),
+        "main_inst": main_inst,
+        "sub_inst": sub_inst,
+        "beta": float(beta),
+        "close_main": float(row.get('close_main', 0)),
+        "close_sub": float(row.get('close_sub', 0)),
+        "description": desc,
+        "status": "pending_execution"
+    }
+
+
+def process_signal_df(signal_df, params, inst_id_list, base_order_file="orders.json", recovery_mode=False):
+    """
+    根据信号数据进行开平仓判断，生成并记录交易指令，包含异常恢复机制。
+    """
+    # ---------------- Step 1: 数据校验与预处理 ----------------
+    if len(signal_df) < 2:
+        return None
+
+    df = signal_df.copy()
+    if 'open_time' not in df.columns:
+        if 'index' in df.columns:
+            df.rename(columns={'index': 'open_time'}, inplace=True)
+        elif 'timestamp' in df.columns:
+            df.rename(columns={'timestamp': 'open_time'}, inplace=True)
+
+    # ---------------- Step 2: 准备文件路径与读取历史状态 ----------------
+    params_key = "_".join([f"{k}_{v}" for k, v in params.items()]) + "_"
+    insts_str = "_".join(inst_id_list)
+    order_file = base_order_file.replace(".json", f"_{insts_str}.json")
+
+    # 直接使用你外部的 read_json
+    order_info = read_json(order_file)
+    if params_key not in order_info:
+        order_info[params_key] = []
+
+    history_orders = order_info[params_key]
+
+    # 判断当前本地记录中的真实持仓状态：如果有历史记录且最后一次是 open，则认为正在持仓
+    is_holding = bool(history_orders) and history_orders[-1].get('action') == 'open'
+
+    # ---------------- Step 3: 获取信号数据 ----------------
+    latest_row = df.iloc[-1]
+    prev_row = df.iloc[-2]
+
+    curr_signal = latest_row['signal']
+    prev_signal = prev_row['signal']
+
+    instruction = None
+
+    # ---------------- Step 4: 核心逻辑决策树 ----------------
+    # 场景 A: 正常跳变 - 触发开仓
+    if curr_signal != 0 and prev_signal == 0:
+        if not is_holding:
+            instruction = generate_trade_instruction('open', latest_row, curr_signal, inst_id_list)
+
+    # 场景 B: 正常跳变 - 触发平仓
+    elif curr_signal == 0 and prev_signal != 0:
+        if is_holding:
+            instruction = generate_trade_instruction('close', latest_row, 0, inst_id_list)
+
+    # 场景 C: 信号延续 - 检查是否需要恢复补单
+    elif recovery_mode:
+        if curr_signal != 0 and prev_signal != 0 and not is_holding:
+            # 有信号但本地无持仓：漏单补开
+            instruction = generate_trade_instruction('open', latest_row, curr_signal, inst_id_list, is_recovery=True)
+
+        elif curr_signal == 0 and prev_signal == 0 and is_holding:
+            # 没信号但本地有持仓：漏单补平
+            instruction = generate_trade_instruction('close', latest_row, 0, inst_id_list, is_recovery=True)
+
+    # ---------------- Step 5: 输出与持久化 ----------------
+    if instruction:
+        print(
+            f"[{instruction['time']}] 产生新的交易指令: {instruction['action'].upper()} -> {instruction['description']}")
+
+        # 顺序追加并保存
+        order_info[params_key].append(instruction)
+        save_json(order_file, order_info)  # 直接使用你外部的 save_json
+
+        return instruction
+
+    return None
+
+
 
 def monitor_worker(inst_id_list):
     """
@@ -131,7 +263,7 @@ def monitor_worker(inst_id_list):
     """
     try:
         # 打印列表内容，用 join 拼接成字符串更直观
-        insts_str = ", ".join(inst_id_list)
+        insts_str = "_".join(inst_id_list)
         log_info("System", f"开始监控以下币种: {insts_str}")
 
         params_list = get_good_param()
@@ -167,25 +299,17 @@ def monitor_worker(inst_id_list):
                 # 合并数据，只保留两者都有的时间点 (Inner Join)
                 merged_df = pd.merge(main_df[['close']], sub_df[['close']], left_index=True, right_index=True, suffixes=('_main', '_sub'))
                 for params in params_list:
-                    full_df = generate_pair_trading_signals(merged_df=merged_df, main_col='close_main', sub_col='close_sub', window=60, z_entry=params['z_entry'], z_exit=params['z_exit'], delta=params['delta'], ve=params['ve'])
-                    full_df['params'] = [copy.deepcopy(params) for _ in range(len(full_df))]
-                    all_signal_df_list.append(full_df)
-                    if len(full_df) > 0 and (full_df['signal'] != 0).any():
-                        has_signal_df_list.append(full_df)
-                    # 搜集最后一行signal字段和倒数第二行signal字段不一样的
-                    if len(full_df) >= 1:
-                        last_signal = full_df.iloc[-1]['signal']
+                    signal_df = generate_pair_trading_signals(merged_df=merged_df, main_col='close_main', sub_col='close_sub', window=60, z_entry=params['z_entry'], z_exit=params['z_exit'], delta=params['delta'], ve=params['ve'])
+                    signal_df['params'] = [copy.deepcopy(params) for _ in range(len(signal_df))]
+                    # 开始处理有交易信号的数据
+                    process_signal_df(signal_df, params, inst_id_list)
+                    # # 检测signal_df中是否有信号出现（即 signal 列中非 0 的行）
+                    # if (signal_df['signal'] != 0).any():
+                    #     log_info(inst_id_list[0], f"检测到交易信号，正在处理... (Params: {params})")
+                    #     has_signal_df_list.append(signal_df)
 
-                        signal_changed = False
-                        if len(full_df) >= 2:
-                            prev_signal = full_df.iloc[-2]['signal']
-                            signal_changed = last_signal != prev_signal
 
-                        signal_active = last_signal != 0
-
-                        if signal_changed or signal_active:
-                            ok_signal_df_list.append(full_df)
-                print()
+                # print()
 
         except Exception:
             # 打印错误，这里可以用 traceback 看是哪个环节出的错
@@ -212,7 +336,7 @@ def main():
 
 
 if __name__ == "__main__":
-    get_good_param()
+    # get_good_param()
 
     try:
         main()

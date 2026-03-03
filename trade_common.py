@@ -13,7 +13,7 @@ from common_utils import get_config
 os.environ['HTTP_PROXY'] = 'http://127.0.0.1:7890'
 os.environ['HTTPS_PROXY'] = 'http://127.0.0.1:7890'
 
-flag = "0"  # 实盘: 0, 模拟盘: 1
+flag = "1"  # 实盘: 0, 模拟盘: 1
 
 # API 初始化
 if flag == "1":
@@ -327,6 +327,7 @@ def place_order(inst_id, side, size, trade_action="open"):
             "trade_action": trade_action,
             "order_params": order_params,
             "order_response": order,
+            "order":order
         }
 
         # 判断下单结果
@@ -334,11 +335,11 @@ def place_order(inst_id, side, size, trade_action="open"):
             print(f"❌ {trade_action.upper()} {side.upper()} 市价单下单失败，错误信息：", order)
             log_entry["result"] = False
             log_order(log_entry)
-            return False
+            return False, log_entry
 
         log_entry["result"] = True
         log_order(log_entry)
-        return True
+        return True, log_entry
 
     except Exception as e:
         # 在异常时记录详细的错误日志
@@ -355,6 +356,8 @@ def place_order(inst_id, side, size, trade_action="open"):
         print(f"❌ {trade_action.upper()} {side.upper()} 市价单下单失败，错误信息：", e)
         log_order(log_entry)
         return False
+
+
 def get_total_usdt_equity():
     """
     获取账户总权益的USDT等值。
@@ -428,8 +431,11 @@ def get_total_usdt_equity():
 
 
 if __name__ == '__main__':
+
+    # detail_res = tradeAPI.get_order(instId="BTC-USDT-SWAP", ordId=3355251858226679808)
+
     # 获取最新数据
-    # place_order("BTC-USDT-SWAP", "sell", 1, trade_action="close")  # 以最优价格开多 0.01 BTC
+    place_order("BTC-USDT-SWAP", "sell", 1, trade_action="open")  # 以最优价格开多 0.01 BTC
 
     total_equity = get_total_usdt_equity()
     if total_equity is not None:
