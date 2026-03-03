@@ -27,7 +27,7 @@ base_order_file = "history_order/order_history.json"
 os.environ['HTTP_PROXY'] = 'http://127.0.0.1:7890'
 os.environ['HTTPS_PROXY'] = 'http://127.0.0.1:7890'
 
-flag = "1"  # 实盘: 0, 模拟盘: 1
+flag = "0"  # 实盘: 0, 模拟盘: 1
 
 # API 初始化
 if flag == "1":
@@ -255,7 +255,6 @@ def process_signal_df(signal_df, params, inst_id_list, base_order_file="orders.j
     return None
 
 
-
 def monitor_worker(inst_id_list):
     """
     【工作线程】
@@ -278,41 +277,88 @@ def monitor_worker(inst_id_list):
     except Exception as e:
         traceback.print_exc()
 
+    # --- 新增：分钟级控制和时间戳校验所需的变量 ---
+    current_minute = None
+    previous_timestamp = None
+    max_attempts = 200
+
     while True:
         try:
-            origin_df_list = []
-            ok_signal_df_list = []
-            all_signal_df_list = []
-            has_signal_df_list = []
-            for inst_id in inst_id_list:
-                current_manager = managers[inst_id]
-                origin_df = current_manager.get_newnewest_data()
-                if origin_df is not None:
-                    origin_df['open_time'] = pd.to_datetime(origin_df['timestamp'])
-                    origin_df_list.append(origin_df)
-            if len(origin_df_list) == 2:
-                main_df = origin_df_list[0]
-                sub_df = origin_df_list[1]
-                main_df = main_df.sort_values('open_time').set_index('open_time')
-                sub_df = sub_df.sort_values('open_time').set_index('open_time')
+            now = datetime.datetime.now()
+            # 判断是否进入了新的一分钟
+            if current_minute is None or now.minute != current_minute:
+                attempt = 0
+                while attempt < max_attempts:
+                    origin_df_list = []
+                    ok_signal_df_list = []
+                    all_signal_df_list = []
+                    has_signal_df_list = []
 
-                # 合并数据，只保留两者都有的时间点 (Inner Join)
-                merged_df = pd.merge(main_df[['close']], sub_df[['close']], left_index=True, right_index=True, suffixes=('_main', '_sub'))
-                for params in params_list:
-                    signal_df = generate_pair_trading_signals(merged_df=merged_df, main_col='close_main', sub_col='close_sub', window=60, z_entry=params['z_entry'], z_exit=params['z_exit'], delta=params['delta'], ve=params['ve'])
-                    signal_df['params'] = [copy.deepcopy(params) for _ in range(len(signal_df))]
-                    # 开始处理有交易信号的数据
-                    process_signal_df(signal_df, params, inst_id_list)
-                    # # 检测signal_df中是否有信号出现（即 signal 列中非 0 的行）
-                    # if (signal_df['signal'] != 0).any():
-                    #     log_info(inst_id_list[0], f"检测到交易信号，正在处理... (Params: {params})")
-                    #     has_signal_df_list.append(signal_df)
+                    for inst_id in inst_id_list:
+                        current_manager = managers[inst_id]
+                        origin_df = current_manager.get_newnewest_data()
+                        if origin_df is not None and not origin_df.empty:
+                            # --- 修正：严格过滤出 confirm == "1" 的数据 ---
+                            confirmed_df = origin_df[origin_df["confirm"] == "1"].copy()
+                            if not confirmed_df.empty:
+                                confirmed_df['open_time'] = pd.to_datetime(confirmed_df['timestamp'])
+                                origin_df_list.append(confirmed_df)
 
+                    if len(origin_df_list) == 2:
+                        main_df = origin_df_list[0]
+                        sub_df = origin_df_list[1]
+                        main_df = main_df.sort_values('open_time').set_index('open_time')
+                        sub_df = sub_df.sort_values('open_time').set_index('open_time')
 
-                # print()
+                        # 合并数据，只保留两者都有的时间点 (Inner Join)
+                        merged_df = pd.merge(main_df[['close']], sub_df[['close']], left_index=True, right_index=True,
+                                             suffixes=('_main', '_sub'))
+
+                        # --- 修正：确保合并后的数据不为空，再取最新的时间戳 ---
+                        if not merged_df.empty:
+                            latest_timestamp = merged_df.index[-1]
+
+                            if previous_timestamp is None or latest_timestamp != previous_timestamp:
+
+                                print(f"✅ 数据已更新，最新时间戳: {latest_timestamp} (之前: {previous_timestamp}) 当前时间: {now.strftime('%Y-%m-%d %H:%M:%S')} 最新的两个价格分别为 {merged_df.iloc[-1]['close_main']} 和 {merged_df.iloc[-1]['close_sub']}")
+                                # 数据确认已更新且为确认数据，执行原有的信号检测与处理逻辑
+                                for params in params_list:
+                                    signal_df = generate_pair_trading_signals(merged_df=merged_df,
+                                                                              main_col='close_main',
+                                                                              sub_col='close_sub', window=60,
+                                                                              z_entry=params['z_entry'],
+                                                                              z_exit=params['z_exit'],
+                                                                              delta=params['delta'], ve=params['ve'])
+                                    signal_df['params'] = [copy.deepcopy(params) for _ in range(len(signal_df))]
+                                    # 开始处理有交易信号的数据
+                                    process_signal_df(signal_df, params, inst_id_list)
+                                    # # 检测signal_df中是否有信号出现（即 signal 列中非 0 的行）
+                                    # if (signal_df['signal'] != 0).any():
+                                    #     log_info(inst_id_list[0], f"检测到交易信号，正在处理... (Params: {params})")
+                                    #     has_signal_df_list.append(signal_df)
+
+                                # 更新时间戳和当前分钟，跳出尝试循环
+                                previous_timestamp = latest_timestamp
+                                current_minute = now.minute
+                                break
+                            else:
+                                # 时间戳未变（说明本分钟的确认数据还没刷出来）
+                                attempt += 1
+                        else:
+                            # 合并后无数据，继续尝试
+                            attempt += 1
+                    else:
+                        # 币种数据没凑齐2个（或某币种没有confirm=1的数据），继续尝试
+                        attempt += 1
+
+                if attempt == max_attempts:
+                    insts_str = "_".join(inst_id_list) if 'insts_str' not in locals() else insts_str
+                    log_error("System", f"❌ {insts_str} 多次尝试数据仍未更新(或未获取到confirm=1的数据)，跳过本轮更新")
+
+            # 无论处于哪一分钟，外层循环每隔1秒检测一次时间条件
+            time.sleep(1)
 
         except Exception:
-            # 打印错误，这里可以用 traceback 看是哪个环节出的错
             log_error("System", "监控循环发生异常")
             traceback.print_exc()
             time.sleep(5)  # 出错后多休息一会再重试
