@@ -13,7 +13,7 @@ from common_utils import get_config
 os.environ['HTTP_PROXY'] = 'http://127.0.0.1:7890'
 os.environ['HTTPS_PROXY'] = 'http://127.0.0.1:7890'
 
-flag = "1"  # 实盘: 0, 模拟盘: 1
+flag = "0"  # 实盘: 0, 模拟盘: 1
 
 # API 初始化
 if flag == "1":
