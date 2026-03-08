@@ -223,16 +223,15 @@ def print_backtest_stats(trade_df):
 
     return {
         'Total Return': total_return,
-        'total_trades':total_trades,
+        'total_trades': total_trades,
         'Win Rate': win_rate,
-        'avg_profit_per_trade':avg_profit_per_trade,
+        'avg_profit_per_trade': avg_profit_per_trade,
         'Max Drawdown': max_drawdown,
         'Profit Factor': profit_factor,
-        'avg_duration':avg_duration,
+        'avg_duration': avg_duration,
         '最长持仓时间': max_duration,
-        'trades_this_year':trades_this_year
+        'trades_this_year': trades_this_year
     }
-
 
 
 def extract_trades_from_signals(full_df):
@@ -291,7 +290,7 @@ def extract_trades_from_signals(full_df):
             # 计算真实的总资金收益率 (假设非杠杆全额交易)
             total_exposure = 1.0 + abs(entry_beta)
             true_roi = net_pnl / total_exposure
-            net_pnl = round(true_roi, 2)
+            net_pnl = round(true_roi, 8)
             trade_record = {
                 'open_time': times[open_idx],
                 'close_time': times[close_idx],
@@ -299,7 +298,7 @@ def extract_trades_from_signals(full_df):
                 'direction': direction_str,
                 'btc_roi': f"{btc_roi * 100:.2f}",
                 'eth_roi': f"{eth_roi * 100:.2f}",
-                'net_pnl': round(net_pnl * 100, 2),
+                'net_pnl': round(net_pnl * 100, 4),
                 'open_main': op_main, 'close_main': cl_main,
                 'open_sub': op_sub, 'close_sub': cl_sub,
                 'entry_z': z_scores[open_idx],
@@ -323,7 +322,7 @@ def extract_trades_from_signals(full_df):
 
 
 # ==========================================
-# 多进程部分保持不变
+# 多进程部分与预过滤优化
 # ==========================================
 shared_df = None
 
@@ -331,6 +330,47 @@ shared_df = None
 def init_worker(df_to_share):
     global shared_df
     shared_df = df_to_share
+
+
+def filter_tasks_before_pool(tasks):
+    """
+    【新增函数】
+    在进入 pool.map 前对 tasks 提前进行过滤。
+    避免把必将被跳过的任务（无效参数、已存在的文件等）分发给子进程，
+    从而大幅度减小进程间通信（IPC）与序列化造成的性能损耗。
+    """
+    filtered_tasks = []
+    window = 60
+
+    for task in tasks:
+        # 为了兼容 run_good_params (可能传入 5 元组) 和 process_single_pair (传入 6 元组) 进行安全解包
+        if len(task) == 6:
+            z_entry, z_exit, delta, ve, granularity, key_word = task
+        elif len(task) == 5:
+            z_entry, z_exit, delta, ve, granularity = task
+            key_word = None
+        else:
+            # 异常长度的参数直接放行，由后续正常逻辑兜底
+            filtered_tasks.append(task)
+            continue
+
+        # 过滤 1: z_exit >= z_entry 提前返回的逻辑
+        if z_exit >= z_entry:
+            continue
+
+        # 过滤 2: granularity > 1 提前返回的逻辑
+        if granularity > 1:
+            continue
+
+        # 过滤 3: 文件已存在的情况
+        if key_word is not None:
+            back_df_file = f'backtest_pair/{key_word}_w{window}_entry{z_entry}_exit{z_exit}_delta{delta}_ve{ve}_g{granularity}_kalman.csv'
+            if os.path.exists(back_df_file):
+                continue
+
+        filtered_tasks.append(task)
+    print(f"Pre-filtered tasks: {len(filtered_tasks)} out of {len(tasks)}")
+    return filtered_tasks
 
 
 def process_strategy(args):
@@ -421,7 +461,9 @@ def run_good_params():
             if params['granularity'] == 1:
                 tasks.append(task_tuple)
 
-    print(f"Total filtered tasks: {len(tasks)}")
+    print(f"Total filtered tasks (Before Pre-filter): {len(tasks)}")
+    tasks = filter_tasks_before_pool(tasks)  # 【修改】加入提前过滤
+    print(f"Total filtered tasks (After Pre-filter): {len(tasks)}")
 
     with Pool(processes=10, initializer=init_worker, initargs=(original_df,)) as pool:
         pool.map(process_strategy, tasks)
@@ -494,6 +536,7 @@ def gen_result_df(key_word):
     backtest_dir = './backtest_pair'
     final_df_path = f'kline_data/result_df_{key_word}.csv'
     result_dict_list = []
+    # return pd.read_csv(final_df_path)
     def process_file(filename):
         file_path = os.path.join(backtest_dir, filename)
         # 这里原代码有一行读取 back_df_file，如果该文件不存在会报错，建议根据需要保留或注释
@@ -597,6 +640,7 @@ def gen_all_merged_df():
             merged_file_path = f'{base_dir}/{main_name}_{sub_name}_1s.csv'
             merge_df(f'{base_dir}/{main_file}', f'{base_dir}/{sub_file}', merged_file_path)
 
+
 def process_single_pair(df_file):
     """
     处理单个交易对
@@ -624,20 +668,22 @@ def process_single_pair(df_file):
                         base_tasks.append((z_entry, z_exit, delta, ve, granularity, key_word))
     # tasks = get_good_tasks(tasks, key_word)
     tasks = base_tasks.copy()
-    print(f"Total tasks: {len(tasks)}")
+    print(f"Total tasks (Before Pre-filter): {len(tasks)}")
+    tasks = filter_tasks_before_pool(tasks)  # 【修改】加入提前过滤
+    print(f"Total tasks (After Pre-filter): {len(tasks)}")
 
     with Pool(processes=1, initializer=init_worker, initargs=(original_df,)) as pool:
         pool.map(process_strategy, tasks)
 
     result_df = gen_result_df(key_word)
-    tasks = get_good_tasks(base_tasks, key_word, result_df)
+    tasks = get_good_tasks(base_tasks, key_word, result_df, need_expand=False)
+
+    tasks = filter_tasks_before_pool(tasks)  # 【修改】加入提前过滤
 
     with Pool(processes=1, initializer=init_worker, initargs=(original_df,)) as pool:
         pool.map(process_strategy, tasks)
 
     result_df = gen_result_df(key_word)
-
-
 
     df_file = df_file.replace('1m', '1s')
     key_word = df_file.split('/')[1].split('.csv')[0]
@@ -645,16 +691,13 @@ def process_single_pair(df_file):
     if 'open_time' in original_df.columns:
         original_df['open_time'] = pd.to_datetime(original_df['open_time'])
 
-
     tasks = get_good_tasks(base_tasks, key_word, result_df, need_expand=False)
+    tasks = filter_tasks_before_pool(tasks)  # 【修改】加入提前过滤
+
     with Pool(processes=1, initializer=init_worker, initargs=(original_df,)) as pool:
         pool.map(process_strategy, tasks)
 
     result_df = gen_result_df(key_word)
-
-
-
-
 
 
 if __name__ == '__main__':
