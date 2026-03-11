@@ -95,9 +95,10 @@ def calculate_kalman_hedge_ratio(x, y, delta=1e-5, ve=1e-3):
 # 1. 核心策略函数 (无滚动窗口的纯卡尔曼 Z-Score 优化版)
 # -----------------------------------------------------------------------------
 @nb.njit(cache=True)
-def fast_generate_signals(z_values, window, z_entry, z_exit):
+def fast_generate_signals(z_values, window, z_entry, z_exit, require_rebound=False):
     """
     将原版的状态机生成信号逻辑提取并用 Numba 加速，逻辑100%未变
+    【新增】require_rebound: 是否需要 Z-Score 出现反弹（拐头）才生成信号
     """
     n = len(z_values)
     signals = np.zeros(n)
@@ -107,10 +108,20 @@ def fast_generate_signals(z_values, window, z_entry, z_exit):
         z = z_values[i]
 
         if current_position == 0:
-            if z > z_entry:
-                current_position = 1
-            elif z < -z_entry:
-                current_position = -1
+            if not require_rebound:
+                # 原始逻辑：突破阈值即刻产生信号
+                if z > z_entry:
+                    current_position = 1
+                elif z < -z_entry:
+                    current_position = -1
+            else:
+                # 新增逻辑：突破阈值，并且相对于上一根K线开始反弹（回归0轴方向）
+                prev_z = z_values[i - 1]
+                if z > z_entry and z < prev_z:
+                    current_position = 1
+                elif z < -z_entry and z > prev_z:
+                    current_position = -1
+
         elif current_position == 1:
             if z < z_exit:
                 current_position = 0
@@ -124,7 +135,10 @@ def fast_generate_signals(z_values, window, z_entry, z_exit):
 
 
 def generate_pair_trading_signals(merged_df=None, main_col='close_main', sub_col='close_sub', window=60, z_entry=3.0,
-                                  z_exit=0.5, delta=1e-5, ve=1e-3):
+                                  z_exit=0.5, delta=1e-5, ve=1e-3, require_rebound=False):
+    """
+    【修改】在参数列表中新增了 require_rebound=False，保持对原版代码的完美向下兼容
+    """
     if merged_df is not None:
         df = merged_df
 
@@ -149,8 +163,8 @@ def generate_pair_trading_signals(merged_df=None, main_col='close_main', sub_col
     z_values = df['z_score'].values
     z_values = np.nan_to_num(z_values, nan=0.0)
 
-    # 【修改】调用 Numba 加速版本的状态机
-    df['signal'] = fast_generate_signals(z_values, window, z_entry, z_exit)
+    # 【修改】调用 Numba 加速版本的状态机，透传 require_rebound 参数
+    df['signal'] = fast_generate_signals(z_values, window, z_entry, z_exit, require_rebound)
 
     return df
 
@@ -333,38 +347,28 @@ def init_worker(df_to_share):
 
 
 def filter_tasks_before_pool(tasks):
-    """
-    【新增函数】
-    在进入 pool.map 前对 tasks 提前进行过滤。
-    避免把必将被跳过的任务（无效参数、已存在的文件等）分发给子进程，
-    从而大幅度减小进程间通信（IPC）与序列化造成的性能损耗。
-    """
     filtered_tasks = []
     window = 60
 
     for task in tasks:
-        # 为了兼容 run_good_params (可能传入 5 元组) 和 process_single_pair (传入 6 元组) 进行安全解包
-        if len(task) == 6:
-            z_entry, z_exit, delta, ve, granularity, key_word = task
-        elif len(task) == 5:
-            z_entry, z_exit, delta, ve, granularity = task
+        # 【修改】兼容 7元组(含keyword) 或 6元组(无keyword) 的解包
+        if len(task) == 7:
+            z_entry, z_exit, delta, ve, granularity, require_rebound, key_word = task
+        elif len(task) == 6:
+            z_entry, z_exit, delta, ve, granularity, require_rebound = task
             key_word = None
         else:
-            # 异常长度的参数直接放行，由后续正常逻辑兜底
             filtered_tasks.append(task)
             continue
 
-        # 过滤 1: z_exit >= z_entry 提前返回的逻辑
         if z_exit >= z_entry:
             continue
-
-        # 过滤 2: granularity > 1 提前返回的逻辑
         if granularity > 1:
             continue
 
-        # 过滤 3: 文件已存在的情况
         if key_word is not None:
-            back_df_file = f'backtest_pair/{key_word}_w{window}_entry{z_entry}_exit{z_exit}_delta{delta}_ve{ve}_g{granularity}_kalman.csv'
+            # 【修改】文件名加入 _rb{require_rebound}
+            back_df_file = f'backtest_pair/{key_word}_w{window}_entry{z_entry}_exit{z_exit}_delta{delta}_ve{ve}_g{granularity}_rb{require_rebound}_kalman.csv'
             if os.path.exists(back_df_file):
                 continue
 
@@ -374,7 +378,8 @@ def filter_tasks_before_pool(tasks):
 
 
 def process_strategy(args):
-    z_entry, z_exit, delta, ve, granularity, key_word = args
+    # 【修改】解包时增加 require_rebound
+    z_entry, z_exit, delta, ve, granularity, require_rebound, key_word = args
     window = 60
     if z_exit >= z_entry:
         return
@@ -382,22 +387,20 @@ def process_strategy(args):
 
     if granularity > 1:
         return
-        df_to_use = shared_df.copy()
-        df_to_use.set_index('open_time', inplace=True)
-        df_to_use = df_to_use.resample(f'{granularity}min').last().dropna().reset_index()
-        merged_df = df_to_use
     else:
         merged_df = shared_df.copy()
 
-    back_df_file = f'backtest_pair/{key_word}_w{window}_entry{z_entry}_exit{z_exit}_delta{delta}_ve{ve}_g{granularity}_kalman.csv'
+    # 【修改】文件名加入 _rb{require_rebound}
+    back_df_file = f'backtest_pair/{key_word}_w{window}_entry{z_entry}_exit{z_exit}_delta{delta}_ve{ve}_g{granularity}_rb{require_rebound}_kalman.csv'
 
     if os.path.exists(back_df_file):
         return
 
     start_time = time.time()
 
+    # 【修改】透传 require_rebound 给生成信号的函数
     full_df = generate_pair_trading_signals(merged_df=merged_df, window=window, z_entry=z_entry,
-                                            z_exit=z_exit, delta=delta, ve=ve)
+                                            z_exit=z_exit, delta=delta, ve=ve, require_rebound=require_rebound)
 
     detailed_result_df = extract_trades_from_signals(full_df)
 
@@ -413,6 +416,7 @@ def process_strategy(args):
 
 def parse_backtest_filename(filepath):
     filename = os.path.basename(filepath)
+    # 【修改】正则中加入 rb(?P<require_rebound>.+?)_ 的匹配
     pattern = (
         r"w(?P<window>.+?)_"
         r"entry(?P<z_entry>.+?)_"
@@ -420,6 +424,7 @@ def parse_backtest_filename(filepath):
         r"delta(?P<delta>.+?)_"
         r"ve(?P<ve>.+?)_"
         r"g(?P<granularity>.+?)_"
+        r"rb(?P<require_rebound>.+?)_"
         r"kalman\.csv"
     )
 
@@ -428,18 +433,21 @@ def parse_backtest_filename(filepath):
         raw_data = match.groupdict()
         parsed_data = {}
         for key, value in raw_data.items():
-            try:
-                parsed_data[key] = int(value)
-            except ValueError:
+            # 【修改】将字符串 'True'/'False' 转回布尔值
+            if key == 'require_rebound':
+                parsed_data[key] = True if value == 'True' else False
+            else:
                 try:
-                    parsed_data[key] = float(value)
+                    parsed_data[key] = int(value)
                 except ValueError:
-                    parsed_data[key] = value
+                    try:
+                        parsed_data[key] = float(value)
+                    except ValueError:
+                        parsed_data[key] = value
         return parsed_data
     else:
         print(f"解析失败: {filename}")
         return None
-
 
 def run_good_params():
     original_df = pd.read_csv('kline_data/sol_xrp.csv')
@@ -451,18 +459,20 @@ def run_good_params():
     for index, row in df_filtered.iterrows():
         params = parse_backtest_filename(row['file_name'])
         if params:
+            # 【修改】将 require_rebound 加入 task_tuple
             task_tuple = (
                 params['z_entry'],
                 params['z_exit'],
                 params['delta'],
                 params['ve'],
-                params['granularity']
+                params['granularity'],
+                params.get('require_rebound', False) # 用 get 兼容老文件
             )
             if params['granularity'] == 1:
                 tasks.append(task_tuple)
 
     print(f"Total filtered tasks (Before Pre-filter): {len(tasks)}")
-    tasks = filter_tasks_before_pool(tasks)  # 【修改】加入提前过滤
+    tasks = filter_tasks_before_pool(tasks)
     print(f"Total filtered tasks (After Pre-filter): {len(tasks)}")
 
     with Pool(processes=10, initializer=init_worker, initargs=(original_df,)) as pool:
@@ -475,7 +485,8 @@ def get_good_tasks(base_tasks, key_word, result_df, need_expand=True):
     temp_tasks = []
     copy_base_tasks = base_tasks.copy()
     for task in copy_base_tasks:
-        temp_tasks.append(task[:5])
+        # 【修改】从截取前5个变更为截取前6个（包含 require_rebound）
+        temp_tasks.append(task[:6])
     base_tasks_set = set(temp_tasks)
     df = result_df
     df = df[df['avg_profit_per_trade'] > 0.2]
@@ -495,15 +506,16 @@ def get_good_tasks(base_tasks, key_word, result_df, need_expand=True):
     for index, row in df.iterrows():
         params = parse_backtest_filename(row['file_name'])
         if params:
+            # 【修改】加入 require_rebound
             task_tuple = (
                 params['z_entry'],
                 params['z_exit'],
                 params['delta'],
                 params['ve'],
-                params['granularity']
+                params['granularity'],
+                params.get('require_rebound', False)
             )
 
-            # 修改点：在原有条件上增加了 need_expand 的判断
             if need_expand and task_tuple in base_tasks_set:
                 count += 1
                 variable_keys = ['z_entry', 'z_exit', 'delta', 've']
@@ -511,15 +523,14 @@ def get_good_tasks(base_tasks, key_word, result_df, need_expand=True):
                 for key in variable_keys:
                     base_val = params[key]
                     variations.append(
-                        [base_val * 0.7, base_val * 0.8, base_val * 0.9, base_val, base_val * 1.1, base_val * 1.2,
-                         base_val * 1.3])
+                        [base_val * 0.8, base_val * 0.9, base_val, base_val * 1.1, base_val * 1.2])
 
+                # 【修改】保留粒度和反弹标志位
                 variations.append([params['granularity']])
+                variations.append([params.get('require_rebound', False)])
 
                 for combo in itertools.product(*variations):
-                    # 为每一个combo 最后增加 key_word
                     combo_with_keyword = combo + (key_word,)
-
                     tasks.append(combo_with_keyword)
             else:
                 combo_with_keyword = task_tuple + (key_word,)
@@ -642,10 +653,6 @@ def gen_all_merged_df():
 
 
 def process_single_pair(df_file):
-    """
-    处理单个交易对
-    :return:
-    """
     key_word = df_file.split('/')[1].split('.csv')[0]
     original_df = pd.read_csv(df_file)
     if 'open_time' in original_df.columns:
@@ -658,6 +665,8 @@ def process_single_pair(df_file):
     delta_list = [1e-3, 1e-4, 5e-5, 1e-5, 5e-6, 1e-7, 1e-8, 1e-9, 1e-10, 1e-11]
     ve_list = [1e-2, 1e-3, 5e-4, 1e-4, 5e-5, 1e-5]
     granularity_list = [1]
+    # 【修改】新增你要对比的策略维度
+    require_rebound_list = [False, True]
 
     base_tasks = []
     for z_entry in z_entry_list:
@@ -665,20 +674,22 @@ def process_single_pair(df_file):
             for delta in delta_list:
                 for ve in ve_list:
                     for granularity in granularity_list:
-                        base_tasks.append((z_entry, z_exit, delta, ve, granularity, key_word))
-    # tasks = get_good_tasks(tasks, key_word)
+                        # 【修改】多加一层循环，将两种情况都塞进任务队列去跑
+                        for req_reb in require_rebound_list:
+                            base_tasks.append((z_entry, z_exit, delta, ve, granularity, req_reb, key_word))
+
     tasks = base_tasks.copy()
     print(f"Total tasks (Before Pre-filter): {len(tasks)}")
-    tasks = filter_tasks_before_pool(tasks)  # 【修改】加入提前过滤
+    tasks = filter_tasks_before_pool(tasks)
     print(f"Total tasks (After Pre-filter): {len(tasks)}")
 
     with Pool(processes=1, initializer=init_worker, initargs=(original_df,)) as pool:
         pool.map(process_strategy, tasks)
 
     result_df = gen_result_df(key_word)
-    tasks = get_good_tasks(base_tasks, key_word, result_df, need_expand=False)
+    tasks = get_good_tasks(base_tasks, key_word, result_df, need_expand=True)
 
-    tasks = filter_tasks_before_pool(tasks)  # 【修改】加入提前过滤
+    tasks = filter_tasks_before_pool(tasks)
 
     with Pool(processes=1, initializer=init_worker, initargs=(original_df,)) as pool:
         pool.map(process_strategy, tasks)
@@ -692,13 +703,12 @@ def process_single_pair(df_file):
         original_df['open_time'] = pd.to_datetime(original_df['open_time'])
 
     tasks = get_good_tasks(base_tasks, key_word, result_df, need_expand=False)
-    tasks = filter_tasks_before_pool(tasks)  # 【修改】加入提前过滤
+    tasks = filter_tasks_before_pool(tasks)
 
     with Pool(processes=1, initializer=init_worker, initargs=(original_df,)) as pool:
         pool.map(process_strategy, tasks)
 
     result_df = gen_result_df(key_word)
-
 
 if __name__ == '__main__':
     # gen_all_merged_df()
