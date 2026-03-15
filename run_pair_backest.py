@@ -563,7 +563,7 @@ def gen_result_df(key_word):
     print(f"找到 {len(valid_files)} 个符合条件的文件，准备进行多线程处理...")
 
     # 2. 开启多线程并行加载和处理
-    with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         # executor.map 自动调度并在主线程中按序返回结果，无需加锁就能安全 append
         for result in executor.map(process_file, valid_files):
             if result is not None:
@@ -666,7 +666,7 @@ def process_single_pair(df_file):
     ve_list = [1e-2, 1e-3, 5e-4, 1e-4, 5e-5, 1e-5]
     granularity_list = [1]
     # 【修改】新增你要对比的策略维度
-    require_rebound_list = [False, True]
+    require_rebound_list = [False]
 
     base_tasks = []
     for z_entry in z_entry_list:
@@ -713,5 +713,5 @@ def process_single_pair(df_file):
 if __name__ == '__main__':
     # gen_all_merged_df()
 
-    df_file = 'kline_data/BTC_ETH_1m.csv'
+    df_file = 'kline_data/ETH_SOL_1m.csv'
     process_single_pair(df_file)
