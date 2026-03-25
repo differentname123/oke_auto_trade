@@ -199,6 +199,10 @@ def calculate_dca_info(
         # 计算当前阶段爆仓价和均价的偏差比例绝对值
         liq_deviation_from_avg = abs(round_liq_price - avg_price) / avg_price * 100
 
+        # 新增：计算当前价位下，至少需要的保证金（如果策略总资金少于这个值，在该价位就会爆仓）
+        # 基于 0-MMR 模型，该值精确等于到达此执行价时产生的绝对浮亏
+        min_survive_margin = total_size * abs(avg_price - order_price)
+
         rounds_info.append({
             "round_name": round_name,
             "order_price": order_price,
@@ -209,7 +213,8 @@ def calculate_dca_info(
             "tp_price": tp_price,
             "tp_trigger_change": tp_trigger_change,
             "round_liq_price": round_liq_price,
-            "liq_deviation_from_avg": liq_deviation_from_avg
+            "liq_deviation_from_avg": liq_deviation_from_avg,
+            "min_survive_margin": min_survive_margin  # 新增的输出字段
         })
 
         actual_rounds += 1
@@ -229,27 +234,31 @@ def calculate_dca_info(
         "rounds_info": rounds_info
     }
 
-
-def generate_sequence(target, n, ratio):
+def generate_sequence_from_sum(target, n, ratio, precision=6):
     if n <= 0:
         raise ValueError("次数 n 必须大于 0")
-    if ratio == 0:
-        raise ValueError("比例 ratio 不能为 0")
 
-    # 先算初始值
-    a1 = target / (ratio ** (n - 1))
+    # 求初始值
+    if ratio == 1:
+        a1 = target / n
+    else:
+        a1 = target * (1 - ratio) / (1 - ratio ** n)
 
-    print(f"初始值 a1 = {a1}\n")
+    print(f"初始值 a1 = {round(a1, precision)}\n")
 
-    # 生成并打印每一轮
     sequence = []
+    total = 0
+
     for i in range(n):
         value = a1 * (ratio ** i)
+        total += value
         sequence.append(value)
-        print(f"第{i + 1}轮: {value}")
+
+        print(f"第{i+1}轮: {round(value, precision)}，累计: {round(total, precision)}")
+
+    print(f"\n最终累计: {round(total, precision)} (目标: {target})")
 
     return sequence
-
 
 # ==========================================
 # 测试与使用示例
@@ -259,7 +268,7 @@ if __name__ == "__main__":
     print("【合约DCA模式计算测试 (新增累计保证金与爆仓偏差测算)】")
     print("=" * 50)
 
-    print(generate_sequence(200, 4, 2))
+    print(generate_sequence_from_sum(150, 3, 2))
 
 
     # result = calculate_multi_group_margin(
@@ -284,16 +293,16 @@ if __name__ == "__main__":
 
 
     dca_result = calculate_dca_info(
-        price_deviation_percent=25.0, # 价格偏差 (%)
+        price_deviation_percent=22.0, # 价格偏差 (%)
         leverage=25.0,  # 杠杆
-        initial_margin=1,  # 初始订单保证金
-        dca_margin_base=1.0, # 加仓单基础保证金
+        initial_margin=0.8,  # 初始订单保证金
+        dca_margin_base=0.72, # 加仓单基础保证金
         max_dca_orders=3,# 最大DCA订单数量
-        tp_target_percent=5.0,  # 每轮止盈目标 (%)
+        tp_target_percent=15.0,  # 每轮止盈目标 (%)
         price_step_multiplier=2,# 加仓单价差乘数
-        amount_multiplier=1.9,  # 加仓金额乘数
+        amount_multiplier=2,  # 加仓金额乘数
         direction='short',# 方向: 'long' 或 'short'
-        initial_price=0.0638, # 初始开仓价格（用于计算具体价位）
+        initial_price=2.188, # 初始开仓价格（用于计算具体价位）
         extra_margin=1000      # 新增：额外保证金，默认为20
     )
 
@@ -302,6 +311,8 @@ if __name__ == "__main__":
         print(f"  订单价格 / 距初始单价格: {r['order_price']:.4f} / {r['deviation_from_initial']:.2f}%")
         print(f"  当轮委托保证金: {r['order_margin']:.2f}")
         print(f"  当前累计投入保证金: {r['cumulative_margin']:.2f}")
+        print(f"  min_survive_margin: {r['min_survive_margin']:.2f}")
+
         print(f"  平均价格: {r['avg_price']:.4f}")
         print(f"  止盈价格: {r['tp_price']:.4f}")
         print(f"  触发止盈所需价格变动: {r['tp_trigger_change']:.2f}%")
