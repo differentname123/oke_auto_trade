@@ -3,23 +3,31 @@ import time
 
 def calculate_multi_group_margin(
         leverage: float,
-        target_loss_percent: float,  # 全局最大忍受的下跌比例，例如 5.0 表示 5%
-        max_grids_per_group: int,  # 新增：每个大组允许的最大网格数量
+        target_loss_percent: float,  # 全局最大忍受的下跌/上涨比例，例如 5.0 表示 5%
+        max_grids_per_group: int,  # 每个大组允许的最大网格数量
         fixed_qty: float = 1.0,  # 每次固定开仓的数量
-        add_step_percent: float = 0.01,  # 每次下跌加仓的波动
-        initial_price: float = 1.0  # 初始价格
+        add_step_percent: float = 0.01,  # 每次价格波动加仓的百分比
+        initial_price: float = 1.0,  # 初始价格
+        direction: str = 'long'  # 新增：'long' 表示做多，'short' 表示做空
 ) -> dict:
     """
-    功能：在每次固定开仓数量的多组网格策略下，计算要扛住指定的跌幅，
+    功能：在每次固定开仓数量的多组网格策略下，计算要扛住指定的跌幅/涨幅，
     各组网格的价格区间、单组所需保证金，以及全局总计需要的初始保证金。
     不考虑手续费、MMR 和 滑点。
     """
     if leverage <= 0 or target_loss_percent <= 0 or add_step_percent <= 0 or fixed_qty <= 0 or max_grids_per_group <= 0:
-        raise ValueError("所有参数必须 > 0")
+        raise ValueError("所有数值参数必须 > 0")
+    if direction not in ['long', 'short']:
+        raise ValueError("direction 参数必须是 'long' 或 'short'")
 
     r = add_step_percent / 100.0
+    sign = 1 if direction == 'long' else -1  # 盈亏计算方向乘数
+
     # 计算全局目标止损价/爆仓价 (底线)
-    target_price = initial_price * (1.0 - target_loss_percent / 100.0)
+    if direction == 'long':
+        target_price = initial_price * (1.0 - target_loss_percent / 100.0)
+    else:
+        target_price = initial_price * (1.0 + target_loss_percent / 100.0)
 
     current_price = initial_price
 
@@ -27,8 +35,12 @@ def calculate_multi_group_margin(
     groups_info = []
     group_id = 1
 
-    # 只要当前价格还没跌穿全局目标价，就继续开启新的网格组
-    while current_price >= target_price:
+    # 定义价格是否尚未触及目标的检查函数
+    def is_active(cp, tp):
+        return cp >= tp if direction == 'long' else cp <= tp
+
+    # 只要当前价格还没跌穿/涨穿全局目标价，就继续开启新的网格组
+    while is_active(current_price, target_price):
         group_start_price = current_price
         group_qty = 0.0
         group_cost = 0.0
@@ -36,8 +48,8 @@ def calculate_multi_group_margin(
         grids_in_group = 0
         last_executed_price = current_price
 
-        # 模拟单个大组内部顺着网格一路下跌加仓的过程
-        while grids_in_group < max_grids_per_group and current_price >= target_price:
+        # 模拟单个大组内部顺着网格一路下跌/上涨加仓的过程
+        while grids_in_group < max_grids_per_group and is_active(current_price, target_price):
             # 1. 触发加仓：更新该组的持仓和成本
             group_qty += fixed_qty
             group_cost += fixed_qty * current_price
@@ -45,27 +57,32 @@ def calculate_multi_group_margin(
             last_executed_price = current_price
 
             # 2. 检查加仓瞬间的“开仓保证金需求”
-            upnl_at_open = group_qty * current_price - group_cost
+            # 利用 sign 自适应做多/做空的浮亏计算
+            upnl_at_open = sign * (group_qty * current_price - group_cost)
             required_for_margin = (group_cost / leverage) - upnl_at_open
             if required_for_margin > group_max_margin:
                 group_max_margin = required_for_margin
 
             # 计算下一个网格准备加仓的价格
-            next_price = current_price * (1 - r)
-            check_price = max(next_price, target_price)
+            if direction == 'long':
+                next_price = current_price * (1 - r)
+                check_price = max(next_price, target_price)
+            else:
+                next_price = current_price * (1 + r)
+                check_price = min(next_price, target_price)
 
-            # 3. 检查在这个区间内下跌时的生存底线需求
-            upnl_at_bottom = group_qty * check_price - group_cost
+            # 3. 检查在这个区间内波动时的生存底线需求
+            upnl_at_bottom = sign * (group_qty * check_price - group_cost)
             required_for_survival = -upnl_at_bottom
             if required_for_survival > group_max_margin:
                 group_max_margin = required_for_survival
 
-            # 跌到下一个网格价，进入该组的下一次循环
+            # 跌到/涨到下一个网格价，进入该组的下一次循环
             current_price = next_price
 
-        # 4. 关键点：该组网格建仓完毕（或触及全局目标价）后，它需要一直扛跌到“全局 target_price”
+        # 4. 关键点：该组网格建仓完毕（或触及全局目标价）后，它需要一直扛单到“全局 target_price”
         # 该组在全局目标价时的极限浮亏
-        upnl_at_global_target = group_qty * target_price - group_cost
+        upnl_at_global_target = sign * (group_qty * target_price - group_cost)
 
         # 维持该组仓位到全局目标价所需的极限保证金：(仓位价值 / 杠杆) - 极限浮亏
         required_at_global_target = (group_cost / leverage) - upnl_at_global_target
@@ -91,18 +108,18 @@ def calculate_multi_group_margin(
         "groups_info": groups_info
     }
 
-
 # ==========================================
 # 测试与使用示例
 # ==========================================
 if __name__ == "__main__":
     result = calculate_multi_group_margin(
         leverage=125.0,
-        target_loss_percent=5,  # 扛住 5% 的下跌
-        max_grids_per_group=169,  # 单个大组最多 150 个网格
-        fixed_qty=0.01,  # 每次买 1 个
-        add_step_percent=0.015,  # 每跌 0.01% 买一次
-        initial_price=2120.0  # 假设初始价格 100
+        target_loss_percent=20,  # 扛住 5% 的下跌
+        max_grids_per_group=10000,  # 单个大组最多 150 个网格
+        fixed_qty=0.017,  # 每次买 1 个
+        add_step_percent=0.4,  # 每跌 0.01% 买一次
+        initial_price=2300,  # 假设初始价格 100
+        # direction='short',  # 做空
     )
 
     print(f"【全局总需准备的保证金】: {result['total_margin']}\n")
