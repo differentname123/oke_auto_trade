@@ -122,13 +122,14 @@ def calculate_dca_info(
         price_step_multiplier: float = 1.0,  # 加仓单价差乘数
         amount_multiplier: float = 1.1,  # 加仓金额乘数
         direction: str = 'short',  # 方向: 'long' 或 'short'
-        initial_price: float = 1.0  # 初始开仓价格（用于计算具体价位）
+        initial_price: float = 1.0,  # 初始开仓价格（用于计算具体价位）
+        extra_margin: float = 20.0  # 新增：额外保证金，默认为20
 ) -> dict:
     if direction not in ['long', 'short']:
         raise ValueError("direction 必须是 'long' 或 'short'")
 
-    # 1. 预计算该策略锁定的总保证金 (护城河)
-    total_allocated_margin = initial_margin
+    # 1. 预计算该策略锁定的总保证金 (护城河：包含初始、所有DCA预算，以及额外保证金)
+    total_allocated_margin = initial_margin + extra_margin
     for i in range(1, max_dca_orders + 1):
         total_allocated_margin += dca_margin_base * (amount_multiplier ** (i - 1))
 
@@ -142,7 +143,7 @@ def calculate_dca_info(
     expected_rounds = max_dca_orders + 1
     actual_rounds = 0
 
-    cumulative_margin_invested = 0.0  # 新增：记录每一轮实际累计投入的保证金
+    cumulative_margin_invested = 0.0  # 记录每一轮实际累计投入的订单保证金
 
     # 2. 依次计算每一轮的挂单与成交详情
     for i in range(expected_rounds):
@@ -195,7 +196,7 @@ def calculate_dca_info(
         else:
             round_liq_price = avg_price + (total_allocated_margin / total_size)
 
-        # 新增：计算当前阶段爆仓价和均价的偏差比例绝对值
+        # 计算当前阶段爆仓价和均价的偏差比例绝对值
         liq_deviation_from_avg = abs(round_liq_price - avg_price) / avg_price * 100
 
         rounds_info.append({
@@ -203,12 +204,12 @@ def calculate_dca_info(
             "order_price": order_price,
             "deviation_from_initial": cumulative_dev_percent if i > 0 else 0.0,
             "order_margin": order_margin,
-            "cumulative_margin": cumulative_margin_invested,  # 新增字段
+            "cumulative_margin": cumulative_margin_invested,
             "avg_price": avg_price,
             "tp_price": tp_price,
             "tp_trigger_change": tp_trigger_change,
             "round_liq_price": round_liq_price,
-            "liq_deviation_from_avg": liq_deviation_from_avg  # 新增字段
+            "liq_deviation_from_avg": liq_deviation_from_avg
         })
 
         actual_rounds += 1
@@ -229,6 +230,27 @@ def calculate_dca_info(
     }
 
 
+def generate_sequence(target, n, ratio):
+    if n <= 0:
+        raise ValueError("次数 n 必须大于 0")
+    if ratio == 0:
+        raise ValueError("比例 ratio 不能为 0")
+
+    # 先算初始值
+    a1 = target / (ratio ** (n - 1))
+
+    print(f"初始值 a1 = {a1}\n")
+
+    # 生成并打印每一轮
+    sequence = []
+    for i in range(n):
+        value = a1 * (ratio ** i)
+        sequence.append(value)
+        print(f"第{i + 1}轮: {value}")
+
+    return sequence
+
+
 # ==========================================
 # 测试与使用示例
 # ==========================================
@@ -237,6 +259,7 @@ if __name__ == "__main__":
     print("【合约DCA模式计算测试 (新增累计保证金与爆仓偏差测算)】")
     print("=" * 50)
 
+    print(generate_sequence(200, 4, 2))
 
 
     # result = calculate_multi_group_margin(
@@ -261,16 +284,17 @@ if __name__ == "__main__":
 
 
     dca_result = calculate_dca_info(
-        price_deviation_percent=20.0,
-        leverage=25.0,
-        initial_margin=1,
-        dca_margin_base=1.18,
-        max_dca_orders=20,
-        tp_target_percent=15.0,
-        price_step_multiplier=1.0,
-        amount_multiplier=1,
-        direction='short',
-        initial_price=0.0638
+        price_deviation_percent=25.0, # 价格偏差 (%)
+        leverage=25.0,  # 杠杆
+        initial_margin=1,  # 初始订单保证金
+        dca_margin_base=1.0, # 加仓单基础保证金
+        max_dca_orders=3,# 最大DCA订单数量
+        tp_target_percent=5.0,  # 每轮止盈目标 (%)
+        price_step_multiplier=2,# 加仓单价差乘数
+        amount_multiplier=1.9,  # 加仓金额乘数
+        direction='short',# 方向: 'long' 或 'short'
+        initial_price=0.0638, # 初始开仓价格（用于计算具体价位）
+        extra_margin=1000      # 新增：额外保证金，默认为20
     )
 
     for r in dca_result['rounds_info']:
