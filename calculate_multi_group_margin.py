@@ -264,11 +264,7 @@ def generate_sequence_from_sum(target, n, ratio, precision=6):
 # 测试与使用示例
 # ==========================================
 if __name__ == "__main__":
-    print("\n" + "=" * 50)
-    print("【合约DCA模式计算测试 (新增累计保证金与爆仓偏差测算)】")
-    print("=" * 50)
 
-    print(generate_sequence_from_sum(150, 3, 2))
 
     # 策略1 网格
     result = calculate_multi_group_margin(
@@ -291,45 +287,51 @@ if __name__ == "__main__":
         print(f"  - 该组需分配保证金: {g['required_margin']}")
         print("-" * 30)
 
-
-    # 策略2 DCA
-    dca_result = calculate_dca_info(
-        price_deviation_percent=22.0, # 价格偏差 (%)
-        leverage=25.0,  # 杠杆
-        initial_margin=0.8,  # 初始订单保证金
-        dca_margin_base=0.72, # 加仓单基础保证金
-        max_dca_orders=3,# 最大DCA订单数量
-        tp_target_percent=15.0,  # 每轮止盈目标 (%)
-        price_step_multiplier=2,# 加仓单价差乘数
-        amount_multiplier=2,  # 加仓金额乘数
-        direction='short',# 方向: 'long' 或 'short'
-        initial_price=2.188, # 初始开仓价格（用于计算具体价位）
-        extra_margin=1000      # 新增：额外保证金，默认为20
-    )
-
-    for r in dca_result['rounds_info']:
-        print(f"[{r['round_name']}]")
-        print(f"  订单价格 / 距初始单价格: {r['order_price']:.4f} / {r['deviation_from_initial']:.2f}%")
-        print(f"  当轮委托保证金: {r['order_margin']:.2f}")
-        print(f"  当前累计投入保证金: {r['cumulative_margin']:.2f}")
-        print(f"  min_survive_margin: {r['min_survive_margin']:.2f}")
-
-        print(f"  平均价格: {r['avg_price']:.4f}")
-        print(f"  止盈价格: {r['tp_price']:.4f}")
-        print(f"  触发止盈所需价格变动: {r['tp_trigger_change']:.2f}%")
-        print(f"  当前阶段爆仓价(基于策略总资金池): {r['round_liq_price']:.4f}")
-        print(f"  爆仓价距当前均价偏差: {r['liq_deviation_from_avg']:.2f}%")
-        print("-" * 30)
-
-    print("\n【最终风险与汇总评估】")
-    print(f"预计执行轮次(含初始单): {dca_result['expected_total_rounds']} 轮")
-    print(f"实际存活轮次(含初始单): {dca_result['actual_rounds']} 轮")
-
-    if dca_result['actual_rounds'] < dca_result['expected_total_rounds']:
-        print("⚠️ 警告：策略中途爆仓，后续加仓单无法被执行！")
-
-    print(f"策略锁定总保证金池: {dca_result['total_margin_invested']:.4f} USDT")
-    print(f"实际最终均价: {dca_result['final_avg_price']:.4f}")
-    print(f"实际极限强平价格: {dca_result['final_liquidation_price']:.4f}")
-    print(f"最大可忍受单边波动(距初始价): {dca_result['max_tolerable_fluctuation_percent']:.2f}%")
-    print()
+    #
+    #
+    # # 策略2 DCA
+    # print("\n" + "=" * 50)
+    # print("【合约DCA模式计算测试 (新增累计保证金与爆仓偏差测算)】")
+    # print("=" * 50)
+    #
+    # print(generate_sequence_from_sum(150, 3, 2))
+    # dca_result = calculate_dca_info(
+    #     price_deviation_percent=22.0, # 价格偏差 (%)
+    #     leverage=25.0,  # 杠杆
+    #     initial_margin=0.8,  # 初始订单保证金
+    #     dca_margin_base=0.72, # 加仓单基础保证金
+    #     max_dca_orders=3,# 最大DCA订单数量
+    #     tp_target_percent=15.0,  # 每轮止盈目标 (%)
+    #     price_step_multiplier=2,# 加仓单价差乘数
+    #     amount_multiplier=2,  # 加仓金额乘数
+    #     direction='short',# 方向: 'long' 或 'short'
+    #     initial_price=2.188, # 初始开仓价格（用于计算具体价位）
+    #     extra_margin=1000      # 新增：额外保证金，默认为20
+    # )
+    #
+    # for r in dca_result['rounds_info']:
+    #     print(f"[{r['round_name']}]")
+    #     print(f"  订单价格 / 距初始单价格: {r['order_price']:.4f} / {r['deviation_from_initial']:.2f}%")
+    #     print(f"  当轮委托保证金: {r['order_margin']:.2f}")
+    #     print(f"  当前累计投入保证金: {r['cumulative_margin']:.2f}")
+    #     print(f"  min_survive_margin: {r['min_survive_margin']:.2f}")
+    #
+    #     print(f"  平均价格: {r['avg_price']:.4f}")
+    #     print(f"  止盈价格: {r['tp_price']:.4f}")
+    #     print(f"  触发止盈所需价格变动: {r['tp_trigger_change']:.2f}%")
+    #     print(f"  当前阶段爆仓价(基于策略总资金池): {r['round_liq_price']:.4f}")
+    #     print(f"  爆仓价距当前均价偏差: {r['liq_deviation_from_avg']:.2f}%")
+    #     print("-" * 30)
+    #
+    # print("\n【最终风险与汇总评估】")
+    # print(f"预计执行轮次(含初始单): {dca_result['expected_total_rounds']} 轮")
+    # print(f"实际存活轮次(含初始单): {dca_result['actual_rounds']} 轮")
+    #
+    # if dca_result['actual_rounds'] < dca_result['expected_total_rounds']:
+    #     print("⚠️ 警告：策略中途爆仓，后续加仓单无法被执行！")
+    #
+    # print(f"策略锁定总保证金池: {dca_result['total_margin_invested']:.4f} USDT")
+    # print(f"实际最终均价: {dca_result['final_avg_price']:.4f}")
+    # print(f"实际极限强平价格: {dca_result['final_liquidation_price']:.4f}")
+    # print(f"最大可忍受单边波动(距初始价): {dca_result['max_tolerable_fluctuation_percent']:.2f}%")
+    # print()
