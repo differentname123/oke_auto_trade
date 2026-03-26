@@ -270,28 +270,29 @@ if __name__ == "__main__":
 
     print(generate_sequence_from_sum(150, 3, 2))
 
+    # 策略1 网格
+    result = calculate_multi_group_margin(
+        leverage=125.0,
+        target_loss_percent=20,  # 扛住 5% 的下跌
+        max_grids_per_group=10000,  # 单个大组最多 150 个网格
+        fixed_qty=0.017,  # 每次买 1 个
+        add_step_percent=0.4,  # 每跌 0.01% 买一次
+        initial_price=2300,  # 假设初始价格 100
+        # direction='short',  # 做空
+    )
 
-    # result = calculate_multi_group_margin(
-    #     leverage=125.0,
-    #     target_loss_percent=20,  # 扛住 5% 的下跌
-    #     max_grids_per_group=10000,  # 单个大组最多 150 个网格
-    #     fixed_qty=0.017,  # 每次买 1 个
-    #     add_step_percent=0.4,  # 每跌 0.01% 买一次
-    #     initial_price=2300,  # 假设初始价格 100
-    #     # direction='short',  # 做空
-    # )
-    #
-    # print(f"【全局总需准备的保证金】: {result['total_margin']}\n")
-    # print("【各网格大组详细信息】:")
-    # for g in result['groups_info']:
-    #     print(f"组别 {g['group_id']}:")
-    #     print(f"  - 价格区间: {g['start_price']} -> {g['end_price']}")
-    #     print(f"  - 网格数量: {g['grid_count']} 单")
-    #     print(f"  - 该组累计币量: {g['group_qty']}")
-    #     print(f"  - 该组需分配保证金: {g['required_margin']}")
-    #     print("-" * 30)
+    print(f"【全局总需准备的保证金】: {result['total_margin']}\n")
+    print("【各网格大组详细信息】:")
+    for g in result['groups_info']:
+        print(f"组别 {g['group_id']}:")
+        print(f"  - 价格区间: {g['start_price']} -> {g['end_price']}")
+        print(f"  - 网格数量: {g['grid_count']} 单")
+        print(f"  - 该组累计币量: {g['group_qty']}")
+        print(f"  - 该组需分配保证金: {g['required_margin']}")
+        print("-" * 30)
 
 
+    # 策略2 DCA
     dca_result = calculate_dca_info(
         price_deviation_percent=22.0, # 价格偏差 (%)
         leverage=25.0,  # 杠杆
