@@ -204,11 +204,11 @@ def get_binance_feed(token="DOGE", desire_count=20, orderBy=2):
 
 if __name__ == "__main__":
 
-    print("=" * 40)
-    print("1. 测试: 获取币安 Feed 数据")
-    print("=" * 40)
-    feed_data = get_binance_feed(token="DOGE", desire_count=2)
-    print(f"✅ 获取到 {len(feed_data)} 条 Feed 数据。\n")
+    # print("=" * 40)
+    # print("1. 测试: 获取币安 Feed 数据")
+    # print("=" * 40)
+    # feed_data = get_binance_feed(token="DOGE", desire_count=2)
+    # print(f"✅ 获取到 {len(feed_data)} 条 Feed 数据。\n")
 
     print("=" * 40)
     print("2. 测试: 获取合约资金费率及涨跌幅")

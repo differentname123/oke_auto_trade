@@ -9,8 +9,6 @@ import numba as nb  # 【新增】引入 Numba 用于核心加速
 import concurrent.futures
 
 # 保持原本的引用
-from get_feature import read_last_n_lines
-
 
 # -----------------------------------------------------------------------------
 # 0. 辅助算法: 卡尔曼滤波计算动态对冲比率 (Numba 标量展开极速版)
@@ -449,35 +447,6 @@ def parse_backtest_filename(filepath):
         print(f"解析失败: {filename}")
         return None
 
-def run_good_params():
-    original_df = pd.read_csv('kline_data/sol_xrp.csv')
-    final_df_path = 'kline_data/result_df.csv'
-    df = pd.read_csv(final_df_path)
-    df['score'] = -(df['avg_profit_per_trade'] - 0.1) * df['total_trades'] / (df['Max Drawdown'] - 0.5)
-    df_filtered = df[df['score'] > 10]
-    tasks = []
-    for index, row in df_filtered.iterrows():
-        params = parse_backtest_filename(row['file_name'])
-        if params:
-            # 【修改】将 require_rebound 加入 task_tuple
-            task_tuple = (
-                params['z_entry'],
-                params['z_exit'],
-                params['delta'],
-                params['ve'],
-                params['granularity'],
-                params.get('require_rebound', False) # 用 get 兼容老文件
-            )
-            if params['granularity'] == 1:
-                tasks.append(task_tuple)
-
-    print(f"Total filtered tasks (Before Pre-filter): {len(tasks)}")
-    tasks = filter_tasks_before_pool(tasks)
-    print(f"Total filtered tasks (After Pre-filter): {len(tasks)}")
-
-    with Pool(processes=10, initializer=init_worker, initargs=(original_df,)) as pool:
-        pool.map(process_strategy, tasks)
-
 
 def get_good_tasks(base_tasks, key_word, result_df, need_expand=True):
     import itertools
@@ -696,22 +665,9 @@ def process_single_pair(df_file):
 
     result_df = gen_result_df(key_word)
 
-    df_file = df_file.replace('1m', '1s')
-    key_word = df_file.split('/')[1].split('.csv')[0]
-    original_df = pd.read_csv(df_file)
-    if 'open_time' in original_df.columns:
-        original_df['open_time'] = pd.to_datetime(original_df['open_time'])
-
-    tasks = get_good_tasks(base_tasks, key_word, result_df, need_expand=False)
-    tasks = filter_tasks_before_pool(tasks)
-
-    with Pool(processes=1, initializer=init_worker, initargs=(original_df,)) as pool:
-        pool.map(process_strategy, tasks)
-
-    result_df = gen_result_df(key_word)
 
 if __name__ == '__main__':
     # gen_all_merged_df()
 
-    df_file = 'kline_data/ETH_SOL_1m.csv'
+    df_file = 'kline_data/BTC_ETH_1m.csv'
     process_single_pair(df_file)

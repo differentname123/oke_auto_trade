@@ -1956,15 +1956,15 @@ def download_data():
     backtest_path = 'kline_data'
     base_file_path = 'origin_data.csv'
     is_reload = True
-    inst_id_list = ['BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'XRP-USDT-SWAP', 'TON-USDT-SWAP', 'DOGE-USDT-SWAP']
+    inst_id_list = ['BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP']
     if not os.path.exists(backtest_path):
         os.makedirs(backtest_path)
-    bar_list = ['1s']
+    bar_list = ['1m']
     #获取当前时间，精确到天
     now = datetime.datetime.now()
     # 转换为可读性格式
     readable_time = now.strftime("%Y-%m-%d")
-    max_candles_list = [10000000]
+    max_candles_list = [24*60*60]
 
     for max_candles in max_candles_list:
         for bar in bar_list:

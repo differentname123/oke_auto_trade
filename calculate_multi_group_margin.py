@@ -266,13 +266,13 @@ def generate_sequence_from_sum(target, n, ratio, precision=6):
 if __name__ == "__main__":
 
 
-    # 策略1 网格
+    # 计算所需保证金
     result = calculate_multi_group_margin(
         leverage=125.0,
-        target_loss_percent=20,  # 扛住 5% 的下跌
-        max_grids_per_group=10000,  # 单个大组最多 150 个网格
-        fixed_qty=0.017,  # 每次买 1 个
-        add_step_percent=0.4,  # 每跌 0.01% 买一次
+        target_loss_percent=15,  # 扛住 5% 的下跌
+        max_grids_per_group=169,  # 单个大组最多 150 个网格
+        fixed_qty=0.01,  # 每次买 1 个
+        add_step_percent=0.1,  # 每跌 0.01% 买一次
         initial_price=2300,  # 假设初始价格 100
         # direction='short',  # 做空
     )
@@ -287,25 +287,26 @@ if __name__ == "__main__":
         print(f"  - 该组需分配保证金: {g['required_margin']}")
         print("-" * 30)
 
-    #
+
+
     #
     # # 策略2 DCA
     # print("\n" + "=" * 50)
     # print("【合约DCA模式计算测试 (新增累计保证金与爆仓偏差测算)】")
     # print("=" * 50)
     #
-    # print(generate_sequence_from_sum(150, 3, 2))
+    # print(generate_sequence_from_sum(100, 3, 2))
     # dca_result = calculate_dca_info(
-    #     price_deviation_percent=22.0, # 价格偏差 (%)
+    #     price_deviation_percent=10.0, # 价格偏差 (%)
     #     leverage=25.0,  # 杠杆
-    #     initial_margin=0.8,  # 初始订单保证金
-    #     dca_margin_base=0.72, # 加仓单基础保证金
+    #     initial_margin=1,  # 初始订单保证金
+    #     dca_margin_base=1, # 加仓单基础保证金
     #     max_dca_orders=3,# 最大DCA订单数量
     #     tp_target_percent=15.0,  # 每轮止盈目标 (%)
     #     price_step_multiplier=2,# 加仓单价差乘数
     #     amount_multiplier=2,  # 加仓金额乘数
     #     direction='short',# 方向: 'long' 或 'short'
-    #     initial_price=2.188, # 初始开仓价格（用于计算具体价位）
+    #     initial_price=4629, # 初始开仓价格（用于计算具体价位）
     #     extra_margin=1000      # 新增：额外保证金，默认为20
     # )
     #
