@@ -12,7 +12,7 @@ from itertools import product
 # 全局配置
 # =============================================================================
 SINGLE_LEG_FEE = 0.0006  # 单腿单次费率（含滑点）
-USE_NEXT_BAR_EXEC = False  # True: 用信号下一根1min close成交; False: 用下一根重采样bar close
+USE_NEXT_BAR_EXEC = False  # True: 用信号下一根1min close成交; False: 用当前 bar 的 close 生成信号，然后又在当前 bar 的 close 成交
 USE_1MIN_PATH = True  # True: 持仓期间MTM/硬止损走1min路径（若提供原始1min数据）
 SL_MULT = 3.0  # spread-based 硬止损倍数（固定，不参与扫描）
 BETA_MIN = 0.1   # [FIX-2] Beta合法下限：低于此值关系不稳定，禁止开仓
@@ -294,7 +294,6 @@ def generate_pair_trading_signals(merged_df, main_col='close_main', sub_col='clo
     df['z_score'] = z_score
     df['roll_std'] = roll_std.values
 
-    # ★ FIX: inf 处理 — 防止 roll_std 极小时 z_score 变为巨大有限数触发幽灵交易
     z_clean = np.nan_to_num(z_score, nan=0.0, posinf=0.0, neginf=0.0)
     rs_clean = np.nan_to_num(roll_std.values, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -302,7 +301,6 @@ def generate_pair_trading_signals(merged_df, main_col='close_main', sub_col='clo
     if pos_state is None:
         pos_state = (0, 0, 9999, 0.0, 0.0, 0.0, 0.0)
 
-    # [FIX-2] 传入 BETA_MIN, BETA_MAX；[FIX-5] 接收新增的 stop_flags_raw
     (raw_signals, frozen_betas, frozen_alphas_state,
      entry_spreads_state, entry_stds_state,
      stop_flags_raw,
@@ -326,9 +324,7 @@ def generate_pair_trading_signals(merged_df, main_col='close_main', sub_col='clo
     df['entry_spread_state'] = entry_spreads_state
     df['entry_std_state'] = entry_stds_state
 
-    # [FIX 1] 移位：信号与元数据统一受 USE_NEXT_BAR_EXEC 控制
     if USE_NEXT_BAR_EXEC:
-        # shift：信号 bar k → 交易检测在 bar k+1 → 元数据也取 bar k 的值
         shifted = np.zeros_like(raw_signals)
         shifted[1:] = raw_signals[:-1]
         df['signal'] = shifted
@@ -354,19 +350,30 @@ def generate_pair_trading_signals(merged_df, main_col='close_main', sub_col='clo
             shifted_entry_z[1:] = z_score[:-1]
         df['signal_entry_z'] = shifted_entry_z
 
-        # [FIX-5] stop_flag 也需要同步 shift
         shifted_sf = np.zeros_like(stop_flags_raw)
         shifted_sf[1:] = stop_flags_raw[:-1]
         df['stop_flag'] = shifted_sf
     else:
-        # 不 shift：信号 bar k → 交易检测就在 bar k → 元数据也取 bar k 的值
         df['signal'] = raw_signals.copy()
         df['signal_frozen_beta'] = frozen_betas.copy()
         df['signal_frozen_alpha'] = frozen_alphas_state.copy()
         df['signal_entry_spread'] = entry_spreads_state.copy()
         df['signal_entry_std'] = entry_stds_state.copy()
         df['signal_entry_z'] = z_score.copy()
-        df['stop_flag'] = stop_flags_raw.copy()  # [FIX-5]
+        df['stop_flag'] = stop_flags_raw.copy()
+
+    # 为 execution 层在 1min 提前止损后重建后续 signal path 提供必要参数
+    _sig_ctx = {
+        'z_entry': float(z_entry),
+        'z_exit': float(z_exit),
+        'min_hold_bars': int(min_hold_bars),
+        'cooldown_bars': int(cooldown_bars),
+        'max_hold_bars': int(max_hold_bars),
+        'signal_fee': float(SINGLE_LEG_FEE),
+    }
+    df.attrs['_pt_signal_ctx'] = _sig_ctx
+    for _k, _v in _sig_ctx.items():
+        df[f'__pt_{_k}'] = _v
 
     return df, final_kf_state, final_pos_state
 
@@ -532,17 +539,44 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
     spreads_arr = df['spread'].values.astype(float) if 'spread' in df.columns else np.full(n, np.nan)
     betas_arr = df['beta'].values.astype(float) if 'beta' in df.columns else np.zeros(n)
     alphas_arr = df['alpha'].values.astype(float) if 'alpha' in df.columns else np.zeros(n)
+    roll_std_arr = df['roll_std'].values.astype(float) if 'roll_std' in df.columns else np.zeros(n)
 
     signal_fb = df['signal_frozen_beta'].values.astype(float) if 'signal_frozen_beta' in df.columns else betas_arr.copy()
     signal_fa = df['signal_frozen_alpha'].values.astype(float) if 'signal_frozen_alpha' in df.columns else alphas_arr.copy()
     signal_es = df['signal_entry_spread'].values.astype(float) if 'signal_entry_spread' in df.columns else np.zeros(n)
     signal_estd = df['signal_entry_std'].values.astype(float) if 'signal_entry_std' in df.columns else np.zeros(n)
     signal_entry_z = df['signal_entry_z'].values.astype(float) if 'signal_entry_z' in df.columns else np.full(n, np.nan)
-
-    # [FIX-5] 读取止损标记列
     stop_flags_col = df['stop_flag'].values.astype(int) if 'stop_flag' in df.columns else np.zeros(n, dtype=int)
 
-    # 1min缓存
+    log_main_arr = df['log_main'].values.astype(float) if 'log_main' in df.columns else np.log(close_main)
+    log_sub_arr = df['log_sub'].values.astype(float) if 'log_sub' in df.columns else np.log(close_sub)
+
+    z_clean = np.nan_to_num(z_scores, nan=0.0, posinf=0.0, neginf=0.0)
+    rs_clean = np.nan_to_num(roll_std_arr, nan=0.0, posinf=0.0, neginf=0.0)
+
+    def _read_sig_ctx(key, default):
+        if '_pt_signal_ctx' in getattr(df, 'attrs', {}):
+            if key in df.attrs['_pt_signal_ctx']:
+                return df.attrs['_pt_signal_ctx'][key]
+        col = f'__pt_{key}'
+        if col in df.columns and len(df) > 0:
+            return df[col].iloc[0]
+        return default
+
+    sig_z_entry = float(_read_sig_ctx('z_entry', np.nan))
+    sig_z_exit = float(_read_sig_ctx('z_exit', np.nan))
+    sig_min_hold_bars = int(_read_sig_ctx('min_hold_bars', 0))
+    sig_cooldown_bars = int(_read_sig_ctx('cooldown_bars', 0))
+    sig_max_hold_bars = int(_read_sig_ctx('max_hold_bars', 0))
+    sig_fee_assumption = float(_read_sig_ctx('signal_fee', SINGLE_LEG_FEE))
+
+    can_rebuild_signal_path = (
+        np.isfinite(sig_z_entry) and np.isfinite(sig_z_exit)
+        and len(z_clean) == n and len(rs_clean) == n
+        and len(spreads_arr) == n and len(betas_arr) == n and len(alphas_arr) == n
+        and len(log_main_arr) == n and len(log_sub_arr) == n
+    )
+
     need_min1 = (USE_NEXT_BAR_EXEC or USE_1MIN_PATH)
     if min1_cache is None and need_min1 and original_1min_df is not None:
         min1_cache = _build_1min_cache(original_1min_df)
@@ -560,7 +594,6 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
     bar_delta_ns = _infer_bar_delta_ns(times, tf_minutes=tf_minutes)
     segment_end_time = times[-1] + bar_delta_ns
 
-    # --- 初始化真实持仓状态 ---
     if exec_state is not None:
         entry_main = float(exec_state[0])
         entry_sub = float(exec_state[1])
@@ -586,7 +619,6 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
         prev_sig_seed = 0
         in_trade = False
 
-    # --- 本段收益归因状态 ---
     if in_trade:
         seg_entry_main = prev_last_mark_main if prev_last_mark_main > 0 else entry_main
         seg_entry_sub = prev_last_mark_sub if prev_last_mark_sub > 0 else entry_sub
@@ -652,7 +684,6 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
         entry_time = exec_time_val
         in_trade = True
 
-        # 入场扣一次费
         cum_realized -= fee
 
         seg_entry_main = exec_m
@@ -671,14 +702,10 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
         nonlocal seg_entry_main, seg_entry_sub, seg_open_time, seg_entry_fee, seg_inherited
         nonlocal actual_open_time, seg_entry_z, seg_entry_spread_meta, seg_entry_alpha_meta
 
-        # live真实持仓：到这次平仓点只扣出场费
         realized_add = _calc_norm(entry_main, entry_sub, exec_m, exec_s,
                                   entry_beta_val, entry_dir) - fee
         cum_realized += realized_add
 
-        # 本段归因收益：
-        # - 新开仓：gross - entry_fee - exit_fee
-        # - 继承仓位：boundary->close - exit_fee
         seg_net = (_calc_norm(seg_entry_main, seg_entry_sub, exec_m, exec_s,
                               entry_beta_val, entry_dir)
                    - fee - seg_entry_fee)
@@ -726,7 +753,6 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
             'close_reason': close_reason,
         })
 
-        # reset
         in_trade = False
         entry_main, entry_sub, entry_dir = 0.0, 0.0, 0
         entry_beta_val = 0.0
@@ -744,6 +770,70 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
         seg_entry_z = np.nan
         seg_entry_spread_meta = np.nan
         seg_entry_alpha_meta = np.nan
+
+    def _rebuild_future_signals_after_intrabar_stop(stop_bar_idx):
+        if stop_bar_idx < 0 or stop_bar_idx >= n:
+            return
+
+        # 当前 bar 实际上已经在盘中被止损，后续 prev_sig 必须看到 flat 状态
+        signals[stop_bar_idx] = 0
+        signal_es[stop_bar_idx] = 0.0
+        signal_estd[stop_bar_idx] = 0.0
+        stop_flags_col[stop_bar_idx] = 0
+
+        if not can_rebuild_signal_path:
+            return
+
+        suffix = stop_bar_idx + 1
+        if suffix >= n:
+            return
+
+        (new_raw_sig, new_fb, new_fa,
+         new_es, new_estd,
+         new_stop_raw,
+         _, _, _, _, _, _, _) = fast_generate_signals(
+            z_clean[suffix:], spreads_arr[suffix:], betas_arr[suffix:], alphas_arr[suffix:],
+            log_main_arr[suffix:], log_sub_arr[suffix:], rs_clean[suffix:],
+            0, sig_z_entry, sig_z_exit,
+            sig_min_hold_bars, sig_cooldown_bars, sig_max_hold_bars,
+            SL_MULT, sig_fee_assumption,
+            BETA_MIN, BETA_MAX,
+            init_pos=0, init_held=0, init_since_close=0,
+            init_frozen_beta=0.0, init_frozen_alpha=0.0,
+            init_entry_spread=0.0, init_entry_std=0.0
+        )
+
+        signals[suffix:] = 0
+        signal_fb[suffix:] = betas_arr[suffix:]
+        signal_fa[suffix:] = alphas_arr[suffix:]
+        signal_es[suffix:] = 0.0
+        signal_estd[suffix:] = 0.0
+        signal_entry_z[suffix:] = np.nan
+        stop_flags_col[suffix:] = 0
+
+        if USE_NEXT_BAR_EXEC:
+            # suffix 这个执行 bar 对应“stop_bar_idx 的 raw signal”，而 stop_bar_idx 已被盘中止损改写为 flat
+            signal_fb[suffix] = betas_arr[stop_bar_idx]
+            signal_fa[suffix] = alphas_arr[stop_bar_idx]
+            signal_entry_z[suffix] = z_scores[stop_bar_idx] if stop_bar_idx < n else np.nan
+
+            assign_start = suffix + 1
+            if assign_start < n and len(new_raw_sig) > 0:
+                signals[assign_start:] = new_raw_sig[:-1]
+                signal_fb[assign_start:] = new_fb[:-1]
+                signal_fa[assign_start:] = new_fa[:-1]
+                signal_es[assign_start:] = new_es[:-1]
+                signal_estd[assign_start:] = new_estd[:-1]
+                signal_entry_z[assign_start:] = z_scores[suffix:-1]
+                stop_flags_col[assign_start:] = new_stop_raw[:-1].astype(int)
+        else:
+            signals[suffix:] = new_raw_sig
+            signal_fb[suffix:] = new_fb
+            signal_fa[suffix:] = new_fa
+            signal_es[suffix:] = new_es
+            signal_estd[suffix:] = new_estd
+            signal_entry_z[suffix:] = z_scores[suffix:]
+            stop_flags_col[suffix:] = new_stop_raw.astype(int)
 
     def _check_stop_and_maybe_close(cur_time, cur_m, cur_s, cur_lm, cur_ls, bar_idx):
         if (not in_trade) or entry_dir == 0:
@@ -763,6 +853,7 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
 
         if stopped:
             _close_position(cur_time, cur_m, cur_s, bar_idx, close_reason='hard_stop_1m')
+            _rebuild_future_signals_after_intrabar_stop(bar_idx)
             return True
         return False
 
@@ -772,9 +863,6 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
         return (times[bar_idx], close_main[bar_idx], close_sub[bar_idx],
                 np.log(close_main[bar_idx]), np.log(close_sub[bar_idx]))
 
-    # =========================================================================
-    # A. 严格1min路径
-    # =========================================================================
     if use_1m_path:
         for i in range(n):
             sig = int(signals[i])
@@ -786,7 +874,6 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
             l = np.searchsorted(min1_times, start_ns, side='left')
             r = np.searchsorted(min1_times, end_ns, side='left')
 
-            # 极少数缺口情况 fallback 到bar级
             if r <= l:
                 exec_time_val, exec_m, exec_s, _, _ = _get_exec_point(i)
 
@@ -794,12 +881,10 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
                     if sig != 0 and prev_sig == 0 and not in_trade:
                         _open_position(sig, exec_time_val, exec_m, exec_s, i)
                     elif in_trade and sig == 0 and prev_sig != 0:
-                        # [FIX-5] 根据stop_flag区分平仓原因
                         _cr = 'hard_stop' if stop_flags_col[i] == 1 else 'signal'
                         _close_position(exec_time_val, exec_m, exec_s, i, close_reason=_cr)
                 else:
                     if in_trade and sig == 0 and prev_sig != 0:
-                        # [FIX-5] 根据stop_flag区分平仓原因
                         _cr = 'hard_stop' if stop_flags_col[i] == 1 else 'signal'
                         _close_position(exec_time_val, exec_m, exec_s, i, close_reason=_cr)
                     elif sig != 0 and prev_sig == 0 and not in_trade:
@@ -816,9 +901,6 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
                 last_mark_sub = close_sub[i]
                 continue
 
-            # -------------------------
-            # 执行在bar开始（下一根1min close）
-            # -------------------------
             if use_1m_exec:
                 start_t = min1_times[l]
                 start_m = min1_cm[l]
@@ -827,7 +909,6 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
                 if sig != 0 and prev_sig == 0 and not in_trade:
                     _open_position(sig, start_t, start_m, start_s, i)
                 elif in_trade and sig == 0 and prev_sig != 0:
-                    # [FIX-5] 根据stop_flag区分平仓原因
                     _cr = 'hard_stop' if stop_flags_col[i] == 1 else 'signal'
                     _close_position(start_t, start_m, start_s, i, close_reason=_cr)
                     _append_equity_point(start_t, cum_realized * 100.0)
@@ -851,9 +932,6 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
                                                     entry_beta_val, entry_dir)
                             _append_equity_point(cur_t, (cum_realized + unrealized) * 100.0)
 
-            # -------------------------
-            # 执行在bar结束（下一根重采样bar close）
-            # -------------------------
             else:
                 event_idx = r - 1
                 stopped = False
@@ -883,7 +961,6 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
                     cur_ls = min1_ls[event_idx]
 
                     if in_trade and sig == 0 and prev_sig != 0:
-                        # [FIX-5] 根据stop_flag区分平仓原因
                         _cr = 'hard_stop' if stop_flags_col[i] == 1 else 'signal'
                         _close_position(cur_t, cur_m, cur_s, i, close_reason=_cr)
                         _append_equity_point(cur_t, cum_realized * 100.0)
@@ -901,13 +978,9 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
             last_mark_main = min1_cm[r - 1]
             last_mark_sub = min1_cs[r - 1]
 
-        # 若整段完全没点（例如全程空仓），补一个期末平坦点
         if len(equity_values) == 0:
             _append_equity_point(segment_end_time, cum_realized * 100.0)
 
-    # =========================================================================
-    # B. 非1min路径：保留bar级
-    # =========================================================================
     else:
         for i in range(n):
             sig = int(signals[i])
@@ -918,7 +991,6 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
             if sig != 0 and prev_sig == 0 and not in_trade:
                 _open_position(sig, exec_time_val, exec_m, exec_s, i)
             elif in_trade and sig == 0 and prev_sig != 0:
-                # [FIX-5] 根据stop_flag区分平仓原因（Path B核心修正）
                 _cr = 'hard_stop' if stop_flags_col[i] == 1 else 'signal'
                 _close_position(exec_time_val, exec_m, exec_s, i, close_reason=_cr)
 
@@ -1827,8 +1899,8 @@ if __name__ == '__main__':
             print("=" * 70)
             parameter_sensitivity_scan(df_file, timeframe=tf)
 
-    # 如果扫描确认有盈利参数，取消下面的注释跑Walk-Forward
-    final_df_file = 'kline_data/DOGE_ETH_1m.csv'
-    walk_forward_optimization(final_df_file, timeframe='30min',
-                              train_months=6, test_months=1,
-                              cooldown_hours=1.0, max_hold_days=4.0)
+    # # 如果扫描确认有盈利参数，取消下面的注释跑Walk-Forward
+    # final_df_file = 'kline_data/DOGE_ETH_1m.csv'
+    # walk_forward_optimization(final_df_file, timeframe='30min',
+    #                           train_months=6, test_months=1,
+    #                           cooldown_hours=1.0, max_hold_days=4.0)
