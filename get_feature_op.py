@@ -10,6 +10,7 @@ import time
 import okx.MarketData as Market
 from common_utils import get_config
 import json
+
 # 设置代理（如果需要）
 os.environ['HTTP_PROXY'] = 'http://127.0.0.1:7890'
 os.environ['HTTPS_PROXY'] = 'http://127.0.0.1:7890'
@@ -21,6 +22,7 @@ secretkey = get_config('secret_key')
 passphrase = get_config('passphrase')
 marketAPI = Market.MarketAPI(apikey, secretkey, passphrase, False, flag)
 output_path = "kline_data"
+
 
 def get_kline_data(inst_id, bar="1m", limit=100, max_candles=1000):
     """
@@ -88,8 +90,9 @@ def get_kline_data(inst_id, bar="1m", limit=100, max_candles=1000):
 
     # 将所有数据转换为DataFrame，即使all_data为空也能处理
     if all_data:
-        df = pd.DataFrame(all_data, columns=["timestamp", "open", "high", "low", "close", "volume", "volCcy", "volCcyQuote",
-                                             "confirm"])
+        df = pd.DataFrame(all_data,
+                          columns=["timestamp", "open", "high", "low", "close", "volume", "volCcy", "volCcyQuote",
+                                   "confirm"])
 
         # 数据类型转换
         # 将时间戳转换为 datetime 对象，并将其设置为 UTC
@@ -106,7 +109,8 @@ def get_kline_data(inst_id, bar="1m", limit=100, max_candles=1000):
         return df
     else:
         print("未能获取到任何K线数据。")
-        return pd.DataFrame() # 返回一个空的 DataFrame
+        return pd.DataFrame()  # 返回一个空的 DataFrame
+
 
 def get_kline_data_newest(inst_id, bar="1m", limit=100, max_candles=1000):
     """
@@ -164,8 +168,9 @@ def get_kline_data_newest(inst_id, bar="1m", limit=100, max_candles=1000):
 
     # 将所有数据转换为DataFrame，即使all_data为空也能处理
     if all_data:
-        df = pd.DataFrame(all_data, columns=["timestamp", "open", "high", "low", "close", "volume", "volCcy", "volCcyQuote",
-                                             "confirm"])
+        df = pd.DataFrame(all_data,
+                          columns=["timestamp", "open", "high", "low", "close", "volume", "volCcy", "volCcyQuote",
+                                   "confirm"])
 
         # 数据类型转换
         # 将时间戳转换为 datetime 对象，并将其设置为 UTC
@@ -182,7 +187,8 @@ def get_kline_data_newest(inst_id, bar="1m", limit=100, max_candles=1000):
         return df
     else:
         print("未能获取到任何K线数据。")
-        return pd.DataFrame() # 返回一个空的 DataFrame
+        return pd.DataFrame()  # 返回一个空的 DataFrame
+
 
 def calculate_ma(data, period):
     """计算移动平均线 (MA)"""
@@ -372,14 +378,14 @@ def feature_engineering(df):
     df_features["RSI_lt_30_10"] = (df_features["RSI_10"] < 30).astype(int)
     df_features["MACD_diff_5"] = df_features["MACD_5"] - df_features["MACDSignal_5"]
     df_features["MACD_cross_up_5"] = (
-                (df_features["MACD_diff_5"] > 0) & (df_features["MACD_diff_5"].shift(1) < 0)).astype(int)
+            (df_features["MACD_diff_5"] > 0) & (df_features["MACD_diff_5"].shift(1) < 0)).astype(int)
     df_features["MACD_cross_down_5"] = (
-                (df_features["MACD_diff_5"] < 0) & (df_features["MACD_diff_5"].shift(1) > 0)).astype(int)
+            (df_features["MACD_diff_5"] < 0) & (df_features["MACD_diff_5"].shift(1) > 0)).astype(int)
     df_features["MACD_diff_10"] = df_features["MACD_10"] - df_features["MACDSignal_10"]
     df_features["MACD_cross_up_10"] = (
-                (df_features["MACD_diff_10"] > 0) & (df_features["MACD_diff_10"].shift(1) < 0)).astype(int)
+            (df_features["MACD_diff_10"] > 0) & (df_features["MACD_diff_10"].shift(1) < 0)).astype(int)
     df_features["MACD_cross_down_10"] = (
-                (df_features["MACD_diff_10"] < 0) & (df_features["MACD_diff_10"].shift(1) > 0)).astype(int)
+            (df_features["MACD_diff_10"] < 0) & (df_features["MACD_diff_10"].shift(1) > 0)).astype(int)
     df_features['vol_price_corr_5'] = df['volume'].rolling(5).corr(df['close'])
     df_features['vol_price_corr_10'] = df['volume'].rolling(10).corr(df['close'])
     df_features['high_low_diff'] = df['high'] - df['low']
@@ -399,13 +405,13 @@ def feature_engineering(df):
     df_features["K_5_D_5_diff"] = df_features["K_5"] - df_features["D_5"]
     df_features["K_10_D_10_diff"] = df_features["K_10"] - df_features["D_10"]
     df_features["K_5_cross_up_D_5"] = (
-                (df_features["K_5_D_5_diff"] > 0) & (df_features["K_5_D_5_diff"].shift(1) < 0)).astype(int)
+            (df_features["K_5_D_5_diff"] > 0) & (df_features["K_5_D_5_diff"].shift(1) < 0)).astype(int)
     df_features["K_5_cross_down_D_5"] = (
-                (df_features["K_5_D_5_diff"] < 0) & (df_features["K_5_D_5_diff"].shift(1) > 0)).astype(int)
+            (df_features["K_5_D_5_diff"] < 0) & (df_features["K_5_D_5_diff"].shift(1) > 0)).astype(int)
     df_features["K_10_cross_up_D_10"] = (
-                (df_features["K_10_D_10_diff"] > 0) & (df_features["K_10_D_10_diff"].shift(1) < 0)).astype(int)
+            (df_features["K_10_D_10_diff"] > 0) & (df_features["K_10_D_10_diff"].shift(1) < 0)).astype(int)
     df_features["K_10_cross_down_D_10"] = (
-                (df_features["K_10_D_10_diff"] < 0) & (df_features["K_10_D_10_diff"].shift(1) > 0)).astype(int)
+            (df_features["K_10_D_10_diff"] < 0) & (df_features["K_10_D_10_diff"].shift(1) > 0)).astype(int)
 
     # 合并原始数据和生成的特征数据
     df_combined = pd.concat([df, df_features], axis=1)
@@ -430,12 +436,16 @@ def get_dist(data_path):
     output_path = f'{data_path[:-4]}_distribution.csv'
     if os.path.exists(output_path):
         data_df = pd.read_csv(output_path)
-        data_df['score*'] = 10*(data_df['ratio'] - 0.05)*10*(data_df['ratio'] - 0.05) / (data_df['period']) * data_df['1'] * data_df['1']
+        data_df['score*'] = 10 * (data_df['ratio'] - 0.05) * 10 * (data_df['ratio'] - 0.05) / (data_df['period']) * \
+                            data_df['1'] * data_df['1']
         # 将data_df['score']归一化
-        data_df['score*'] = (data_df['score*'] - data_df['score*'].min()) / (data_df['score*'].max() - data_df['score*'].min())
-        data_df['score'] = 10*(data_df['ratio'] - 0.05)*10*(data_df['ratio'] - 0.05) / (data_df['period']) * data_df['1'] * data_df['1']
+        data_df['score*'] = (data_df['score*'] - data_df['score*'].min()) / (
+                    data_df['score*'].max() - data_df['score*'].min())
+        data_df['score'] = 10 * (data_df['ratio'] - 0.05) * 10 * (data_df['ratio'] - 0.05) / (data_df['period']) * \
+                           data_df['1'] * data_df['1']
         # 将data_df['score']归一化
-        data_df['score'] = (data_df['score'] - data_df['score'].min()) / (data_df['score'].max() - data_df['score'].min())
+        data_df['score'] = (data_df['score'] - data_df['score'].min()) / (
+                    data_df['score'].max() - data_df['score'].min())
 
         return data_df
 
@@ -482,7 +492,8 @@ def gen_feature(origin_name):
     # df.tail(100000).to_csv(f'{origin_name[:-4]}_features_tail.csv', index=False)
     return df
 
-def add_target_variables_op(df, step_list=[10,100,1000,10000,10000]):
+
+def add_target_variables_op(df, step_list=[10, 100, 1000, 10000, 10000]):
     """
     添加目标变量，包括未来多个时间步的涨幅和跌幅，针对close、high、low的多阈值计算。
 
@@ -494,7 +505,6 @@ def add_target_variables_op(df, step_list=[10,100,1000,10000,10000]):
     # 创建一个新的字典，用于存储所有新增列
     new_columns = {}
 
-
     for col in ["close"]:
         for step in step_list:  # 未来 1 到 max_decoder_length 分钟
             # 获取未来 step 个时间窗口内的最高价和最低价
@@ -502,12 +512,13 @@ def add_target_variables_op(df, step_list=[10,100,1000,10000,10000]):
             future_min_low = df['low'].rolling(window=step, min_periods=1).min().shift(-step)
 
             # 计算未来 step 个时间窗口内的最大涨幅和跌幅 (修正部分)
-            new_columns[f"{col}_max_up_t{step}"] = (future_max_high - df[col]) / df[col] * 100 #最大涨幅用最高价
-            new_columns[f"{col}_max_down_t{step}"] = (df[col] - future_min_low) / df[col] * 100 #最大跌幅用最低价
+            new_columns[f"{col}_max_up_t{step}"] = (future_max_high - df[col]) / df[col] * 100  # 最大涨幅用最高价
+            new_columns[f"{col}_max_down_t{step}"] = (df[col] - future_min_low) / df[col] * 100  # 最大跌幅用最低价
     # 使用 pd.concat 一次性将所有新列添加到原数据框
     df = pd.concat([df, pd.DataFrame(new_columns, index=df.index)], axis=1)
 
     return df
+
 
 def get_train_data(inst_id="BTC-USDT-SWAP", bar="1m", limit=100, max_candles=1000, is_newest=False):
     # inst_id = "BTC-USDT-SWAP"
@@ -537,10 +548,12 @@ def get_train_data(inst_id="BTC-USDT-SWAP", bar="1m", limit=100, max_candles=100
         print("未能获取到任何K线数据。")
         return pd.DataFrame()
 
+
 def get_latest_data(max_candles=1000):
     origin_data = get_train_data(max_candles=max_candles)
     feature_df = gen_feature(origin_data)
     return feature_df
+
 
 def generate_body_wick_signals(df):
     """
@@ -559,19 +572,21 @@ def generate_body_wick_signals(df):
         for wick_ratio in wick_ratios:
             # 看涨信号
             buy_condition = (
-                (body > candle_range * body_ratio) &
-                (upper_wick < body * wick_ratio) &
-                (lower_wick > body * wick_ratio)
+                    (body > candle_range * body_ratio) &
+                    (upper_wick < body * wick_ratio) &
+                    (lower_wick > body * wick_ratio)
             )
-            df_signals[f'Bullish_BodyWick_B{int(body_ratio*100)}_W{int(wick_ratio*100)}_Buy'] = np.where(buy_condition, 1, 0)
+            df_signals[f'Bullish_BodyWick_B{int(body_ratio * 100)}_W{int(wick_ratio * 100)}_Buy'] = np.where(
+                buy_condition, 1, 0)
 
             # 看跌信号
             sell_condition = (
-                (body > candle_range * body_ratio) &
-                (lower_wick < body * wick_ratio) &
-                (upper_wick > body * wick_ratio)
+                    (body > candle_range * body_ratio) &
+                    (lower_wick < body * wick_ratio) &
+                    (upper_wick > body * wick_ratio)
             )
-            df_signals[f'Bearish_BodyWick_B{int(body_ratio*100)}_W{int(wick_ratio*100)}_Sell'] = np.where(sell_condition, 1, 0)
+            df_signals[f'Bearish_BodyWick_B{int(body_ratio * 100)}_W{int(wick_ratio * 100)}_Sell'] = np.where(
+                sell_condition, 1, 0)
 
     return pd.concat([df, df_signals], axis=1)
 
@@ -584,7 +599,8 @@ def generate_volume_spike_signals(df):
     start_time = time.time()
     signal_cols = []  # 用于存储生成的信号列
 
-    n_periods_list = [20, 30, 40, 50, 60, 70, 80, 90, 100, 120, 150, 200, 250, 300, 400, 500, 600, 700, 800, 900, 1000,1100,1200,1300,1400,1500,1600,1700,1800,1900,2000]
+    n_periods_list = [20, 30, 40, 50, 60, 70, 80, 90, 100, 120, 150, 200, 250, 300, 400, 500, 600, 700, 800, 900, 1000,
+                      1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000]
     volume_multipliers = [1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 6, 7, 8, 10]
 
     for n_periods in n_periods_list:
@@ -595,14 +611,17 @@ def generate_volume_spike_signals(df):
             sell_condition = (df['volume'] > average_volume * multiplier) & (df['close'] < df['open'])
 
             # 使用向量化赋值创建信号列，并添加到列表中
-            signal_cols.append(pd.Series(np.where(buy_condition, 1, 0), index=df.index, name=f'Volume_Spike_Up_{n_periods}_M{int(multiplier*10)}_Buy'))
-            signal_cols.append(pd.Series(np.where(sell_condition, 1, 0), index=df.index, name=f'Volume_Spike_Down_{n_periods}_M{int(multiplier*10)}_Sell'))
+            signal_cols.append(pd.Series(np.where(buy_condition, 1, 0), index=df.index,
+                                         name=f'Volume_Spike_Up_{n_periods}_M{int(multiplier * 10)}_Buy'))
+            signal_cols.append(pd.Series(np.where(sell_condition, 1, 0), index=df.index,
+                                         name=f'Volume_Spike_Down_{n_periods}_M{int(multiplier * 10)}_Sell'))
 
     # 一次性连接所有信号列
     df_signals = pd.concat(signal_cols, axis=1)
 
     print(f"Volume spike signals generated in {time.time() - start_time:.2f} seconds.")
     return pd.concat([df, df_signals], axis=1)
+
 
 def generate_signals(df):
     """
@@ -699,6 +718,7 @@ def generate_volume_signals(df, short_window=5, long_window=20):
 
     return df
 
+
 def generate_price_signals(df):
     """
     生成多种价格突破相关的价格信号，买入信号包含_Buy，卖出信号包含_Sell。
@@ -709,7 +729,7 @@ def generate_price_signals(df):
     Returns:
         Pandas DataFrame，包含原始数据和生成的信号列。
     """
-    df_signals = df.copy() # 创建副本，避免修改原始df
+    df_signals = df.copy()  # 创建副本，避免修改原始df
 
     # 1. 简单价格突破
     df_signals['Price_Breakout_Buy'] = np.where(df_signals['close'] > df_signals['high'].shift(1), 1, 0)
@@ -717,18 +737,23 @@ def generate_price_signals(df):
 
     # 2. 更高周期的价格突破 (例如，突破前N天的最高价/最低价)
     n_days = 5  # 可以根据需要调整周期
-    df_signals[f'High_Breakout_{n_days}D_Buy'] = np.where(df_signals['close'] > df_signals['high'].rolling(window=n_days).max().shift(1), 1, 0)
-    df_signals[f'Low_Breakout_{n_days}D_Sell'] = np.where(df_signals['close'] < df_signals['low'].rolling(window=n_days).min().shift(1), 1, 0)
+    df_signals[f'High_Breakout_{n_days}D_Buy'] = np.where(
+        df_signals['close'] > df_signals['high'].rolling(window=n_days).max().shift(1), 1, 0)
+    df_signals[f'Low_Breakout_{n_days}D_Sell'] = np.where(
+        df_signals['close'] < df_signals['low'].rolling(window=n_days).min().shift(1), 1, 0)
 
     # 3. 开盘价突破
     df_signals['Open_Breakout_High_Buy'] = np.where(df_signals['close'] > df_signals['open'].shift(1), 1, 0)
     df_signals['Open_Breakout_Low_Sell'] = np.where(df_signals['close'] < df_signals['open'].shift(1), 1, 0)
 
     # 4. 组合突破 (例如，同时突破前一天的最高价和开盘价)
-    df_signals['Combined_HighOpen_Breakout_Buy'] = np.where((df_signals['close'] > df_signals['high'].shift(1)) & (df_signals['close'] > df_signals['open'].shift(1)), 1, 0)
-    df_signals['Combined_LowOpen_Breakout_Sell'] = np.where((df_signals['close'] < df_signals['low'].shift(1)) & (df_signals['close'] < df_signals['open'].shift(1)), 1, 0)
+    df_signals['Combined_HighOpen_Breakout_Buy'] = np.where(
+        (df_signals['close'] > df_signals['high'].shift(1)) & (df_signals['close'] > df_signals['open'].shift(1)), 1, 0)
+    df_signals['Combined_LowOpen_Breakout_Sell'] = np.where(
+        (df_signals['close'] < df_signals['low'].shift(1)) & (df_signals['close'] < df_signals['open'].shift(1)), 1, 0)
 
     return df_signals
+
 
 def generate_moving_average_signals(df):
     """
@@ -760,9 +785,11 @@ def generate_moving_average_signals(df):
             golden_cross_buy_signal = f'MA_Golden_Cross_{short_window}_{long_window}_Buy'
             death_cross_sell_signal = f'MA_Death_Cross_{short_window}_{long_window}_Sell'
             df[golden_cross_buy_signal] = np.where(
-                (df[sma_short_col] > df[sma_long_col]) & (df[sma_short_col].shift(1) <= df[sma_long_col].shift(1)), 1, 0)
+                (df[sma_short_col] > df[sma_long_col]) & (df[sma_short_col].shift(1) <= df[sma_long_col].shift(1)), 1,
+                0)
             df[death_cross_sell_signal] = np.where(
-                (df[sma_short_col] < df[sma_long_col]) & (df[sma_short_col].shift(1) >= df[sma_long_col].shift(1)), 1, 0)
+                (df[sma_short_col] < df[sma_long_col]) & (df[sma_short_col].shift(1) >= df[sma_long_col].shift(1)), 1,
+                0)
 
             # 生成价格突破均线信号
             price_above_buy_signal = f'Price_Above_SMA_{short_window}_Buy'
@@ -776,6 +803,8 @@ def generate_moving_average_signals(df):
             df.drop(columns=[sma_short_col, sma_long_col], inplace=True)
 
     return df
+
+
 def generate_rsi_signals(df):
     rsi_period = 14
     delta = df['close'].diff()
@@ -821,8 +850,9 @@ def generate_rsi_signals(df):
     for col, signal in signals.items():
         df[col] = signal
 
-    df.drop(columns=['rsi'], inplace=True) # 删除中间计算的 'rsi' 列
+    df.drop(columns=['rsi'], inplace=True)  # 删除中间计算的 'rsi' 列
     return df
+
 
 def generate_macd_signals(df):
     # MACD 参数
@@ -886,6 +916,7 @@ def generate_macd_signals(df):
 
     return df
 
+
 def generate_bollinger_band_signals(df):
     # 布林带参数
     bollinger_window = 20
@@ -935,6 +966,7 @@ def generate_bollinger_band_signals(df):
 
     return df_with_signals
 
+
 def generate_ema_cross_signals(df):
     """
     生成基于 EMA 交叉和价格与 EMA 关系的交易信号。
@@ -980,6 +1012,7 @@ def generate_ema_cross_signals(df):
     df = df.assign(**signals)
     return df
 
+
 def generate_stochastic_signals(df):
     """
     生成基于随机指标的更多买卖信号。
@@ -994,7 +1027,7 @@ def generate_stochastic_signals(df):
     low_min = df['low'].rolling(window=stoch_window, min_periods=1).min()
     high_max = df['high'].rolling(window=stoch_window, min_periods=1).max()
     high_low_range = high_max - low_min
-    high_low_range = high_low_range.replace(0, np.nan) # 避免除以零
+    high_low_range = high_low_range.replace(0, np.nan)  # 避免除以零
 
     percent_k = ((df['close'] - low_min) / high_low_range) * 100
     percent_d = percent_k.rolling(window=3, min_periods=1).mean()
@@ -1033,7 +1066,8 @@ def generate_stochastic_signals(df):
     # 8. 超买区卖出信号 (进入超买区后，%K 下穿某个阈值，例如 90)
     overbought_threshold = 90
     signals['Stochastic_Sell_Overbought'] = np.where(
-        (percent_k < overbought_threshold) & (percent_k.shift(1) >= overbought_threshold) & (percent_k > percent_d), 1, 0)
+        (percent_k < overbought_threshold) & (percent_k.shift(1) >= overbought_threshold) & (percent_k > percent_d), 1,
+        0)
 
     df = df.assign(**signals)
     return df
@@ -1057,10 +1091,13 @@ def generate_ichimoku_signals(df):
     df['chikou_span'] = df['close'].shift(-26)
 
     # 生成买卖信号
-    df['Ichimoku_Buy'] = np.where((df['tenkan_sen'] > df['kijun_sen']) & (df['tenkan_sen'].shift(1) <= df['kijun_sen'].shift(1)), 1, 0)
-    df['Ichimoku_Sell'] = np.where((df['tenkan_sen'] < df['kijun_sen']) & (df['tenkan_sen'].shift(1) >= df['kijun_sen'].shift(1)), 1, 0)
+    df['Ichimoku_Buy'] = np.where(
+        (df['tenkan_sen'] > df['kijun_sen']) & (df['tenkan_sen'].shift(1) <= df['kijun_sen'].shift(1)), 1, 0)
+    df['Ichimoku_Sell'] = np.where(
+        (df['tenkan_sen'] < df['kijun_sen']) & (df['tenkan_sen'].shift(1) >= df['kijun_sen'].shift(1)), 1, 0)
 
     return df
+
 
 def generate_consecutive_and_large_candle_signals(df):
     """
@@ -1087,15 +1124,16 @@ def generate_consecutive_and_large_candle_signals(df):
     percentage_thresholds = [0.01, 0.02, 0.04]  # 1%, 2%, 4%
     df['Pct_Change'] = df['close'].pct_change()
     for threshold in percentage_thresholds:
-        df[f'Big_Up_{int(threshold*100)}_Buy'] = np.where(df['Pct_Change'] > threshold, 1, 0)
-        df[f'Big_Down_{int(threshold*100)}_Sell'] = np.where(df['Pct_Change'] < -threshold, 1, 0)
+        df[f'Big_Up_{int(threshold * 100)}_Buy'] = np.where(df['Pct_Change'] > threshold, 1, 0)
+        df[f'Big_Down_{int(threshold * 100)}_Sell'] = np.where(df['Pct_Change'] < -threshold, 1, 0)
 
     # 删除中间计算列，保持输出的整洁
     df = df.drop(columns=['Price_Change', 'Pct_Change'], errors='ignore')
 
     return df
 
-def generate_price_extremes_reverse_signals(df,periods=[20]):
+
+def generate_price_extremes_reverse_signals(df, periods=[20]):
     """
     生成价格极值反转信号：
     如果上一个时间点创造了最高或最低价，并且当前价格反转，则生成信号。
@@ -1129,6 +1167,7 @@ def generate_price_extremes_reverse_signals(df,periods=[20]):
     # 将信号列添加到原始 DataFrame 中
     df = df.assign(**signals)
     return df
+
 
 def generate_signals_single_ma(df, periods=[10, 20, 30, 50, 100, 200]):
     """
@@ -1194,6 +1233,7 @@ def generate_signals_double_ma(df, short_periods=[10, 20, 30], long_periods=[50,
     df = df.assign(**signals)
     return df
 
+
 def generate_price_extremes_signals(df, param_info={"periods": [20]}):
     """
     根据指定周期内的最高价和最低价生成买入和卖出信号。
@@ -1218,6 +1258,7 @@ def generate_price_extremes_signals(df, param_info={"periods": [20]}):
 
     df = df.assign(**signals)
     return df
+
 
 def generate_trend_signals1(df, param_info={"period": 1}):
     """
@@ -1281,6 +1322,7 @@ def generate_trend_signals(df, param_info={"period": 1}):
 
     return df
 
+
 def generate_price_unextremes_signals(df, param_info={"periods": [20]}):
     """
     根据指定周期内的最高价和最低价生成买入和卖出信号。
@@ -1304,6 +1346,7 @@ def generate_price_unextremes_signals(df, param_info={"periods": [20]}):
 
     df = df.assign(**signals)
     return df
+
 
 def generate_cci_signals(df, cci_periods=[20], buy_threshold=-100, sell_threshold=100):
     """
@@ -1417,8 +1460,10 @@ def generate_obv_signals(df):
     # 1. OBV 简单移动平均 (SMA) 信号
     obv_sma_short = obv.rolling(window=5).mean()
     obv_sma_long = obv.rolling(window=20).mean()
-    df['OBV_SMA_Buy'] = np.where((obv_sma_short > obv_sma_long) & (obv_sma_short.shift(1) <= obv_sma_long.shift(1)), 1, 0)
-    df['OBV_SMA_Sell'] = np.where((obv_sma_short < obv_sma_long) & (obv_sma_short.shift(1) >= obv_sma_long.shift(1)), 1, 0)
+    df['OBV_SMA_Buy'] = np.where((obv_sma_short > obv_sma_long) & (obv_sma_short.shift(1) <= obv_sma_long.shift(1)), 1,
+                                 0)
+    df['OBV_SMA_Sell'] = np.where((obv_sma_short < obv_sma_long) & (obv_sma_short.shift(1) >= obv_sma_long.shift(1)), 1,
+                                  0)
 
     # 2. OBV 指数移动平均 (EMA) 信号 (原代码中的信号)
     obv_ema = obv.ewm(span=20, adjust=False).mean()
@@ -1432,14 +1477,13 @@ def generate_obv_signals(df):
 
     # 4. OBV 与价格背离信号
     price_sma = df['close'].rolling(window=20).mean()
-    df['OBV_Divergence_Buy'] = np.where((df['close'] < price_sma) & (obv > obv_ema), 1, 0) # 价格下跌，OBV上升
-    df['OBV_Divergence_Sell'] = np.where((df['close'] > price_sma) & (obv < obv_ema), 1, 0) # 价格上涨，OBV下跌
+    df['OBV_Divergence_Buy'] = np.where((df['close'] < price_sma) & (obv > obv_ema), 1, 0)  # 价格下跌，OBV上升
+    df['OBV_Divergence_Sell'] = np.where((df['close'] > price_sma) & (obv < obv_ema), 1, 0)  # 价格上涨，OBV下跌
 
     # 删除临时字段
     df.drop(columns=['obv'], inplace=True)
 
     return df
-
 
 
 def generate_williams_r_signals(df, wr_period=14, overbought_threshold=-20, oversold_threshold=-80,
@@ -1473,7 +1517,7 @@ def generate_williams_r_signals(df, wr_period=14, overbought_threshold=-20, over
         uptrend = df['close'] > trend_ma
         downtrend = df['close'] < trend_ma
     else:
-        uptrend = downtrend = pd.Series([True]*len(df), index=df.index)
+        uptrend = downtrend = pd.Series([True] * len(df), index=df.index)
 
     # 初始化信号字典
     signals = {}
@@ -1548,6 +1592,7 @@ def generate_cmf_signals(df, cmf_periods=[20, 40], cmf_thresholds=[0, 0.1, -0.1]
 
     return df
 
+
 def generate_mfi_signals(df):
     # 14. 资金流量指标 (MFI) 信号
     signals = {}
@@ -1589,6 +1634,8 @@ def generate_mfi_signals(df):
     # df = df.drop(columns=columns_to_drop, errors='ignore') # errors='ignore' 防止列不存在时报错
 
     return df
+
+
 def generate_roc_signals(df):
     # 15. 变动速率 (ROC) 信号
     signals = {}
@@ -1617,6 +1664,7 @@ def generate_roc_signals(df):
 
     return df
 
+
 def generate_donchian_channel_signals(df):
     # 16. 唐奇安通道 (Donchian Channels) 信号
     signals = {}
@@ -1636,14 +1684,17 @@ def generate_donchian_channel_signals(df):
         close_to_high = donchian_high.shift(1) - df['close']
         close_to_low = df['close'] - donchian_low.shift(1)
 
-        signals[f'Donchian_{period}_NearHigh_Buy'] = np.where((df['close'] < donchian_high.shift(1)) & (close_to_high < df['close'] * 0.01), 1, 0) # 接近上限一定比例时
-        signals[f'Donchian_{period}_NearLow_Sell'] = np.where((df['close'] > donchian_low.shift(1)) & (close_to_low < df['close'] * 0.01), 1, 0)  # 接近下限一定比例时
+        signals[f'Donchian_{period}_NearHigh_Buy'] = np.where(
+            (df['close'] < donchian_high.shift(1)) & (close_to_high < df['close'] * 0.01), 1, 0)  # 接近上限一定比例时
+        signals[f'Donchian_{period}_NearLow_Sell'] = np.where(
+            (df['close'] > donchian_low.shift(1)) & (close_to_low < df['close'] * 0.01), 1, 0)  # 接近下限一定比例时
 
     df = df.assign(**signals)
 
     # 清理过程生成的字段 (这里不需要额外清理，因为我们直接将信号添加到 signals 字典)
 
     return df
+
 
 def generate_keltner_channel_signals(df):
     # 17. 肯特纳通道 (Keltner Channels) 信号
@@ -1672,19 +1723,26 @@ def generate_keltner_channel_signals(df):
     signals['Keltner_Breakout_Sell'] = np.where(df['close'] < keltner_lower, 1, 0)
 
     # 新增信号：价格触及上轨后回落卖出
-    signals['Keltner_TouchUpper_Sell'] = np.where((df['close'].shift(1) > keltner_upper.shift(1)) & (df['close'] <= keltner_upper), 1, 0)
+    signals['Keltner_TouchUpper_Sell'] = np.where(
+        (df['close'].shift(1) > keltner_upper.shift(1)) & (df['close'] <= keltner_upper), 1, 0)
 
     # 新增信号：价格触及下轨后反弹买入
-    signals['Keltner_TouchLower_Buy'] = np.where((df['close'].shift(1) < keltner_lower.shift(1)) & (df['close'] >= keltner_lower), 1, 0)
+    signals['Keltner_TouchLower_Buy'] = np.where(
+        (df['close'].shift(1) < keltner_lower.shift(1)) & (df['close'] >= keltner_lower), 1, 0)
 
     # 新增信号：价格从上轨内跌破中轨卖出
-    signals['Keltner_BreakMidFromUpper_Sell'] = np.where((df['close'].shift(1) > keltner_ema.shift(1)) & (df['close'] <= keltner_ema) & (df['close'].shift(1) >= keltner_upper.shift(1)), 1, 0)
+    signals['Keltner_BreakMidFromUpper_Sell'] = np.where(
+        (df['close'].shift(1) > keltner_ema.shift(1)) & (df['close'] <= keltner_ema) & (
+                    df['close'].shift(1) >= keltner_upper.shift(1)), 1, 0)
 
     # 新增信号：价格从下轨内突破中轨买入
-    signals['Keltner_BreakMidFromLower_Buy'] = np.where((df['close'].shift(1) < keltner_ema.shift(1)) & (df['close'] >= keltner_ema) & (df['close'].shift(1) <= keltner_lower.shift(1)), 1, 0)
+    signals['Keltner_BreakMidFromLower_Buy'] = np.where(
+        (df['close'].shift(1) < keltner_ema.shift(1)) & (df['close'] >= keltner_ema) & (
+                    df['close'].shift(1) <= keltner_lower.shift(1)), 1, 0)
 
     df = df.assign(**signals)
     return df
+
 
 # 回测策略
 def backtest_strategy(signal_data_df):
@@ -1846,7 +1904,6 @@ def analyze_backtest_results():
             # # 获取 signal_performance 大于 0.8 且 diff_vs_baseline 大于 0.0 的数据
             signal_list = data[(data['signal_performance'] > 0.8) & (data['diff_vs_baseline'] > -0.0)]
 
-
             # # 分别获取target包含up和down的前10个
             # up_signal_list = data[(data['target'].str.contains('up'))].head(head_count)
             # down_signal_list = data[(data['target'].str.contains('down'))].head(head_count)
@@ -1871,6 +1928,7 @@ def analyze_backtest_results():
         json.dump(signal_to_target_map, f, indent=4)  # 使用 indent=4 进行美化输出
 
     return signal_to_target_map
+
 
 def run():
     """
@@ -1897,8 +1955,6 @@ def run():
     # 只保留signal_data最后的60行
     signal_data = signal_data[-1000:]
 
-
-
     # 获取每一行中值为1的列名
     active_signals = []
     for index, row in signal_data.iterrows():
@@ -1912,7 +1968,9 @@ def run():
     corresponding_targets = []
     for signals in signal_data['active_signals']:
 
-        if signals == ['Donchian_30_Breakout_Sell', 'Bollinger_Breakout_Sell', 'BB_Lower_Band_Touch_Buy', 'Donchian_20_Breakout_Sell', 'Keltner_Breakout_Sell', 'Donchian_10_Breakout_Sell', 'Stochastic_Buy', 'Price_Breakout_Sell', 'Volume_Sell']:
+        if signals == ['Donchian_30_Breakout_Sell', 'Bollinger_Breakout_Sell', 'BB_Lower_Band_Touch_Buy',
+                       'Donchian_20_Breakout_Sell', 'Keltner_Breakout_Sell', 'Donchian_10_Breakout_Sell',
+                       'Stochastic_Buy', 'Price_Breakout_Sell', 'Volume_Sell']:
             print('yes')
         targets = []
         targets_map = {}
@@ -1930,7 +1988,6 @@ def run():
 
     signal_data['corresponding_targets'] = corresponding_targets
 
-
     # 统计 Buy 和 Sell 信号的数量
     signal_data['buy_count'] = signal_data['corresponding_targets'].apply(lambda x: sum('up' in s for s in x))
     signal_data['sell_count'] = signal_data['corresponding_targets'].apply(lambda x: sum('down' in s for s in x))
@@ -1940,7 +1997,10 @@ def run():
     signal_data['sum'] = signal_data['buy_count'] + signal_data['sell_count']
     # 调整列的顺序
     cols = signal_data.columns.tolist()
-    cols = ['active_signals','corresponding_targets', 'buy_count', 'sell_count', 'diff', 'sum', 'close_max_up_t30', 'close_max_down_t30'] + [col for col in cols if col not in ['active_signals', 'corresponding_targets','buy_count', 'sell_count', 'diff', 'sum', 'close_max_down_t30', 'close_max_up_t30']]
+    cols = ['active_signals', 'corresponding_targets', 'buy_count', 'sell_count', 'diff', 'sum', 'close_max_up_t30',
+            'close_max_down_t30'] + [col for col in cols if
+                                     col not in ['active_signals', 'corresponding_targets', 'buy_count', 'sell_count',
+                                                 'diff', 'sum', 'close_max_down_t30', 'close_max_up_t30']]
     signal_data = signal_data[cols]
 
     # 在这里可以根据active_signals, buy_count, sell_count进一步处理，例如生成买入卖出信号
@@ -1962,15 +2022,21 @@ def download_data():
         , 'STRK-USDT-SWAP', 'ZK-USDT-SWAP'
         , 'RAY-USDT-SWAP', 'ORCA-USDT-SWAP'
 
+        , 'BTC-USDT-SWAP',
+                    'DOGE-USDT-SWAP',
+                    'ETH-USDT-SWAP',
+                    'SOL-USDT-SWAP',
+                    'TON-USDT-SWAP',
+                    'XRP-USDT-SWAP'
                     ]
     if not os.path.exists(backtest_path):
         os.makedirs(backtest_path)
     bar_list = ['1m']
-    #获取当前时间，精确到天
+    # 获取当前时间，精确到天
     now = datetime.datetime.now()
     # 转换为可读性格式
     readable_time = now.strftime("%Y-%m-%d")
-    max_candles_list = [10000000]
+    max_candles_list = [24 * 60 * 30 * 6]
 
     for max_candles in max_candles_list:
         for bar in bar_list:
@@ -1983,6 +2049,7 @@ def download_data():
                     print(f'不存在该文件，开始获取 {final_file_path}')
                     data = get_train_data(inst_id=inst_id, bar=bar, max_candles=max_candles)
                     data.to_csv(final_file_path, index=False)
+
 
 def example():
     download_data()
@@ -2070,7 +2137,7 @@ def backtest_strategy_op(signal_data_df):
         signal_ratio = round(signal_count / total_samples, 4) if total_samples > 0 else 0
         signal_ratios[signal] = signal_ratio
         for target_col in target_cols:
-            signal_avgs[(signal,target_col)] = signal_data_df.loc[signal_mask, target_col].mean()
+            signal_avgs[(signal, target_col)] = signal_data_df.loc[signal_mask, target_col].mean()
 
     # -----------------------------
     # 优化点 3：减少嵌套循环层次
@@ -2119,7 +2186,8 @@ def run_backtest():
     backtest_path = 'kline_data'
     if not os.path.exists(backtest_path):
         os.makedirs(backtest_path)
-    inst_id_list = ['BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'TON-USDT-SWAP', 'DOGE-USDT-SWAP', 'XRP-USDT-SWAP', 'PEPE-USDT-SWAP']
+    inst_id_list = ['BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'TON-USDT-SWAP', 'DOGE-USDT-SWAP',
+                    'XRP-USDT-SWAP', 'PEPE-USDT-SWAP']
 
     base_file_path = 'origin_data.csv'
     bar_list = ['1m', '1m', '5m', '15m', '30m', '1h', '4h']
@@ -2140,7 +2208,8 @@ def run_backtest():
                     # backtest_df_op = backtest_strategy_op(signal_data)
                     backtest_df = pd.read_csv(final_output_file_path)
                     backtest_df_op = pd.read_csv(final_op_output_file_path)
-                    backtest_df_op['quantile_score1'] = backtest_df_op['quantile_value'] / backtest_df_op['quantile'] * backtest_df_op['ratio'] * backtest_df_op['diff_vs_baseline']
+                    backtest_df_op['quantile_score1'] = backtest_df_op['quantile_value'] / backtest_df_op['quantile'] * \
+                                                        backtest_df_op['ratio'] * backtest_df_op['diff_vs_baseline']
                     backtest_df.to_csv(final_output_file_path, index=False)
                     backtest_df_op.to_csv(final_op_output_file_path, index=False)
                     print(f'已经保存至{final_output_file_path}')
