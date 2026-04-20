@@ -1,30 +1,27 @@
 import re
-import traceback
 import pandas as pd
 import numpy as np
 import os
 import time
 from datetime import datetime
 import numba as nb
-from itertools import product
 
 # =============================================================================
 # 全局配置
 # =============================================================================
-SINGLE_LEG_FEE = 0.0006  # 单腿单次费率（含滑点）
-USE_NEXT_BAR_EXEC = False  # True: 用信号下一根1min close成交; False: 用当前 bar 的 close 生成信号，然后又在当前 bar 的 close 成交
-USE_1MIN_PATH = True  # True: 持仓期间MTM/硬止损走1min路径（若提供原始1min数据）
-SL_MULT = 3.0  # spread-based 硬止损倍数（固定，不参与扫描）
-BETA_MIN = 0.1   # [FIX-2] Beta合法下限：低于此值关系不稳定，禁止开仓
-BETA_MAX = 5.0   # [FIX-2] Beta合法上限：超过此值杠杆失控，禁止开仓
-WF_MAX_TRAIN_MDD = -15.0  # [FIX-3] WF训练集最大允许路径回撤(%)，超过则淘汰该参数
+SINGLE_LEG_FEE = 0.0006
+USE_NEXT_BAR_EXEC = True
+USE_1MIN_PATH = True
+SL_MULT = 3.0
+BETA_MIN = 0.1
+BETA_MAX = 5.0
+WF_MAX_TRAIN_MDD = -15.0
 
 
 # =============================================================================
 # 0. 时间单位工具
 # =============================================================================
 def get_tf_minutes(tf_str):
-    """从timeframe字符串获取分钟数"""
     tf = tf_str.lower().strip()
     if tf.endswith('min'):
         return int(tf.replace('min', ''))
@@ -44,12 +41,10 @@ def days_to_bars(days, tf_minutes):
 
 
 def delta_per_day_to_bar(delta_per_day, tf_minutes):
-    bars_per_day = 1440.0 / tf_minutes
-    return delta_per_day / bars_per_day
+    return delta_per_day / (1440.0 / tf_minutes)
 
 
 def _get_segment_bounds_ns(df, tf_minutes):
-    """返回一个重采样窗口的真实起止时间 [start, end)"""
     if df.empty:
         nat = np.datetime64('NaT')
         return nat, nat
@@ -67,6 +62,70 @@ def _infer_bar_delta_ns(times, tf_minutes=None):
             median_ns = int(np.median(diffs))
             return np.timedelta64(max(median_ns, 60_000_000_000), 'ns')
     return np.timedelta64(1, 'm')
+
+
+# =============================================================================
+# 0b. 共享辅助函数
+# =============================================================================
+def _shift_or_copy(arr, shift=True, fill=0.0):
+    """shift=True 时返回右移一位的数组（首位填 fill），否则返回 copy"""
+    if not shift:
+        return arr.copy()
+    out = np.full_like(arr, fill)
+    if len(arr) > 1:
+        out[1:] = arr[:-1]
+    return out
+
+
+def _get_param_grids():
+    """返回 scan / WF 共用的参数搜索空间"""
+    return {
+        'z_entry': [2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 8.0],
+        'z_exit': [0.0, 0.5, 1.0],
+        'lookback_hours': [10, 15, 30],
+        'delta_per_day': [0.01, 0.001, 0.0001],
+        've': [1e-3],
+        'min_hold_hours': [0.5, 0.75, 1.0, 1.25, 1.5, 3.0, 6.0, 12.0],
+    }
+
+
+def _backtest_and_pnls(full_df, min1_cache, tf_min, fee=None, exec_state=None):
+    """compute_equity_and_trades + _build_effective_pnls 的便捷组合"""
+    trades, eq, eq_times, st = compute_equity_and_trades(
+        full_df, min1_cache=min1_cache, fee_override=fee,
+        tf_minutes=tf_min, exec_state=exec_state)
+    eff = _build_effective_pnls(trades, eq, st)
+    return trades, eq, eq_times, st, eff
+
+
+def _unpack_exec_state(exec_state):
+    """将 exec_state tuple 解包为 dict，缺失字段用默认值填充"""
+    if exec_state is None:
+        return {
+            'entry_main': 0.0, 'entry_sub': 0.0, 'entry_dir': 0,
+            'entry_beta_val': 0.0, 'cum_realized': 0.0,
+            'entry_time': np.datetime64('NaT'),
+            'last_mark_main': 0.0, 'last_mark_sub': 0.0,
+            'entry_frozen_alpha': 0.0, 'entry_spread_val': 0.0,
+            'entry_std_val': 0.0, 'last_signal_val': 0.0,
+        }
+    s = exec_state
+    n = len(s)
+    entry_dir_raw = float(s[2]) if n > 2 else 0.0
+    return {
+        'entry_main': float(s[0]),
+        'entry_sub': float(s[1]),
+        'entry_dir': int(entry_dir_raw),
+        'entry_beta_val': float(s[3]) if n > 3 else 0.0,
+        'cum_realized': float(s[4]) if n > 4 else 0.0,
+        'entry_time': s[5] if n > 5 else np.datetime64('NaT'),
+        'last_mark_main': float(s[6]) if n > 6 else 0.0,
+        'last_mark_sub': float(s[7]) if n > 7 else 0.0,
+        'entry_frozen_alpha': float(s[8]) if n > 8 else 0.0,
+        'entry_spread_val': float(s[9]) if n > 9 else 0.0,
+        'entry_std_val': float(s[10]) if n > 10 else 0.0,
+        'last_signal_val': float(s[11]) if n > 11 else entry_dir_raw,
+    }
 
 
 # =============================================================================
@@ -133,7 +192,7 @@ def fast_kalman_filter(x_arr, y_arr, delta, ve,
 
 
 # =============================================================================
-# 3. 信号生成 V2（冻结beta、硬止损、成本感知开仓、价差改善平仓）
+# 3. 信号生成 V2
 # =============================================================================
 @nb.njit(cache=True)
 def fast_generate_signals(z_values, spreads, betas, alphas,
@@ -151,7 +210,7 @@ def fast_generate_signals(z_values, spreads, betas, alphas,
     frozen_alphas_arr = np.zeros(n)
     entry_spreads_arr = np.zeros(n)
     entry_stds_arr = np.zeros(n)
-    stop_flags = np.zeros(n)  # [FIX-5] 标记每根bar是否因硬止损而平仓
+    stop_flags = np.zeros(n)
 
     pos = init_pos
     held = init_held
@@ -171,9 +230,7 @@ def fast_generate_signals(z_values, spreads, betas, alphas,
             if since_close >= cooldown_bars:
                 cur_std = roll_std[i]
                 cur_beta = betas[i]
-                # [FIX-2] Beta合法区间检查：beta过小或过大时不开仓
                 if cur_std > 0.0 and cur_beta >= beta_min and cur_beta <= beta_max:
-                    # 成本感知：预期利润必须覆盖双边手续费
                     expected_profit = (z_entry - abs(z_exit)) * cur_std
                     round_trip_cost = 2.0 * single_leg_fee * (1.0 + abs(cur_beta))
                     if expected_profit > round_trip_cost:
@@ -193,38 +250,30 @@ def fast_generate_signals(z_values, spreads, betas, alphas,
                             entry_std = cur_std
         else:
             held += 1
-            # 用冻结的 alpha/beta 计算当前价差
             frozen_spread = log_main[i] - frozen_alpha - frozen_beta * log_sub[i]
 
-            # --- bar级硬止损（execution层还会再做1min止损）---
             stopped = False
             if entry_std > 0.0 and sl_mult > 0.0:
-                if pos == 1:  # 做空价差 → 价差上涨亏钱
+                if pos == 1:
                     if (frozen_spread - entry_spread) > sl_mult * entry_std:
                         stopped = True
-                elif pos == -1:  # 做多价差 → 价差下跌亏钱
+                elif pos == -1:
                     if (entry_spread - frozen_spread) > sl_mult * entry_std:
                         stopped = True
 
             if stopped:
                 pos = 0
                 since_close = 0
-                stop_flags[i] = 1.0  # [FIX-5] 标记此bar为硬止损触发
+                stop_flags[i] = 1.0
             elif max_hold_bars > 0 and held >= max_hold_bars:
                 pos = 0
                 since_close = 0
             elif held >= min_hold_bars:
-                # [FIX] 方向性判断：价差是否朝盈利方向移动
-                # pos=1 做空价差→利润来自价差下降; pos=-1 做多价差→利润来自价差上升
-                # 原 abs() 比较在价差穿越零点后会误判，改为方向性比较
                 if pos == 1:
                     spread_improved = frozen_spread < entry_spread
                 else:
                     spread_improved = frozen_spread > entry_spread
 
-                # ★ FIX: spread_improved 时间衰减
-                # 持仓超过 max_hold_bars 一半后，放弃 spread_improved 要求，
-                # 避免仓位被困在"z已达标但spread未改善"的灰色地带
                 if max_hold_bars > 0 and held > max_hold_bars // 2:
                     spread_improved = True
 
@@ -247,7 +296,6 @@ def fast_generate_signals(z_values, spreads, betas, alphas,
             entry_spreads_arr[i] = 0.0
             entry_stds_arr[i] = 0.0
 
-    # [FIX-5] 返回值新增 stop_flags
     return (signals, frozen_betas_arr, frozen_alphas_arr,
             entry_spreads_arr, entry_stds_arr,
             stop_flags,
@@ -263,15 +311,10 @@ def generate_pair_trading_signals(merged_df, main_col='close_main', sub_col='clo
                                   delta=1e-5, ve=1e-3,
                                   min_hold_bars=12, cooldown_bars=4, max_hold_bars=0,
                                   kf_state=None, pos_state=None):
-    """
-    返回 df（含 raw_signal / signal / frozen_beta 等列），
-    以及 final_kf_state, final_pos_state 用于跨窗口传递。
-    """
     df = merged_df.copy()
     df['log_main'] = np.log(df[main_col])
     df['log_sub'] = np.log(df[sub_col])
 
-    # --- KF ---
     if kf_state is None:
         kf_state = (0.0, 0.0, 1.0, 0.0, 0.0, 1.0)
     betas, alphas, kf_spreads, ka, kb, kP00, kP01, kP10, kP11 = fast_kalman_filter(
@@ -297,7 +340,6 @@ def generate_pair_trading_signals(merged_df, main_col='close_main', sub_col='clo
     z_clean = np.nan_to_num(z_score, nan=0.0, posinf=0.0, neginf=0.0)
     rs_clean = np.nan_to_num(roll_std.values, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # --- 信号 ---
     if pos_state is None:
         pos_state = (0, 0, 9999, 0.0, 0.0, 0.0, 0.0)
 
@@ -324,45 +366,16 @@ def generate_pair_trading_signals(merged_df, main_col='close_main', sub_col='clo
     df['entry_spread_state'] = entry_spreads_state
     df['entry_std_state'] = entry_stds_state
 
-    if USE_NEXT_BAR_EXEC:
-        shifted = np.zeros_like(raw_signals)
-        shifted[1:] = raw_signals[:-1]
-        df['signal'] = shifted
+    # ---- 统一 shift / copy 赋值 ----
+    do_shift = USE_NEXT_BAR_EXEC
+    df['signal'] = _shift_or_copy(raw_signals, do_shift)
+    df['signal_frozen_beta'] = _shift_or_copy(frozen_betas, do_shift)
+    df['signal_frozen_alpha'] = _shift_or_copy(frozen_alphas_state, do_shift)
+    df['signal_entry_spread'] = _shift_or_copy(entry_spreads_state, do_shift)
+    df['signal_entry_std'] = _shift_or_copy(entry_stds_state, do_shift)
+    df['signal_entry_z'] = _shift_or_copy(z_score, do_shift, fill=np.nan)
+    df['stop_flag'] = _shift_or_copy(stop_flags_raw, do_shift)
 
-        shifted_fb = np.zeros_like(frozen_betas)
-        shifted_fb[1:] = frozen_betas[:-1]
-        df['signal_frozen_beta'] = shifted_fb
-
-        shifted_fa = np.zeros_like(frozen_alphas_state)
-        shifted_fa[1:] = frozen_alphas_state[:-1]
-        df['signal_frozen_alpha'] = shifted_fa
-
-        shifted_es = np.zeros_like(entry_spreads_state)
-        shifted_es[1:] = entry_spreads_state[:-1]
-        df['signal_entry_spread'] = shifted_es
-
-        shifted_estd = np.zeros_like(entry_stds_state)
-        shifted_estd[1:] = entry_stds_state[:-1]
-        df['signal_entry_std'] = shifted_estd
-
-        shifted_entry_z = np.full(len(df), np.nan)
-        if len(df) > 1:
-            shifted_entry_z[1:] = z_score[:-1]
-        df['signal_entry_z'] = shifted_entry_z
-
-        shifted_sf = np.zeros_like(stop_flags_raw)
-        shifted_sf[1:] = stop_flags_raw[:-1]
-        df['stop_flag'] = shifted_sf
-    else:
-        df['signal'] = raw_signals.copy()
-        df['signal_frozen_beta'] = frozen_betas.copy()
-        df['signal_frozen_alpha'] = frozen_alphas_state.copy()
-        df['signal_entry_spread'] = entry_spreads_state.copy()
-        df['signal_entry_std'] = entry_stds_state.copy()
-        df['signal_entry_z'] = z_score.copy()
-        df['stop_flag'] = stop_flags_raw.copy()
-
-    # 为 execution 层在 1min 提前止损后重建后续 signal path 提供必要参数
     _sig_ctx = {
         'z_entry': float(z_entry),
         'z_exit': float(z_exit),
@@ -382,11 +395,9 @@ def generate_pair_trading_signals(merged_df, main_col='close_main', sub_col='clo
 # 5. 1min cache / 有效PnL / 时间三段
 # =============================================================================
 def _build_1min_cache(original_1min_df):
-    """构建1min价格/对数价格缓存，避免扫描时重复构建"""
     odf = original_1min_df.copy()
     odf['open_time'] = pd.to_datetime(odf['open_time'])
     odf = odf.sort_values('open_time').reset_index(drop=True)
-
     cm = odf['close_main'].values.astype(float)
     cs = odf['close_sub'].values.astype(float)
     return {
@@ -399,7 +410,6 @@ def _build_1min_cache(original_1min_df):
 
 
 def _lookup_1min_point(min1_cache, target_time_ns):
-    """查找 >= target_time 的第一根1min close"""
     min1_times = min1_cache['times']
     idx = np.searchsorted(min1_times, target_time_ns, side='left')
     if idx >= len(min1_times):
@@ -412,11 +422,6 @@ def _lookup_1min_point(min1_cache, target_time_ns):
 
 
 def _build_effective_pnls(trade_df, equity_curve, final_exec_state):
-    """
-    构造用于Train打分 / 硬过滤 / OOS退化比的"有效PnL单元"：
-    - 已平仓交易的 net_pnl
-    - 若窗口末仍有未平仓，则把窗口末MTM（不扣出场费）作为一个额外单元
-    """
     if trade_df is not None and not trade_df.empty:
         pnls = trade_df['net_pnl'].values.astype(float).copy()
     else:
@@ -435,9 +440,6 @@ def _build_effective_pnls(trade_df, equity_curve, final_exec_state):
 
 
 def _split_train_thirds(segment_start_time, segment_end_time, equity_times, equity_curve):
-    """
-    按真实时间跨度把训练窗切成3段，返回每段收益（使用权益曲线增量）
-    """
     if equity_curve is None or len(equity_curve) == 0:
         return [0.0, 0.0, 0.0]
 
@@ -457,7 +459,6 @@ def _split_train_thirds(segment_start_time, segment_end_time, equity_times, equi
     b1 = start + np.timedelta64(total_ns // 3, 'ns')
     b2 = start + np.timedelta64((total_ns * 2) // 3, 'ns')
 
-    # [FIX 2] 添加上界防御，防止极端情况下索引越界
     def _eq_at(boundary_ns):
         idx = np.searchsorted(etimes, boundary_ns, side='right') - 1
         if idx < 0:
@@ -469,7 +470,6 @@ def _split_train_thirds(segment_start_time, segment_end_time, equity_times, equi
     e1 = _eq_at(b1)
     e2 = _eq_at(b2)
     e3 = _eq_at(end)
-
     return [e1, e2 - e1, e3 - e2]
 
 
@@ -478,20 +478,6 @@ def _split_train_thirds(segment_start_time, segment_end_time, equity_times, equi
 # =============================================================================
 def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
                               exec_state=None, min1_cache=None, tf_minutes=None):
-    """
-    计算权益曲线（支持1min path MTM）并提取交易列表。
-
-    exec_state:
-        (
-            entry_main, entry_sub, entry_dir, entry_beta_val, cum_realized,
-            entry_time, last_mark_main, last_mark_sub,
-            entry_frozen_alpha, entry_spread_val, entry_std_val,
-            last_signal_val
-        )
-
-    返回:
-        trade_df, equity_array, equity_times_array, final_exec_state
-    """
     fee = SINGLE_LEG_FEE if fee_override is None else fee_override
 
     df = full_df.reset_index(drop=True)
@@ -503,53 +489,42 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
 
     n = len(df)
 
+    # ---- 统一解包 exec_state ----
+    es = _unpack_exec_state(exec_state)
+
     if n == 0:
-        if exec_state is not None:
-            entry_main = float(exec_state[0])
-            entry_sub = float(exec_state[1])
-            entry_dir = int(exec_state[2])
-            entry_beta_val = float(exec_state[3])
-            cum_realized = float(exec_state[4])
-            entry_time = exec_state[5] if len(exec_state) > 5 else np.datetime64('NaT')
-            last_mark_main = float(exec_state[6]) if len(exec_state) > 6 else 0.0
-            last_mark_sub = float(exec_state[7]) if len(exec_state) > 7 else 0.0
-            entry_frozen_alpha = float(exec_state[8]) if len(exec_state) > 8 else 0.0
-            entry_spread_val = float(exec_state[9]) if len(exec_state) > 9 else 0.0
-            entry_std_val = float(exec_state[10]) if len(exec_state) > 10 else 0.0
-            last_signal_val = float(exec_state[11]) if len(exec_state) > 11 else float(entry_dir)
-            final_exec_state = (
-                entry_main, entry_sub, float(entry_dir), entry_beta_val, cum_realized,
-                entry_time, last_mark_main, last_mark_sub,
-                entry_frozen_alpha, entry_spread_val, entry_std_val,
-                last_signal_val
-            )
-        else:
-            final_exec_state = (
-                0.0, 0.0, 0.0, 0.0, 0.0,
-                np.datetime64('NaT'), 0.0, 0.0,
-                0.0, 0.0, 0.0, 0.0
-            )
+        final_exec_state = (
+            es['entry_main'], es['entry_sub'], float(es['entry_dir']),
+            es['entry_beta_val'], es['cum_realized'],
+            es['entry_time'], es['last_mark_main'], es['last_mark_sub'],
+            es['entry_frozen_alpha'], es['entry_spread_val'], es['entry_std_val'],
+            es['last_signal_val']
+        )
         return pd.DataFrame(), np.array([]), np.array([], dtype='datetime64[ns]'), final_exec_state
 
     signals = df['signal'].values.astype(int)
     times = pd.to_datetime(df['open_time']).values.astype('datetime64[ns]')
     close_main = df['close_main'].values.astype(float)
     close_sub = df['close_sub'].values.astype(float)
-    z_scores = df['z_score'].values.astype(float) if 'z_score' in df.columns else np.full(n, np.nan)
-    spreads_arr = df['spread'].values.astype(float) if 'spread' in df.columns else np.full(n, np.nan)
-    betas_arr = df['beta'].values.astype(float) if 'beta' in df.columns else np.zeros(n)
-    alphas_arr = df['alpha'].values.astype(float) if 'alpha' in df.columns else np.zeros(n)
-    roll_std_arr = df['roll_std'].values.astype(float) if 'roll_std' in df.columns else np.zeros(n)
 
-    signal_fb = df['signal_frozen_beta'].values.astype(float) if 'signal_frozen_beta' in df.columns else betas_arr.copy()
-    signal_fa = df['signal_frozen_alpha'].values.astype(float) if 'signal_frozen_alpha' in df.columns else alphas_arr.copy()
-    signal_es = df['signal_entry_spread'].values.astype(float) if 'signal_entry_spread' in df.columns else np.zeros(n)
-    signal_estd = df['signal_entry_std'].values.astype(float) if 'signal_entry_std' in df.columns else np.zeros(n)
-    signal_entry_z = df['signal_entry_z'].values.astype(float) if 'signal_entry_z' in df.columns else np.full(n, np.nan)
-    stop_flags_col = df['stop_flag'].values.astype(int) if 'stop_flag' in df.columns else np.zeros(n, dtype=int)
+    def _col(col_name, default, dtype=float):
+        if col_name in df.columns:
+            return df[col_name].values.astype(dtype)
+        return default() if callable(default) else default
 
-    log_main_arr = df['log_main'].values.astype(float) if 'log_main' in df.columns else np.log(close_main)
-    log_sub_arr = df['log_sub'].values.astype(float) if 'log_sub' in df.columns else np.log(close_sub)
+    z_scores = _col('z_score', lambda: np.full(n, np.nan))
+    spreads_arr = _col('spread', lambda: np.full(n, np.nan))
+    betas_arr = _col('beta', lambda: np.zeros(n))
+    alphas_arr = _col('alpha', lambda: np.zeros(n))
+    roll_std_arr = _col('roll_std', lambda: np.zeros(n))
+    signal_fb = _col('signal_frozen_beta', lambda: betas_arr.copy())
+    signal_fa = _col('signal_frozen_alpha', lambda: alphas_arr.copy())
+    signal_es = _col('signal_entry_spread', lambda: np.zeros(n))
+    signal_estd = _col('signal_entry_std', lambda: np.zeros(n))
+    signal_entry_z = _col('signal_entry_z', lambda: np.full(n, np.nan))
+    stop_flags_col = _col('stop_flag', lambda: np.zeros(n, dtype=int), dtype=int)
+    log_main_arr = _col('log_main', lambda: np.log(close_main))
+    log_sub_arr = _col('log_sub', lambda: np.log(close_sub))
 
     z_clean = np.nan_to_num(z_scores, nan=0.0, posinf=0.0, neginf=0.0)
     rs_clean = np.nan_to_num(roll_std_arr, nan=0.0, posinf=0.0, neginf=0.0)
@@ -594,30 +569,20 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
     bar_delta_ns = _infer_bar_delta_ns(times, tf_minutes=tf_minutes)
     segment_end_time = times[-1] + bar_delta_ns
 
-    if exec_state is not None:
-        entry_main = float(exec_state[0])
-        entry_sub = float(exec_state[1])
-        entry_dir = int(exec_state[2])
-        entry_beta_val = float(exec_state[3])
-        cum_realized = float(exec_state[4])
-        entry_time = exec_state[5] if len(exec_state) > 5 else np.datetime64('NaT')
-        prev_last_mark_main = float(exec_state[6]) if len(exec_state) > 6 else 0.0
-        prev_last_mark_sub = float(exec_state[7]) if len(exec_state) > 7 else 0.0
-        entry_frozen_alpha = float(exec_state[8]) if len(exec_state) > 8 else 0.0
-        entry_spread_val = float(exec_state[9]) if len(exec_state) > 9 else 0.0
-        entry_std_val = float(exec_state[10]) if len(exec_state) > 10 else 0.0
-        prev_sig_seed = int(exec_state[11]) if len(exec_state) > 11 else entry_dir
-        in_trade = (entry_dir != 0)
-    else:
-        entry_main, entry_sub, entry_dir = 0.0, 0.0, 0
-        entry_beta_val, cum_realized = 0.0, 0.0
-        entry_time = np.datetime64('NaT')
-        prev_last_mark_main, prev_last_mark_sub = 0.0, 0.0
-        entry_frozen_alpha = 0.0
-        entry_spread_val = 0.0
-        entry_std_val = 0.0
-        prev_sig_seed = 0
-        in_trade = False
+    # ---- 用 es dict 初始化局部变量 ----
+    entry_main = es['entry_main']
+    entry_sub = es['entry_sub']
+    entry_dir = es['entry_dir']
+    entry_beta_val = es['entry_beta_val']
+    cum_realized = es['cum_realized']
+    entry_time = es['entry_time']
+    prev_last_mark_main = es['last_mark_main']
+    prev_last_mark_sub = es['last_mark_sub']
+    entry_frozen_alpha = es['entry_frozen_alpha']
+    entry_spread_val = es['entry_spread_val']
+    entry_std_val = es['entry_std_val']
+    prev_sig_seed = int(es['last_signal_val'])
+    in_trade = (entry_dir != 0)
 
     if in_trade:
         seg_entry_main = prev_last_mark_main if prev_last_mark_main > 0 else entry_main
@@ -654,19 +619,19 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
             equity_times.append(point_time)
             equity_values.append(point_value)
 
-    def _calc_gross(em, es, cm, cs, ebeta, edir):
+    def _calc_gross(em, ess, cm, cs, ebeta, edir):
         br = (cm - em) / em if em != 0 else 0.0
-        er = (cs - es) / es if es != 0 else 0.0
+        er = (cs - ess) / ess if ess != 0 else 0.0
         if edir == -1:
             return br - ebeta * er
         else:
             return ebeta * er - br
 
-    def _calc_norm(em, es, cm, cs, ebeta, edir):
+    def _calc_norm(em, ess, cm, cs, ebeta, edir):
         total_exp = 1.0 + abs(ebeta)
         if total_exp <= 0.0:
             return 0.0
-        return _calc_gross(em, es, cm, cs, ebeta, edir) / total_exp
+        return _calc_gross(em, ess, cm, cs, ebeta, edir) / total_exp
 
     def _open_position(sig_dir, exec_time_val, exec_m, exec_s, bar_idx):
         nonlocal entry_main, entry_sub, entry_dir, entry_beta_val, cum_realized
@@ -683,7 +648,6 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
         entry_std_val = signal_estd[bar_idx]
         entry_time = exec_time_val
         in_trade = True
-
         cum_realized -= fee
 
         seg_entry_main = exec_m
@@ -760,7 +724,6 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
         entry_frozen_alpha = 0.0
         entry_spread_val = 0.0
         entry_std_val = 0.0
-
         seg_entry_main = 0.0
         seg_entry_sub = 0.0
         seg_open_time = np.datetime64('NaT')
@@ -775,10 +738,9 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
         if stop_bar_idx < 0 or stop_bar_idx >= n:
             return
 
-        # 当前 bar 实际上已经在盘中被止损，后续 prev_sig 必须看到 flat 状态
         signals[stop_bar_idx] = 0
         signal_es[stop_bar_idx] = 0.0
-        signal_estd[stop_bar_idx] = 0.0
+        signal_estd[stop_bar_idx] = 0
         stop_flags_col[stop_bar_idx] = 0
 
         if not can_rebuild_signal_path:
@@ -812,7 +774,6 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
         stop_flags_col[suffix:] = 0
 
         if USE_NEXT_BAR_EXEC:
-            # suffix 这个执行 bar 对应“stop_bar_idx 的 raw signal”，而 stop_bar_idx 已被盘中止损改写为 flat
             signal_fb[suffix] = betas_arr[stop_bar_idx]
             signal_fa[suffix] = alphas_arr[stop_bar_idx]
             signal_entry_z[suffix] = z_scores[stop_bar_idx] if stop_bar_idx < n else np.nan
@@ -1021,80 +982,47 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
 
 
 # =============================================================================
-# 7. 统计函数（优先使用逐bar/逐1min权益）
+# 7. 统计函数（合并三条分支为单一路径）
 # =============================================================================
 def print_backtest_stats(trade_df, equity_curve=None, effective_pnls=None):
     has_trade_rows = trade_df is not None and not trade_df.empty
 
+    # ---- 统一构建 pnl_arr ----
     if effective_pnls is not None:
         pnl_arr = np.asarray(effective_pnls, dtype=float)
-        total_trades = len(pnl_arr)
-        if total_trades > 0:
-            total_return_trade = float(np.sum(pnl_arr))
-            avg_return = float(np.mean(pnl_arr))
-            win_rate = float(np.sum(pnl_arr > 0)) / total_trades
-            gross_profit = float(np.sum(pnl_arr[pnl_arr > 0]))
-            gross_loss = float(abs(np.sum(pnl_arr[pnl_arr <= 0])))
-            if gross_loss > 0:
-                profit_factor = gross_profit / gross_loss
-            else:
-                profit_factor = float('inf') if gross_profit > 0 else 0.0
-        else:
-            total_return_trade = 0.0
-            avg_return = 0.0
-            win_rate = 0.0
-            profit_factor = 0.0
     elif has_trade_rows:
-        total_trades = len(trade_df)
-        total_return_trade = float(trade_df['net_pnl'].sum())
-        avg_return = float(trade_df['net_pnl'].mean())
-        win_rate = float((trade_df['net_pnl'] > 0).sum()) / total_trades
-
-        gross_profit = float(trade_df[trade_df['net_pnl'] > 0]['net_pnl'].sum())
-        gross_loss = float(abs(trade_df[trade_df['net_pnl'] <= 0]['net_pnl'].sum()))
-        if gross_loss > 0:
-            profit_factor = gross_profit / gross_loss
-        else:
-            profit_factor = float('inf') if gross_profit > 0 else 0.0
+        pnl_arr = trade_df['net_pnl'].values.astype(float)
     else:
-        total_trades = 0
-        total_return_trade = 0.0
-        avg_return = 0.0
-        win_rate = 0.0
-        profit_factor = 0.0
+        pnl_arr = np.array([], dtype=float)
 
-    if has_trade_rows:
-        avg_duration = float(trade_df['duration_mins'].mean())
-        max_duration = float(trade_df['duration_mins'].max())
+    total_trades = len(pnl_arr)
+    if total_trades > 0:
+        total_return_trade = float(np.sum(pnl_arr))
+        avg_return = float(np.mean(pnl_arr))
+        win_rate = float(np.sum(pnl_arr > 0)) / total_trades
+        gross_profit = float(np.sum(pnl_arr[pnl_arr > 0]))
+        gross_loss = float(abs(np.sum(pnl_arr[pnl_arr <= 0])))
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (float('inf') if gross_profit > 0 else 0.0)
     else:
-        avg_duration = 0.0
-        max_duration = 0.0
+        total_return_trade, avg_return, win_rate, profit_factor = 0.0, 0.0, 0.0, 0.0
 
-    # 优先用权益曲线算总收益和MDD
+    avg_duration = float(trade_df['duration_mins'].mean()) if has_trade_rows else 0.0
+    max_duration = float(trade_df['duration_mins'].max()) if has_trade_rows else 0.0
+
+    # ---- 统一 MDD 计算 ----
     if equity_curve is not None and len(equity_curve) > 0:
         eq = np.asarray(equity_curve, dtype=float)
         total_return = float(eq[-1])
-
         eq_ext = np.concatenate(([0.0], eq))
-        peak = np.maximum.accumulate(eq_ext)
-        dd = eq_ext - peak
-        max_drawdown = float(np.min(dd))
     else:
         total_return = total_return_trade
-        if effective_pnls is not None and len(effective_pnls) > 0:
-            cumpnl = np.cumsum(np.asarray(effective_pnls, dtype=float))
-            cumpnl_ext = np.concatenate(([0.0], cumpnl))
-            peak = np.maximum.accumulate(cumpnl_ext)
-            dd = cumpnl_ext - peak
-            max_drawdown = float(np.min(dd))
-        elif has_trade_rows:
-            cumpnl = np.cumsum(trade_df['net_pnl'].values.astype(float))
-            cumpnl_ext = np.concatenate(([0.0], cumpnl))
-            peak = np.maximum.accumulate(cumpnl_ext)
-            dd = cumpnl_ext - peak
-            max_drawdown = float(np.min(dd))
+        if len(pnl_arr) > 0:
+            eq_ext = np.concatenate(([0.0], np.cumsum(pnl_arr)))
         else:
-            max_drawdown = 0.0
+            eq_ext = np.array([0.0])
+
+    peak = np.maximum.accumulate(eq_ext)
+    max_drawdown = float(np.min(eq_ext - peak))
 
     return {
         'Total Return': total_return,
@@ -1109,7 +1037,7 @@ def print_backtest_stats(trade_df, equity_curve=None, effective_pnls=None):
 
 
 # =============================================================================
-# 8. 参数灵敏度扫描（时间单位参数 + delta归一化）
+# 8. 参数灵敏度扫描
 # =============================================================================
 def parameter_sensitivity_scan(df_file, timeframe='15min'):
     key_word = os.path.basename(df_file).replace('.csv', '')
@@ -1127,21 +1055,14 @@ def parameter_sensitivity_scan(df_file, timeframe='15min'):
     tf_min = get_tf_minutes(timeframe)
     min1_cache = _build_1min_cache(original_df) if (USE_NEXT_BAR_EXEC or USE_1MIN_PATH) else None
 
-    # ===== 时间单位参数网格 =====
-    z_entry_list = [2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 8.0]
-    z_exit_list = [0.0, 0.5, 1.0]
-    lookback_hours_list = [10, 15, 30]
-    delta_per_day_list = [0.01, 0.001, 0.0001]
-    ve_list = [1e-3]
-    min_hold_hours_list = [0.5, 0.75, 1.0, 1.25, 1.5, 3.0, 6.0, 12.0]
+    grids = _get_param_grids()
     cooldown_hours = 1.0
     max_hold_days = 4.0
-
     cooldown_bars = hours_to_bars(cooldown_hours, tf_min)
     max_hold_bars = days_to_bars(max_hold_days, tf_min)
 
-    total_combos = (len(z_entry_list) * len(z_exit_list) * len(lookback_hours_list)
-                    * len(delta_per_day_list) * len(ve_list) * len(min_hold_hours_list))
+    total_combos = (len(grids['z_entry']) * len(grids['z_exit']) * len(grids['lookback_hours'])
+                    * len(grids['delta_per_day']) * len(grids['ve']) * len(grids['min_hold_hours']))
     print(f"总参数组合数: {total_combos} | cooldown={cooldown_bars}bars, "
           f"max_hold={max_hold_bars}bars")
 
@@ -1149,16 +1070,16 @@ def parameter_sensitivity_scan(df_file, timeframe='15min'):
     count = 0
     start_time = time.time()
 
-    for z_entry in z_entry_list:
-        for z_exit in z_exit_list:
+    for z_entry in grids['z_entry']:
+        for z_exit in grids['z_exit']:
             if z_exit >= z_entry:
                 continue
-            for lb_h in lookback_hours_list:
+            for lb_h in grids['lookback_hours']:
                 z_lb = hours_to_bars(lb_h, tf_min)
-                for dpd in delta_per_day_list:
+                for dpd in grids['delta_per_day']:
                     delta = delta_per_day_to_bar(dpd, tf_min)
-                    for ve in ve_list:
-                        for mh_h in min_hold_hours_list:
+                    for ve in grids['ve']:
+                        for mh_h in grids['min_hold_hours']:
                             min_hold = hours_to_bars(mh_h, tf_min)
                             count += 1
                             try:
@@ -1171,17 +1092,11 @@ def parameter_sensitivity_scan(df_file, timeframe='15min'):
                                     max_hold_bars=max_hold_bars
                                 )
 
-                                # 零手续费
-                                trades_0, eq_0, eqt_0, st_0 = compute_equity_and_trades(
-                                    full_df, min1_cache=min1_cache, fee_override=0.0, tf_minutes=tf_min)
-                                eff_0 = _build_effective_pnls(trades_0, eq_0, st_0)
+                                trades_0, eq_0, _, st_0, eff_0 = _backtest_and_pnls(
+                                    full_df, min1_cache, tf_min, fee=0.0)
+                                trades_r, eq_r, _, st_r, eff_r = _backtest_and_pnls(
+                                    full_df, min1_cache, tf_min, fee=SINGLE_LEG_FEE)
 
-                                # 真实手续费
-                                trades_r, eq_r, eqt_r, st_r = compute_equity_and_trades(
-                                    full_df, min1_cache=min1_cache, fee_override=SINGLE_LEG_FEE, tf_minutes=tf_min)
-                                eff_r = _build_effective_pnls(trades_r, eq_r, st_r)
-
-                                # [FIX] 与WF对齐，scan门槛从10提升到15
                                 if len(eff_0) < 15:
                                     continue
 
@@ -1228,7 +1143,6 @@ def parameter_sensitivity_scan(df_file, timeframe='15min'):
 
     result_df = pd.DataFrame(results)
 
-    # ---- 输出分析 ----
     print(f"\n{'=' * 100}")
     print(f"TOP 20 参数组合（按真实手续费总收益排序）| {key_word} | {timeframe}")
     print(f"{'=' * 100}")
@@ -1293,10 +1207,6 @@ def parameter_sensitivity_scan(df_file, timeframe='15min'):
 # 9. Walk-Forward
 # =============================================================================
 def _compute_param_neighbors(param_key, param_grids):
-    """
-    计算一个参数组合的所有理论网格邻居。邻居 = 只在一个维度上偏移±1步。
-    [FIX] 不再过滤是否存在于某个通过集合中，返回所有理论上存在的网格邻居。
-    """
     neighbors = []
     for dim_idx in range(len(param_key)):
         grid = param_grids[dim_idx]
@@ -1310,6 +1220,76 @@ def _compute_param_neighbors(param_key, param_grids):
                     nkey[dim_idx] = grid[npos]
                     neighbors.append(tuple(nkey))
     return neighbors
+
+
+def _wf_force_close_boundary(oos_trades, oos_equity_raw, test_exec_state,
+                             boundary_equity, test_portion):
+    """WF窗口边界强制平仓：若OOS期末仍持仓，强制按末价结算并扣手续费。
+    就地修改 oos_equity_raw，返回 (oos_trades, test_exec_state, did_close)。
+    """
+    if test_exec_state is None or float(test_exec_state[2]) == 0.0 or len(oos_equity_raw) == 0:
+        return oos_trades, test_exec_state, False
+
+    es = _unpack_exec_state(test_exec_state)
+
+    oos_equity_raw[-1] -= SINGLE_LEG_FEE * 100.0
+
+    _oos_eq_adj = float(oos_equity_raw[-1]) - boundary_equity
+    _closed_sum = float(oos_trades['net_pnl'].sum()) if (not oos_trades.empty) else 0.0
+    _fc_net_pnl = round(_oos_eq_adj - _closed_sum, 4)
+
+    _fc_open_time = pd.to_datetime(test_portion['open_time'].iloc[0]) if len(test_portion) > 0 else pd.NaT
+    _fc_close_time = pd.to_datetime(test_portion['open_time'].iloc[-1]) if len(test_portion) > 0 else pd.NaT
+
+    _fc_duration = 0.0
+    if not pd.isna(es['entry_time']) and not pd.isna(_fc_close_time):
+        try:
+            _fc_duration = (pd.Timestamp(_fc_close_time) - pd.Timestamp(es['entry_time'])).total_seconds() / 60.0
+        except Exception:
+            _fc_duration = 0.0
+
+    _fc_dir = es['entry_dir']
+    _fc_beta = es['entry_beta_val']
+    _fc_direction_str = (f'做多价差 (Long BTC / Short {_fc_beta:.3f} ETH)'
+                         if _fc_dir == -1
+                         else f'做空价差 (Short BTC / Long {_fc_beta:.3f} ETH)')
+
+    _em, _es_sub = es['entry_main'], es['entry_sub']
+    _mm, _ms = es['last_mark_main'], es['last_mark_sub']
+    _fc_btc_roi = f"{((_mm - _em) / _em * 100):.2f}" if _em > 0 else "0.00"
+    _fc_eth_roi = f"{((_ms - _es_sub) / _es_sub * 100):.2f}" if _es_sub > 0 else "0.00"
+
+    _fc_trade = pd.DataFrame([{
+        'open_time': _fc_open_time,
+        'actual_open_time': es['entry_time'],
+        'close_time': _fc_close_time,
+        'duration_mins': _fc_duration,
+        'direction': _fc_direction_str,
+        'btc_roi': _fc_btc_roi,
+        'eth_roi': _fc_eth_roi,
+        'net_pnl': _fc_net_pnl,
+        'open_main': _em, 'close_main': _mm,
+        'open_sub': _es_sub, 'close_sub': _ms,
+        'entry_z': np.nan, 'exit_z': np.nan,
+        'entry_spread': np.nan, 'exit_spread': np.nan,
+        'entry_beta': _fc_beta, 'exit_beta': _fc_beta,
+        'entry_alpha': np.nan, 'exit_alpha': np.nan,
+        'signal': _fc_dir,
+        'inherited_from_prev_window': True,
+        'close_reason': 'wf_boundary_force_close',
+    }])
+
+    if not oos_trades.empty:
+        oos_trades = pd.concat([oos_trades, _fc_trade], ignore_index=True)
+    else:
+        oos_trades = _fc_trade.copy()
+
+    _st = list(test_exec_state)
+    _st[2] = 0.0
+    test_exec_state = tuple(_st)
+
+    print(f"  [FIX-1] OOS期末强制平仓: dir={_fc_dir}, net_pnl={_fc_net_pnl:.4f}%")
+    return oos_trades, test_exec_state, True
 
 
 def walk_forward_optimization(df_file, timeframe='15min',
@@ -1331,20 +1311,10 @@ def walk_forward_optimization(df_file, timeframe='15min',
     max_hold_bars = days_to_bars(max_hold_days, tf_min)
     min1_cache = _build_1min_cache(original_df) if (USE_NEXT_BAR_EXEC or USE_1MIN_PATH) else None
 
-    # ===== 时间单位搜索空间 =====
-    z_entry_list = [2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 8.0]
-    z_exit_list = [0.0, 0.5, 1.0]
-    lookback_hours_list = [10, 15, 30]
-    delta_per_day_list = [0.01, 0.001, 0.0001]
-    ve_list = [1e-3]
-    min_hold_hours_list = [0.5, 0.75, 1.0, 1.25, 1.5, 3.0, 6.0, 12.0]
+    grids = _get_param_grids()
+    param_grids = [grids['z_entry'], grids['z_exit'], grids['lookback_hours'],
+                   grids['delta_per_day'], grids['ve'], grids['min_hold_hours']]
 
-    param_grids = [
-        z_entry_list, z_exit_list, lookback_hours_list,
-        delta_per_day_list, ve_list, min_hold_hours_list
-    ]
-
-    # 硬门槛：每月至少3笔 → train_months * 3
     min_trades_required = max(18, train_months * 3)
 
     all_oos_trades = []
@@ -1381,23 +1351,22 @@ def walk_forward_optimization(df_file, timeframe='15min',
               f"→ Test [{train_end.date()} ~ {test_end.date()}]")
         print(f"Train: {len(train_df)} bars, Test: {len(test_df)} bars")
 
-        # ===== 第一步：在训练集上扫描所有参数，收集(参数, score) =====
+        # ===== 训练集扫描 =====
         all_candidates = {}
-        # [FIX] 记录所有被评估组合的原始t-stat，用于高原选择中的邻域打分
         all_evaluated_scores = {}
         combo_count = 0
         valid_count = 0
 
-        for z_entry in z_entry_list:
-            for z_exit in z_exit_list:
+        for z_entry in grids['z_entry']:
+            for z_exit in grids['z_exit']:
                 if z_exit >= z_entry:
                     continue
-                for lb_h in lookback_hours_list:
+                for lb_h in grids['lookback_hours']:
                     z_lb = hours_to_bars(lb_h, tf_min)
-                    for dpd in delta_per_day_list:
+                    for dpd in grids['delta_per_day']:
                         delta = delta_per_day_to_bar(dpd, tf_min)
-                        for ve in ve_list:
-                            for mh_h in min_hold_hours_list:
+                        for ve in grids['ve']:
+                            for mh_h in grids['min_hold_hours']:
                                 min_hold = hours_to_bars(mh_h, tf_min)
                                 combo_count += 1
                                 param_key = (z_entry, z_exit, lb_h, dpd, ve, mh_h)
@@ -1413,47 +1382,33 @@ def walk_forward_optimization(df_file, timeframe='15min',
 
                                     train_start_ns, train_end_ns = _get_segment_bounds_ns(full_df, tf_min)
 
-                                    trades, eq_curve, eq_times, exec_state_train = compute_equity_and_trades(
-                                        full_df, min1_cache=min1_cache, tf_minutes=tf_min
-                                    )
-                                    eff_pnls = _build_effective_pnls(trades, eq_curve, exec_state_train)
+                                    trades, eq_curve, eq_times, exec_state_train, eff_pnls = \
+                                        _backtest_and_pnls(full_df, min1_cache, tf_min)
 
-                                    # ★ FIX: 高原选择 — 细化 raw_score 计算，区分 std=0 和数据不足
                                     if len(eff_pnls) >= 2 and np.std(eff_pnls) > 0:
                                         raw_score = np.mean(eff_pnls) / np.std(eff_pnls) * np.sqrt(len(eff_pnls))
                                     elif len(eff_pnls) >= 2:
-                                        # std=0 说明每笔PnL完全相同，用均值符号给一个微弱方向信号
                                         raw_score = np.sign(np.mean(eff_pnls)) * 0.01
                                     else:
-                                        raw_score = 0.0  # 数据不足，保持中性
+                                        raw_score = 0.0
                                     all_evaluated_scores[param_key] = raw_score
 
                                     if len(eff_pnls) < min_trades_required:
                                         continue
                                     if np.std(eff_pnls) == 0:
                                         continue
-
-                                    # --- 硬过滤 1: 平均净收益为正（含期末MTM）---
                                     if np.mean(eff_pnls) <= 0:
                                         continue
 
-                                    # --- 硬过滤 2: 1.5x费用压力下仍正 ---
-                                    trades_15x, eq_15x, eqt_15x, st_15x = compute_equity_and_trades(
-                                        full_df, min1_cache=min1_cache,
-                                        fee_override=SINGLE_LEG_FEE * 1.5,
-                                        tf_minutes=tf_min
-                                    )
-                                    eff_15x = _build_effective_pnls(trades_15x, eq_15x, st_15x)
+                                    _, _, _, _, eff_15x = _backtest_and_pnls(
+                                        full_df, min1_cache, tf_min, fee=SINGLE_LEG_FEE * 1.5)
                                     if len(eff_15x) == 0 or np.mean(eff_15x) <= 0:
                                         continue
 
-                                    # --- 硬过滤 3: 训练数据按真实时间切3段，至少2段为正 ---
                                     seg_pnls = _split_train_thirds(train_start_ns, train_end_ns, eq_times, eq_curve)
-                                    pos_segs = sum(1 for s in seg_pnls if s > 0)
-                                    if pos_segs < 2:
+                                    if sum(1 for s in seg_pnls if s > 0) < 2:
                                         continue
 
-                                    # --- [FIX-3] 硬过滤 4: 训练集路径MDD不超过阈值 ---
                                     if len(eq_curve) > 0:
                                         _eq_ext = np.concatenate(([0.0], eq_curve))
                                         _peak = np.maximum.accumulate(_eq_ext)
@@ -1462,11 +1417,10 @@ def walk_forward_optimization(df_file, timeframe='15min',
                                             continue
 
                                     valid_count += 1
-                                    score = raw_score
                                     train_total_ret = float(eq_curve[-1]) if len(eq_curve) > 0 else float(np.sum(eff_pnls))
 
                                     all_candidates[param_key] = {
-                                        'score': score,
+                                        'score': raw_score,
                                         'params': {
                                             'z_entry': z_entry, 'z_exit': z_exit,
                                             'lookback_hours': lb_h, 'z_lookback': z_lb,
@@ -1490,29 +1444,21 @@ def walk_forward_optimization(df_file, timeframe='15min',
             window_id += 1
             continue
 
-        # ===== 第二步：参数高原选择（而非尖峰） =====
+        # ===== 高原选择 =====
         sorted_keys = sorted(all_candidates.keys(),
                              key=lambda k: all_candidates[k]['score'], reverse=True)
-        top_n = max(1, len(sorted_keys) // 5)  # top 20%
+        top_n = max(1, len(sorted_keys) // 5)
         top_keys = set(sorted_keys[:top_n])
 
         best_plateau_score = -np.inf
-        best_key = sorted_keys[0]  # fallback
+        best_key = sorted_keys[0]
 
         for pkey in top_keys:
-            # [FIX] 使用 all_evaluated_scores（包含未通过过滤的组合）进行邻域打分
-            # 这样孤立尖峰（周围邻居全部失败/分数低）会被显著惩罚
             neighbors = _compute_param_neighbors(pkey, param_grids)
-            # ★ FIX: 高原选择 — 去掉 > 0 过滤，让失败/亏损的邻居拉低中位数，
-            # 使孤立尖峰的 plateau_score 被正确惩罚而非保护
             neighbor_scores = [all_evaluated_scores[nk]
                                for nk in neighbors
                                if nk in all_evaluated_scores]
-            if neighbor_scores:
-                avg_nb = float(np.median(neighbor_scores))
-            else:
-                avg_nb = 0.0
-
+            avg_nb = float(np.median(neighbor_scores)) if neighbor_scores else 0.0
             plateau_score = all_candidates[pkey]['score'] * 0.5 + avg_nb * 0.5
             if plateau_score > best_plateau_score:
                 best_plateau_score = plateau_score
@@ -1540,7 +1486,7 @@ def walk_forward_optimization(df_file, timeframe='15min',
               f"plateau_score={best_plateau_score:.4f}")
         print(f"  通过硬过滤: {len(all_candidates)}/{combo_count}")
 
-        # ===== 第三步：在 combined(train+test) 上用选定参数跑 OOS =====
+        # ===== OOS 测试 =====
         combined = pd.concat([train_df, test_df], ignore_index=True)
         test_start_time = test_df['open_time'].iloc[0]
 
@@ -1560,95 +1506,23 @@ def walk_forward_optimization(df_file, timeframe='15min',
         train_portion = test_full[~test_mask].copy()
         test_portion = test_full[test_mask].copy()
 
-        # 训练段：得到边界执行状态和边界净值
-        _, train_equity, train_eq_times, train_exec_state = compute_equity_and_trades(
+        _, train_equity, _, train_exec_state = compute_equity_and_trades(
             train_portion, min1_cache=min1_cache, tf_minutes=tf_min
         )
         boundary_equity = train_equity[-1] if len(train_equity) > 0 else 0.0
 
-        # 测试段：从train边界继续
         oos_trades, oos_equity_raw, oos_eq_times, test_exec_state = compute_equity_and_trades(
             test_portion, min1_cache=min1_cache,
             exec_state=train_exec_state, tf_minutes=tf_min
         )
 
-        # =====================================================================
-        # [FIX-1] WF窗口边界强制平仓：若OOS期末仍持仓，强制按末价结算并扣手续费
-        # 原因：下一窗口将用新参数从零开始，遗留仓位会被"凭空消失"
-        # =====================================================================
-        if test_exec_state is not None and float(test_exec_state[2]) != 0.0 and len(oos_equity_raw) > 0:
-            _fc_dir = int(float(test_exec_state[2]))
-            _fc_entry_main = float(test_exec_state[0])
-            _fc_entry_sub = float(test_exec_state[1])
-            _fc_beta = float(test_exec_state[3])
-            _fc_entry_time = test_exec_state[5]
-            _fc_mark_main = float(test_exec_state[6])
-            _fc_mark_sub = float(test_exec_state[7])
+        # ---- WF边界强制平仓 ----
+        oos_trades, test_exec_state, _ = _wf_force_close_boundary(
+            oos_trades, oos_equity_raw, test_exec_state, boundary_equity, test_portion)
 
-            # 1) 从权益曲线末点扣除出场手续费
-            oos_equity_raw[-1] -= SINGLE_LEG_FEE * 100.0
-
-            # 2) 计算强制平仓交易的 net_pnl（残差法：调整后总OOS权益 - 已平仓交易之和）
-            _oos_eq_adj = float(oos_equity_raw[-1]) - boundary_equity
-            _closed_sum = float(oos_trades['net_pnl'].sum()) if (not oos_trades.empty) else 0.0
-            _fc_net_pnl = round(_oos_eq_adj - _closed_sum, 4)
-
-            # 3) 构造强制平仓交易记录
-            _fc_open_time = pd.to_datetime(test_portion['open_time'].iloc[0]) if len(test_portion) > 0 else pd.NaT
-            _fc_close_time = pd.to_datetime(test_portion['open_time'].iloc[-1]) if len(test_portion) > 0 else pd.NaT
-
-            _fc_duration = 0.0
-            if not pd.isna(_fc_entry_time) and not pd.isna(_fc_close_time):
-                try:
-                    _fc_duration = (pd.Timestamp(_fc_close_time) - pd.Timestamp(_fc_entry_time)).total_seconds() / 60.0
-                except Exception:
-                    _fc_duration = 0.0
-
-            _fc_direction_str = (f'做多价差 (Long BTC / Short {_fc_beta:.3f} ETH)'
-                                 if _fc_dir == -1
-                                 else f'做空价差 (Short BTC / Long {_fc_beta:.3f} ETH)')
-
-            _fc_btc_roi = f"{((_fc_mark_main - _fc_entry_main) / _fc_entry_main * 100):.2f}" if _fc_entry_main > 0 else "0.00"
-            _fc_eth_roi = f"{((_fc_mark_sub - _fc_entry_sub) / _fc_entry_sub * 100):.2f}" if _fc_entry_sub > 0 else "0.00"
-
-            _fc_trade = pd.DataFrame([{
-                'open_time': _fc_open_time,
-                'actual_open_time': _fc_entry_time,
-                'close_time': _fc_close_time,
-                'duration_mins': _fc_duration,
-                'direction': _fc_direction_str,
-                'btc_roi': _fc_btc_roi,
-                'eth_roi': _fc_eth_roi,
-                'net_pnl': _fc_net_pnl,
-                'open_main': _fc_entry_main, 'close_main': _fc_mark_main,
-                'open_sub': _fc_entry_sub, 'close_sub': _fc_mark_sub,
-                'entry_z': np.nan, 'exit_z': np.nan,
-                'entry_spread': np.nan, 'exit_spread': np.nan,
-                'entry_beta': _fc_beta, 'exit_beta': _fc_beta,
-                'entry_alpha': np.nan, 'exit_alpha': np.nan,
-                'signal': _fc_dir,
-                'inherited_from_prev_window': True,
-                'close_reason': 'wf_boundary_force_close',
-            }])
-
-            if not oos_trades.empty:
-                oos_trades = pd.concat([oos_trades, _fc_trade], ignore_index=True)
-            else:
-                oos_trades = _fc_trade.copy()
-
-            # 4) 更新 exec_state 为无持仓，使 _build_effective_pnls 不再追加残差
-            _st = list(test_exec_state)
-            _st[2] = 0.0  # entry_dir = 0
-            test_exec_state = tuple(_st)
-
-            print(f"  [FIX-1] OOS期末强制平仓: dir={_fc_dir}, net_pnl={_fc_net_pnl:.4f}%")
-        # =====================================================================
-
-        # 改成相对测试起点边界净值的增量曲线
         oos_equity = oos_equity_raw - boundary_equity if len(oos_equity_raw) > 0 else oos_equity_raw
         oos_effective_pnls = _build_effective_pnls(oos_trades, oos_equity, test_exec_state)
 
-        # 用于最终汇总的连续OOS equity
         if len(oos_equity) > 0:
             offset = all_oos_equity_segments[-1][-1] if all_oos_equity_segments else 0.0
             all_oos_equity_segments.append(oos_equity + offset)
@@ -1673,13 +1547,9 @@ def walk_forward_optimization(df_file, timeframe='15min',
                   f"total_ret={stats['Total Return']:.2f}%, "
                   f"MDD(path)={stats['Max Drawdown']:.4f}%")
 
-            # --- OOS 退化比 ---
             train_avg = chosen['train_avg_pnl']
             oos_avg = stats['avg_profit_per_trade']
-            if oos_avg <= 0:
-                degradation_ratio = float('inf')
-            else:
-                degradation_ratio = train_avg / oos_avg
+            degradation_ratio = (train_avg / oos_avg) if oos_avg > 0 else float('inf')
 
             oos_degradation_log.append({
                 'window_id': window_id,
@@ -1735,7 +1605,6 @@ def walk_forward_optimization(df_file, timeframe='15min',
                 print(f"\n  窗口胜率: {win_windows}/{total_windows} = "
                       f"{win_windows / total_windows:.1%}")
 
-        # --- OOS退化比诊断 ---
         if oos_degradation_log:
             deg_df = pd.DataFrame(oos_degradation_log)
             print(f"\n  --- OOS退化比诊断 (Train_avg_pnl / OOS_avg_pnl) ---")
@@ -1801,9 +1670,6 @@ def merge_df(main_df_file, sub_df_file, merged_file_path):
 
 
 def analyze_generated_scan_results(scan_dir='backtest_pair'):
-    """
-    扫描读取指定目录下的 param_scan_*.csv 文件，提取核心判断数据并按统一格式打印
-    """
     if not os.path.exists(scan_dir):
         print(f"提示: 目录 '{scan_dir}' 不存在，请先运行参数灵敏度扫描生成数据。")
         return
@@ -1851,15 +1717,13 @@ def analyze_generated_scan_results(scan_dir='backtest_pair'):
         print(f"  真实手续费下盈利的组合数: {profitable_count}")
 
         if profitable_count > 0:
-            max_ret = profitable['real_total_ret'].max()
-            min_avg_pnl = profitable['real_avg_pnl'].min()
-            max_avg_pnl = profitable['real_avg_pnl'].max()
-            min_hold = profitable['avg_hold_hrs'].min()
-            max_hold = profitable['avg_hold_hrs'].max()
-
-            print(f"  盈利组合中最高总收益: {max_ret:.2f}%")
-            print(f"  盈利组合中平均每笔利润范围: {min_avg_pnl:.4f}% ~ {max_avg_pnl:.4f}%")
-            print(f"  盈利组合中平均持仓时间范围: {min_hold:.1f}h ~ {max_hold:.1f}h\n")
+            print(f"  盈利组合中最高总收益: {profitable['real_total_ret'].max():.2f}%")
+            print(f"  盈利组合中平均每笔利润范围: "
+                  f"{profitable['real_avg_pnl'].min():.4f}% ~ "
+                  f"{profitable['real_avg_pnl'].max():.4f}%")
+            print(f"  盈利组合中平均持仓时间范围: "
+                  f"{profitable['avg_hold_hrs'].min():.1f}h ~ "
+                  f"{profitable['avg_hold_hrs'].max():.1f}h\n")
             print(f"  ✅ 存在可盈利参数区间，值得进一步做Walk-Forward验证\n")
         else:
             print(f"\n  ❌ 在当前费率下没有任何参数组合能盈利")
@@ -1878,8 +1742,6 @@ def analyze_generated_scan_results(scan_dir='backtest_pair'):
 # 11. 主入口
 # =============================================================================
 if __name__ == '__main__':
-    # analyze_generated_scan_results()
-
     target_dir = 'kline_data'
     suffix = '1m.csv'
 
@@ -1899,8 +1761,7 @@ if __name__ == '__main__':
             print("=" * 70)
             parameter_sensitivity_scan(df_file, timeframe=tf)
 
-    # # 如果扫描确认有盈利参数，取消下面的注释跑Walk-Forward
-    # final_df_file = 'kline_data/DOGE_ETH_1m.csv'
-    # walk_forward_optimization(final_df_file, timeframe='30min',
-    #                           train_months=6, test_months=1,
-    #                           cooldown_hours=1.0, max_hold_days=4.0)
+    final_df_file = 'kline_data/DOGE_ETH_1m.csv'
+    walk_forward_optimization(final_df_file, timeframe='30min',
+                              train_months=6, test_months=1,
+                              cooldown_hours=1.0, max_hold_days=4.0)
