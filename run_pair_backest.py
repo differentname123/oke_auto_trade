@@ -1383,11 +1383,17 @@ def _eval_group_worker(args):
     Worker 自己算一次 KF 和 Rolling，然后在内部极速跑完 z_entry/z_exit 组合。
     """
     dpd, ve, lb_h, delta, tf_min, cooldown_bars, max_hold_bars, param_combinations = args
+    pid = os.getpid()
+    total_combos = len(param_combinations)
+
+    # 打印任务包领受日志
+    print(f"[Worker {pid}] 📥 收到任务: dpd={dpd}, ve={ve}, lb_h={lb_h} | 共 {total_combos} 个参数组合")
 
     try:
         global _GLOBAL_BASE_DF, _GLOBAL_MIN1_CACHE, _GLOBAL_LOG_MAIN, _GLOBAL_LOG_SUB
 
         # 1. 在 Worker 内部仅执行 1 次 Kalman Filter
+        t0 = time.time()
         kf_state = (0.0, 0.0, 1.0, 0.0, 0.0, 1.0)
         (betas, alphas, kf_spreads, ni_values, trace_P_values,
          _, _, _, _, _, _) = fast_kalman_filter(
@@ -1397,6 +1403,7 @@ def _eval_group_worker(args):
             init_P00=kf_state[2], init_P01=kf_state[3],
             init_P10=kf_state[4], init_P11=kf_state[5]
         )
+        print(f"[Worker {pid}] ⚡ KF滤波完成，耗时: {time.time() - t0:.2f}s")
 
         ni_clean = np.nan_to_num(ni_values, nan=0.0, posinf=0.0, neginf=0.0)
         trP_clean = np.nan_to_num(trace_P_values, nan=0.0, posinf=0.0, neginf=0.0)
@@ -1405,6 +1412,7 @@ def _eval_group_worker(args):
         z_lb = hours_to_bars(lb_h, tf_min)
 
         # 2. 在 Worker 内部仅执行 1 次 Rolling
+        t1 = time.time()
         roll_mean = spread_s.rolling(z_lb, min_periods=z_lb).mean()
         roll_std = spread_s.rolling(z_lb, min_periods=z_lb).std()
         z_score_raw = ((spread_s - roll_mean) / roll_std).values
@@ -1412,13 +1420,19 @@ def _eval_group_worker(args):
 
         z_clean = np.nan_to_num(z_score_raw, nan=0.0, posinf=0.0, neginf=0.0)
         rs_clean = np.nan_to_num(roll_std_raw, nan=0.0, posinf=0.0, neginf=0.0)
+        print(f"[Worker {pid}] 🌊 Rolling统计完成，耗时: {time.time() - t1:.2f}s")
 
         group_results = []
 
         # 3. 极速遍历该类别下的所有参数
-        for (z_entry, z_exit, mh_h) in param_combinations:
+        print(f"[Worker {pid}] 🚀 开始遍历 {total_combos} 个参数组合...")
+
+        for idx, (z_entry, z_exit, mh_h) in enumerate(param_combinations):
+            t_combo_start = time.time()
             min_hold = hours_to_bars(mh_h, tf_min)
 
+            # 监控：组装 DF 耗时
+            t2 = time.time()
             full_df = _assemble_signal_df_fast(
                 _GLOBAL_BASE_DF, _GLOBAL_LOG_MAIN, _GLOBAL_LOG_SUB,
                 betas, alphas, kf_spreads,
@@ -1427,11 +1441,25 @@ def _eval_group_worker(args):
                 z_lb, z_entry, z_exit,
                 min_hold, cooldown_bars, max_hold_bars
             )
+            df_time = time.time() - t2
 
+            # 监控：0手续费回测耗时
+            t3 = time.time()
             trades_0, eq_0, _, _, eff_0 = _backtest_and_pnls(
                 full_df, _GLOBAL_MIN1_CACHE, tf_min, fee=0.0)
+            bt0_time = time.time() - t3
+
+            # 监控：真实手续费回测耗时
+            t4 = time.time()
             trades_r, eq_r, _, _, eff_r = _backtest_and_pnls(
                 full_df, _GLOBAL_MIN1_CACHE, tf_min, fee=SINGLE_LEG_FEE)
+            btr_time = time.time() - t4
+
+            combo_total_time = time.time() - t_combo_start
+
+            # 打印每个参数组合的明细耗时，让你知道大头在哪里
+            print(f"[Worker {pid}]   [{idx + 1}/{total_combos}] z_e={z_entry}, z_x={z_exit} | "
+                  f"总耗时:{combo_total_time:.2f}s (组装DF:{df_time:.2f}s, 测0费:{bt0_time:.2f}s, 测实费:{btr_time:.2f}s)")
 
             if len(eff_0) < 15:
                 continue
@@ -1463,13 +1491,15 @@ def _eval_group_worker(args):
                 'max_hold_hrs': round(stats_0['最长持仓时间'] / 60, 1),
             })
 
+        print(f"[Worker {pid}] ✅ 任务包处理完毕，产出 {len(group_results)} 条有效结果。")
         return group_results
+
     except Exception as e:
+        print(f"[Worker {pid}] ❌ 发生异常: {e}")
         traceback.print_exc()
         return []
 
-
-def parameter_sensitivity_scan(df_file, timeframe='15min', n_workers=15):
+def parameter_sensitivity_scan(df_file, timeframe='15min', n_workers=1):
     import multiprocessing as mp
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
