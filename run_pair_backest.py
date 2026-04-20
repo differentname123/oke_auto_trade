@@ -1,3 +1,5 @@
+import traceback
+
 import pandas as pd
 import numpy as np
 import os
@@ -1463,10 +1465,11 @@ def _eval_group_worker(args):
 
         return group_results
     except Exception as e:
+        traceback.print_exc()
         return []
 
 
-def parameter_sensitivity_scan(df_file, timeframe='15min', n_workers=None):
+def parameter_sensitivity_scan(df_file, timeframe='15min', n_workers=15):
     import multiprocessing as mp
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
@@ -1498,25 +1501,43 @@ def parameter_sensitivity_scan(df_file, timeframe='15min', n_workers=None):
     # 构建轻量级 DataFrame 用于初始化 Worker
     base_df = df[['open_time', 'close_main', 'close_sub']].copy()
 
-    # 任务打包：按 KF 和 Rolling 的核心参数打包
+    # ==========================================
+    # 修改点 1：将 z_entry 提到任务包级别，细化任务粒度
+    # ==========================================
     grouped_tasks = []
     for dpd in grids['delta_per_day']:
         delta = delta_per_day_to_bar(dpd, tf_min)
         for ve in grids['ve']:
             for lb_h in grids['lookback_hours']:
-                # 收集这个组别下所有的快参数
-                fast_params = []
                 for z_entry in grids['z_entry']:
+                    fast_params = []
                     for z_exit in grids['z_exit']:
                         if z_exit >= z_entry: continue
                         for mh_h in grids['min_hold_hours']:
                             fast_params.append((z_entry, z_exit, mh_h))
 
-                grouped_tasks.append((
-                    dpd, ve, lb_h, delta, tf_min, cooldown_bars, max_hold_bars, fast_params
-                ))
+                    if fast_params:
+                        grouped_tasks.append((
+                            dpd, ve, lb_h, delta, tf_min, cooldown_bars, max_hold_bars, fast_params
+                        ))
 
     print(f"将组合划分为 {len(grouped_tasks)} 个任务包分发给 {n_workers} 个 Worker 进程...")
+
+    # ==========================================
+    # 修改点 2：主进程预热 Numba JIT 编译器，防止多进程缓存锁死
+    # ==========================================
+    print("正在预热 Numba JIT 编译器，防止多进程缓存冲突锁死...")
+    _dummy_f = np.zeros(5, dtype=np.float64)
+    _dummy_i = np.zeros(5, dtype=np.int64)
+    try:
+        fast_kalman_filter(_dummy_f, _dummy_f, 0.001, 0.001)
+        fast_generate_signals(_dummy_f, _dummy_f, _dummy_f, _dummy_f, _dummy_f, _dummy_f, _dummy_f, _dummy_f, _dummy_f,
+                              2, 2.0, 0.5, 1, 1, 1, 1.0, 0.001, 3.0, 5.0, 3, 3.0)
+        _scan_1min_for_equity(_dummy_f, _dummy_f, _dummy_f, _dummy_f, _dummy_i, 0, 2, 1.0, 1.0, 1.0, 1, 0.0, 0.0, 0.0,
+                              1.0, 0.0, 0.001)
+    except Exception:
+        pass
+    print("预热完成，开始并行计算！")
 
     results = []
     start_time = time.time()
@@ -1588,7 +1609,6 @@ def parameter_sensitivity_scan(df_file, timeframe='15min', n_workers=None):
     result_df.to_csv(out_path, index=False)
     print(f"\n完整结果已保存到: {out_path}")
     return result_df
-
 
 # =============================================================================
 # 9. Walk-Forward（含子样本稳定性评分 + 多样化集成报告）
