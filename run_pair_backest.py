@@ -537,17 +537,110 @@ def _split_train_monthly_returns(segment_start_time, segment_end_time,
     return monthly_returns
 
 
-# =============================================================================
-# 6. 逐 bar / 逐1min 权益曲线 + 交易提取
-# =============================================================================
-# =============================================================================
-# 6. 逐 bar / 逐1min 权益曲线 + 交易提取 (已进行深度性能优化)
-# =============================================================================
+@nb.njit(cache=True)
+def _scan_1min_for_equity(
+    min1_cm, min1_cs, min1_lm, min1_ls, min1_times_i64,
+    scan_start, scan_end,
+    entry_main, entry_sub, entry_beta_val, entry_dir,
+    entry_frozen_alpha, entry_spread_val, entry_std_val,
+    sl_mult, cum_realized, fee
+):
+    """
+    扫描 [scan_start, scan_end) 范围内的1min K线:
+    - 检测止损触发
+    - 逐根计算权益曲线点
+
+    返回:
+        stop_found     : bool   是否触发了止损
+        stop_j         : int64  止损触发的1min索引 (-1表示无)
+        eq_vals        : float64[:]  权益值数组
+        eq_times_i64   : int64[:]    权益时间戳数组(ns)
+        count          : int64  有效权益点数量
+        stop_close_m   : float64  止损时main价格
+        stop_close_s   : float64  止损时sub价格
+        new_cum_realized : float64  止损后的累计已实现收益
+    """
+    n_pts = scan_end - scan_start
+    if n_pts <= 0:
+        empty_f = np.empty(0, dtype=np.float64)
+        empty_i = np.empty(0, dtype=np.int64)
+        return (False, np.int64(-1), empty_f, empty_i, np.int64(0),
+                0.0, 0.0, cum_realized)
+
+    eq_vals = np.empty(n_pts, dtype=np.float64)
+    eq_times_i64 = np.empty(n_pts, dtype=np.int64)
+    count = np.int64(0)
+
+    total_exp = 1.0 + abs(entry_beta_val)
+    stop_found = False
+    stop_j = np.int64(-1)
+    stop_close_m = 0.0
+    stop_close_s = 0.0
+    new_cum_realized = cum_realized
+
+    check_stop = (entry_std_val > 0.0 and sl_mult > 0.0)
+
+    for j in range(scan_start, scan_end):
+        cur_m = min1_cm[j]
+        cur_s = min1_cs[j]
+        cur_lm = min1_lm[j]
+        cur_ls = min1_ls[j]
+        cur_t = min1_times_i64[j]
+
+        # ---------- 止损检测 ----------
+        should_stop = False
+        if check_stop:
+            frozen_spread = cur_lm - entry_frozen_alpha - entry_beta_val * cur_ls
+            if entry_dir == 1:
+                if (frozen_spread - entry_spread_val) > sl_mult * entry_std_val:
+                    should_stop = True
+            elif entry_dir == -1:
+                if (entry_spread_val - frozen_spread) > sl_mult * entry_std_val:
+                    should_stop = True
+
+        if should_stop:
+            # 计算平仓已实现盈亏 (与 _calc_norm 完全一致)
+            br = (cur_m - entry_main) / entry_main if entry_main != 0.0 else 0.0
+            er = (cur_s - entry_sub) / entry_sub if entry_sub != 0.0 else 0.0
+            if entry_dir == -1:
+                gross = br - entry_beta_val * er
+            else:
+                gross = entry_beta_val * er - br
+            norm = gross / total_exp if total_exp > 0.0 else 0.0
+            realized_add = norm - fee
+            new_cum_realized = cum_realized + realized_add
+
+            eq_times_i64[count] = cur_t
+            eq_vals[count] = new_cum_realized * 100.0
+            count += 1
+
+            stop_found = True
+            stop_j = np.int64(j)
+            stop_close_m = cur_m
+            stop_close_s = cur_s
+            break
+
+        # ---------- 未实现盈亏权益 ----------
+        br = (cur_m - entry_main) / entry_main if entry_main != 0.0 else 0.0
+        er = (cur_s - entry_sub) / entry_sub if entry_sub != 0.0 else 0.0
+        if entry_dir == -1:
+            gross = br - entry_beta_val * er
+        else:
+            gross = entry_beta_val * er - br
+        norm = gross / total_exp if total_exp > 0.0 else 0.0
+
+        eq_times_i64[count] = cur_t
+        eq_vals[count] = (cum_realized + norm) * 100.0
+        count += 1
+
+    return (stop_found, stop_j, eq_vals, eq_times_i64, count,
+            stop_close_m, stop_close_s, new_cum_realized)
+
+
 def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
                               exec_state=None, min1_cache=None, tf_minutes=None):
     fee = SINGLE_LEG_FEE if fee_override is None else fee_override
 
-    # 为避免直接修改输入数据，仅重置索引
     df = full_df.reset_index(drop=True)
     if 'open_time' not in df.columns:
         if 'index' in df.columns:
@@ -568,10 +661,6 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
         )
         return pd.DataFrame(), np.array([]), np.array([], dtype='datetime64[ns]'), final_exec_state
 
-    # -------------------------------------------------------------------------
-    # [优化点 1]：进入大循环前，将所有后续用到的列直接转换为底层的 Numpy Array，
-    # 彻底杜绝在内层循环调用 pd.Series 或者 df['xxx'] 的高昂开销。
-    # -------------------------------------------------------------------------
     signals = df['signal'].to_numpy(dtype=int)
     times = pd.to_datetime(df['open_time']).to_numpy(dtype='datetime64[ns]')
     close_main = df['close_main'].to_numpy(dtype=float)
@@ -588,7 +677,6 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
     alphas_arr = _col('alpha', lambda: np.zeros(n))
     roll_std_arr = _col('roll_std', lambda: np.zeros(n))
 
-    # 特别处理有后备选项的列
     signal_fb = _col('signal_frozen_beta', lambda: betas_arr.copy())
     signal_fa = _col('signal_frozen_alpha', lambda: alphas_arr.copy())
     signal_es = _col('signal_entry_spread', 0.0)
@@ -651,7 +739,36 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
     bar_delta_ns = _infer_bar_delta_ns(times, tf_minutes=tf_minutes)
     segment_end_time = times[-1] + bar_delta_ns
 
-    # 初始化状态变量
+    # =====================================================================
+    # [优化] 预转换时间为int64，预计算bar到1min的索引映射
+    # =====================================================================
+    times_i64 = times.view(np.int64)
+    # [修复] 更优雅安全的 Numpy 时间增量转 int64 写法
+    bar_delta_ns_i64 = np.int64(bar_delta_ns.astype('timedelta64[ns]').astype(np.int64))
+
+    if use_1m_path:
+        min1_times_i64 = min1_times.view(np.int64)
+        _bar_l_arr = np.searchsorted(min1_times_i64, times_i64, side='left')
+        _end_times_i64 = np.empty(n, dtype=np.int64)
+        _end_times_i64[:-1] = times_i64[1:]
+        _end_times_i64[-1] = times_i64[-1] + bar_delta_ns_i64
+        _bar_r_arr = np.searchsorted(min1_times_i64, _end_times_i64, side='left')
+
+    # =====================================================================
+    # [修复/优化] 预分配权益曲线缓冲区，带安全动态扩容机制防 OOM
+    # =====================================================================
+    _max_eq = (len(min1_times) + n + 1000) if use_1m_path else (n + 1000)
+    _eq_vals_buf = np.empty(_max_eq, dtype=np.float64)
+    _eq_times_buf = np.empty(_max_eq, dtype=np.int64)
+    _eq_pos = 0
+
+    def _ensure_capacity(add_size):
+        nonlocal _max_eq, _eq_vals_buf, _eq_times_buf
+        if _eq_pos + add_size > _max_eq:
+            _max_eq = max(_max_eq * 2, _eq_pos + add_size + 10000)
+            _eq_vals_buf = np.resize(_eq_vals_buf, _max_eq)
+            _eq_times_buf = np.resize(_eq_times_buf, _max_eq)
+
     entry_main = es['entry_main']
     entry_sub = es['entry_sub']
     entry_dir = es['entry_dir']
@@ -688,18 +805,33 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
         seg_entry_alpha_meta = np.nan
 
     trades = []
-    equity_values = []
-    equity_times = []
-
     last_mark_main = close_main[0]
     last_mark_sub = close_sub[0]
 
-    def _append_equity_point(point_time, point_value):
-        if len(equity_times) > 0 and equity_times[-1] == point_time:
-            equity_values[-1] = point_value
+    def _append_eq_point(point_time_i64, point_value):
+        nonlocal _eq_pos
+        if _eq_pos > 0 and _eq_times_buf[_eq_pos - 1] == point_time_i64:
+            _eq_vals_buf[_eq_pos - 1] = point_value
         else:
-            equity_times.append(point_time)
-            equity_values.append(point_value)
+            _ensure_capacity(1)
+            _eq_times_buf[_eq_pos] = point_time_i64
+            _eq_vals_buf[_eq_pos] = point_value
+            _eq_pos += 1
+
+    def _batch_append_eq(src_times_i64, src_vals, count):
+        nonlocal _eq_pos
+        if count <= 0:
+            return
+        start = 0
+        if _eq_pos > 0 and _eq_times_buf[_eq_pos - 1] == src_times_i64[0]:
+            _eq_vals_buf[_eq_pos - 1] = src_vals[0]
+            start = 1
+        nc = count - start
+        if nc > 0:
+            _ensure_capacity(nc)
+            _eq_times_buf[_eq_pos:_eq_pos + nc] = src_times_i64[start:count]
+            _eq_vals_buf[_eq_pos:_eq_pos + nc] = src_vals[start:count]
+            _eq_pos += nc
 
     def _calc_gross(em, ess, cm, cs, ebeta, edir):
         br = (cm - em) / em if em != 0 else 0.0
@@ -765,25 +897,22 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
             exit_alpha = alphas_arr[bar_idx] if bar_idx < n else np.nan
             exit_beta = betas_arr[bar_idx] if bar_idx < n else entry_beta_val
 
-        # [优化点 2]：替换掉极度耗时的 pd.Timestamp 转换，使用原生的底层 64 位整数运算。
         duration_mins = 0.0
         if not np.isnat(np.datetime64(seg_open_time)):
             diff_ns = np.int64(exec_time_val) - np.int64(seg_open_time)
-            # 或者 diff_ns = exec_time_val.astype('int64') - seg_open_time.astype('int64')
             duration_mins = diff_ns / 60_000_000_000.0
 
-        # [优化点 3]：延后字符串计算与组装，在此处仅保存原始数值（字典分配极其廉价）
         trades.append({
             'open_time': seg_open_time,
             'actual_open_time': actual_open_time,
             'close_time': exec_time_val,
             'duration_mins': duration_mins,
-            'entry_dir': entry_dir,  # 后期格式化
-            'entry_beta': entry_beta_val,  # 后期格式化
-            'raw_open_main': seg_entry_main,  # 后期格式化
-            'raw_open_sub': seg_entry_sub,  # 后期格式化
-            'raw_close_main': exec_m,  # 后期格式化
-            'raw_close_sub': exec_s,  # 后期格式化
+            'entry_dir': entry_dir,
+            'entry_beta': entry_beta_val,
+            'raw_open_main': seg_entry_main,
+            'raw_open_sub': seg_entry_sub,
+            'raw_close_main': exec_m,
+            'raw_close_sub': exec_s,
             'net_pnl': round(seg_net * 100, 4),
             'open_main': seg_entry_main, 'close_main': exec_m,
             'open_sub': seg_entry_sub, 'close_sub': exec_s,
@@ -894,7 +1023,13 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
             return 'hard_stop'
         return 'signal'
 
-    def _check_stop_and_maybe_close(cur_time, cur_m, cur_s, cur_lm, cur_ls, bar_idx):
+    def _get_exec_point(bar_idx):
+        if use_1m_exec:
+            return _lookup_1min_point(min1_cache, times[bar_idx])
+        return (times[bar_idx], close_main[bar_idx], close_sub[bar_idx],
+                log_main_arr[bar_idx], log_sub_arr[bar_idx])
+
+    def _check_stop_single(cur_time, cur_m, cur_s, cur_lm, cur_ls, bar_idx):
         if (not in_trade) or entry_dir == 0:
             return False
         if entry_std_val <= 0.0 or SL_MULT <= 0.0:
@@ -915,22 +1050,13 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
             return True
         return False
 
-    def _get_exec_point(bar_idx):
-        if use_1m_exec:
-            return _lookup_1min_point(min1_cache, times[bar_idx])
-        return (times[bar_idx], close_main[bar_idx], close_sub[bar_idx],
-                log_main_arr[bar_idx], log_sub_arr[bar_idx])
-
     if use_1m_path:
         for i in range(n):
             sig = int(signals[i])
             prev_sig = int(signals[i - 1]) if i > 0 else int(prev_sig_seed)
 
-            start_ns = times[i]
-            end_ns = times[i + 1] if i < n - 1 else (times[i] + bar_delta_ns)
-
-            l = np.searchsorted(min1_times, start_ns, side='left')
-            r = np.searchsorted(min1_times, end_ns, side='left')
+            l = int(_bar_l_arr[i])
+            r = int(_bar_r_arr[i])
 
             if r <= l:
                 exec_time_val, exec_m, exec_s, _, _ = _get_exec_point(i)
@@ -951,9 +1077,11 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
                 if in_trade:
                     unrealized = _calc_norm(entry_main, entry_sub, close_main[i], close_sub[i],
                                             entry_beta_val, entry_dir)
-                    _append_equity_point(times[i] + bar_delta_ns, (cum_realized + unrealized) * 100.0)
+                    _append_eq_point(times_i64[i] + bar_delta_ns_i64,
+                                     (cum_realized + unrealized) * 100.0)
                 else:
-                    _append_equity_point(times[i] + bar_delta_ns, cum_realized * 100.0)
+                    _append_eq_point(times_i64[i] + bar_delta_ns_i64,
+                                     cum_realized * 100.0)
 
                 last_mark_main = close_main[i]
                 last_mark_sub = close_sub[i]
@@ -969,47 +1097,49 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
                 elif in_trade and sig == 0 and prev_sig != 0:
                     _cr = _determine_close_reason(i)
                     _close_position(start_t, start_m, start_s, i, close_reason=_cr)
-                    _append_equity_point(start_t, cum_realized * 100.0)
+                    _append_eq_point(min1_times_i64[l], cum_realized * 100.0)
                     last_mark_main = min1_cm[r - 1]
                     last_mark_sub = min1_cs[r - 1]
                     continue
 
                 if in_trade:
-                    for j in range(l, r):
-                        cur_t = min1_times[j]
-                        cur_m = min1_cm[j]
-                        cur_s = min1_cs[j]
-                        cur_lm = min1_lm[j]
-                        cur_ls = min1_ls[j]
+                    (stop_found, stop_j, eq_v, eq_t, cnt,
+                     stop_m, stop_s, _new_cum) = _scan_1min_for_equity(
+                        min1_cm, min1_cs, min1_lm, min1_ls, min1_times_i64,
+                        l, r,
+                        entry_main, entry_sub, entry_beta_val, entry_dir,
+                        entry_frozen_alpha, entry_spread_val, entry_std_val,
+                        SL_MULT, cum_realized, fee
+                    )
+                    _batch_append_eq(eq_t, eq_v, cnt)
 
-                        if _check_stop_and_maybe_close(cur_t, cur_m, cur_s, cur_lm, cur_ls, i):
-                            _append_equity_point(cur_t, cum_realized * 100.0)
-                            break
-                        else:
-                            unrealized = _calc_norm(entry_main, entry_sub, cur_m, cur_s,
-                                                    entry_beta_val, entry_dir)
-                            _append_equity_point(cur_t, (cum_realized + unrealized) * 100.0)
+                    if stop_found:
+                        stop_time_dt = min1_times[stop_j]
+                        _close_position(stop_time_dt, stop_m, stop_s, i,
+                                        close_reason='hard_stop_1m')
+                        _rebuild_future_signals_after_intrabar_stop(i)
 
             else:
                 event_idx = r - 1
                 stopped = False
 
                 if in_trade:
-                    for j in range(l, event_idx):
-                        cur_t = min1_times[j]
-                        cur_m = min1_cm[j]
-                        cur_s = min1_cs[j]
-                        cur_lm = min1_lm[j]
-                        cur_ls = min1_ls[j]
+                    (stop_found, stop_j, eq_v, eq_t, cnt,
+                     stop_m, stop_s, _new_cum) = _scan_1min_for_equity(
+                        min1_cm, min1_cs, min1_lm, min1_ls, min1_times_i64,
+                        l, event_idx,
+                        entry_main, entry_sub, entry_beta_val, entry_dir,
+                        entry_frozen_alpha, entry_spread_val, entry_std_val,
+                        SL_MULT, cum_realized, fee
+                    )
+                    _batch_append_eq(eq_t, eq_v, cnt)
 
-                        if _check_stop_and_maybe_close(cur_t, cur_m, cur_s, cur_lm, cur_ls, i):
-                            _append_equity_point(cur_t, cum_realized * 100.0)
-                            stopped = True
-                            break
-                        else:
-                            unrealized = _calc_norm(entry_main, entry_sub, cur_m, cur_s,
-                                                    entry_beta_val, entry_dir)
-                            _append_equity_point(cur_t, (cum_realized + unrealized) * 100.0)
+                    if stop_found:
+                        stop_time_dt = min1_times[stop_j]
+                        _close_position(stop_time_dt, stop_m, stop_s, i,
+                                        close_reason='hard_stop_1m')
+                        _rebuild_future_signals_after_intrabar_stop(i)
+                        stopped = True
 
                 if not stopped:
                     cur_t = min1_times[event_idx]
@@ -1021,23 +1151,25 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
                     if in_trade and sig == 0 and prev_sig != 0:
                         _cr = _determine_close_reason(i)
                         _close_position(cur_t, cur_m, cur_s, i, close_reason=_cr)
-                        _append_equity_point(cur_t, cum_realized * 100.0)
+                        _append_eq_point(min1_times_i64[event_idx], cum_realized * 100.0)
                     elif sig != 0 and prev_sig == 0 and not in_trade:
                         _open_position(sig, cur_t, cur_m, cur_s, i)
-                        _append_equity_point(cur_t, cum_realized * 100.0)
+                        _append_eq_point(min1_times_i64[event_idx], cum_realized * 100.0)
                     elif in_trade:
-                        if _check_stop_and_maybe_close(cur_t, cur_m, cur_s, cur_lm, cur_ls, i):
-                            _append_equity_point(cur_t, cum_realized * 100.0)
+                        if _check_stop_single(cur_t, cur_m, cur_s, cur_lm, cur_ls, i):
+                            _append_eq_point(min1_times_i64[event_idx], cum_realized * 100.0)
                         else:
                             unrealized = _calc_norm(entry_main, entry_sub, cur_m, cur_s,
                                                     entry_beta_val, entry_dir)
-                            _append_equity_point(cur_t, (cum_realized + unrealized) * 100.0)
+                            _append_eq_point(min1_times_i64[event_idx],
+                                             (cum_realized + unrealized) * 100.0)
 
             last_mark_main = min1_cm[r - 1]
             last_mark_sub = min1_cs[r - 1]
 
-        if len(equity_values) == 0:
-            _append_equity_point(segment_end_time, cum_realized * 100.0)
+        if _eq_pos == 0:
+            seg_end_i64 = times_i64[-1] + bar_delta_ns_i64
+            _append_eq_point(seg_end_i64, cum_realized * 100.0)
 
     else:
         for i in range(n):
@@ -1059,12 +1191,12 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
             else:
                 eq_val = cum_realized * 100.0
 
-            _append_equity_point(times[i] + bar_delta_ns, eq_val)
+            _append_eq_point(times_i64[i] + bar_delta_ns_i64, eq_val)
             last_mark_main = close_main[i]
             last_mark_sub = close_sub[i]
 
-    equity = np.asarray(equity_values, dtype=float)
-    equity_times_arr = np.asarray(equity_times, dtype='datetime64[ns]')
+    equity = _eq_vals_buf[:_eq_pos].copy()
+    equity_times_arr = _eq_times_buf[:_eq_pos].copy().view('datetime64[ns]')
 
     last_signal_val = float(signals[-1]) if n > 0 else float(prev_sig_seed)
     final_exec_state = (
@@ -1074,13 +1206,8 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
         last_signal_val
     )
 
-    # -------------------------------------------------------------------------
-    # [优化点 4]：在 Python 快速循环结束之后，使用高速列表推导式还原字符串格式，
-    # 彻底省去在循环内部反复分配字符串与 f-string 产生的巨量卡顿，且保证输出 100% 一致。
-    # -------------------------------------------------------------------------
     if trades:
         trade_df = pd.DataFrame(trades)
-
         trade_df['direction'] = [
             f'做多价差 (Long BTC / Short {b:.3f} ETH)' if d == -1 else f'做空价差 (Short BTC / Long {b:.3f} ETH)'
             for d, b in zip(trade_df['entry_dir'], trade_df['entry_beta'])
@@ -1093,8 +1220,6 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
             f"{((c - o) / o * 100):.2f}" if o else "0"
             for o, c in zip(trade_df['raw_open_sub'], trade_df['raw_close_sub'])
         ]
-
-        # 清除临时字段
         trade_df.drop(columns=[
             'entry_dir', 'raw_open_main', 'raw_open_sub', 'raw_close_main', 'raw_close_sub'
         ], inplace=True)
@@ -1102,6 +1227,8 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
         trade_df = pd.DataFrame()
 
     return trade_df, equity, equity_times_arr, final_exec_state
+
+
 
 
 # =============================================================================
@@ -1230,7 +1357,122 @@ def _assemble_signal_df_fast(base_df, log_main, log_sub, betas, alphas, kf_sprea
     return df
 
 
-def parameter_sensitivity_scan(df_file, timeframe='15min'):
+# =============================================================================
+# 多进程全局变量（仅 Worker 进程使用，避免 IPC 传输大数组导致 OOM）
+# =============================================================================
+_GLOBAL_BASE_DF = None
+_GLOBAL_MIN1_CACHE = None
+_GLOBAL_LOG_MAIN = None
+_GLOBAL_LOG_SUB = None
+
+
+def _init_worker(base_df, min1_cache, log_main_arr, log_sub_arr):
+    """初始化 Worker 进程的全局共享只读内存"""
+    global _GLOBAL_BASE_DF, _GLOBAL_MIN1_CACHE, _GLOBAL_LOG_MAIN, _GLOBAL_LOG_SUB
+    _GLOBAL_BASE_DF = base_df
+    _GLOBAL_MIN1_CACHE = min1_cache
+    _GLOBAL_LOG_MAIN = log_main_arr
+    _GLOBAL_LOG_SUB = log_sub_arr
+
+
+def _eval_group_worker(args):
+    """
+    按 (dpd, ve, lb_h) 聚类执行。
+    Worker 自己算一次 KF 和 Rolling，然后在内部极速跑完 z_entry/z_exit 组合。
+    """
+    dpd, ve, lb_h, delta, tf_min, cooldown_bars, max_hold_bars, param_combinations = args
+
+    try:
+        global _GLOBAL_BASE_DF, _GLOBAL_MIN1_CACHE, _GLOBAL_LOG_MAIN, _GLOBAL_LOG_SUB
+
+        # 1. 在 Worker 内部仅执行 1 次 Kalman Filter
+        kf_state = (0.0, 0.0, 1.0, 0.0, 0.0, 1.0)
+        (betas, alphas, kf_spreads, ni_values, trace_P_values,
+         _, _, _, _, _, _) = fast_kalman_filter(
+            _GLOBAL_LOG_SUB, _GLOBAL_LOG_MAIN,
+            delta=delta, ve=ve,
+            init_alpha=kf_state[0], init_beta=kf_state[1],
+            init_P00=kf_state[2], init_P01=kf_state[3],
+            init_P10=kf_state[4], init_P11=kf_state[5]
+        )
+
+        ni_clean = np.nan_to_num(ni_values, nan=0.0, posinf=0.0, neginf=0.0)
+        trP_clean = np.nan_to_num(trace_P_values, nan=0.0, posinf=0.0, neginf=0.0)
+        spread_s = pd.Series(kf_spreads)
+
+        z_lb = hours_to_bars(lb_h, tf_min)
+
+        # 2. 在 Worker 内部仅执行 1 次 Rolling
+        roll_mean = spread_s.rolling(z_lb, min_periods=z_lb).mean()
+        roll_std = spread_s.rolling(z_lb, min_periods=z_lb).std()
+        z_score_raw = ((spread_s - roll_mean) / roll_std).values
+        roll_std_raw = roll_std.values
+
+        z_clean = np.nan_to_num(z_score_raw, nan=0.0, posinf=0.0, neginf=0.0)
+        rs_clean = np.nan_to_num(roll_std_raw, nan=0.0, posinf=0.0, neginf=0.0)
+
+        group_results = []
+
+        # 3. 极速遍历该类别下的所有参数
+        for (z_entry, z_exit, mh_h) in param_combinations:
+            min_hold = hours_to_bars(mh_h, tf_min)
+
+            full_df = _assemble_signal_df_fast(
+                _GLOBAL_BASE_DF, _GLOBAL_LOG_MAIN, _GLOBAL_LOG_SUB,
+                betas, alphas, kf_spreads,
+                ni_values, trace_P_values, ni_clean, trP_clean,
+                z_clean, rs_clean, z_score_raw, roll_std_raw,
+                z_lb, z_entry, z_exit,
+                min_hold, cooldown_bars, max_hold_bars
+            )
+
+            trades_0, eq_0, _, _, eff_0 = _backtest_and_pnls(
+                full_df, _GLOBAL_MIN1_CACHE, tf_min, fee=0.0)
+            trades_r, eq_r, _, _, eff_r = _backtest_and_pnls(
+                full_df, _GLOBAL_MIN1_CACHE, tf_min, fee=SINGLE_LEG_FEE)
+
+            if len(eff_0) < 15:
+                continue
+
+            stats_0 = print_backtest_stats(trades_0, eq_0, effective_pnls=eff_0)
+            stats_r = print_backtest_stats(trades_r, eq_r, effective_pnls=eff_r)
+
+            fee_per_trade = stats_0['avg_profit_per_trade'] - stats_r['avg_profit_per_trade']
+
+            group_results.append({
+                'z_entry': z_entry, 'z_exit': z_exit,
+                'lookback_hours': lb_h, 'z_lookback_bars': z_lb,
+                'delta_per_day': dpd, 'delta_per_bar': delta,
+                've': ve,
+                'min_hold_hours': mh_h, 'min_hold_bars': min_hold,
+                'trades': stats_0['total_trades'],
+                'zero_total_ret': round(stats_0['Total Return'], 2),
+                'zero_avg_pnl': round(stats_0['avg_profit_per_trade'], 4),
+                'zero_win_rate': round(stats_0['Win Rate'], 4),
+                'zero_pf': round(stats_0['Profit Factor'], 3),
+                'zero_max_dd': round(stats_0['Max Drawdown'], 2),
+                'real_total_ret': round(stats_r['Total Return'], 2),
+                'real_avg_pnl': round(stats_r['avg_profit_per_trade'], 4),
+                'real_win_rate': round(stats_r['Win Rate'], 4),
+                'real_pf': round(stats_r['Profit Factor'], 3),
+                'real_max_dd': round(stats_r['Max Drawdown'], 2),
+                'fee_per_trade': round(fee_per_trade, 4),
+                'avg_hold_hrs': round(stats_0['avg_duration'] / 60, 1),
+                'max_hold_hrs': round(stats_0['最长持仓时间'] / 60, 1),
+            })
+
+        return group_results
+    except Exception as e:
+        return []
+
+
+def parameter_sensitivity_scan(df_file, timeframe='15min', n_workers=None):
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    if n_workers is None:
+        n_workers = max(1, mp.cpu_count() - 1)
+
     key_word = os.path.basename(df_file).replace('.csv', '')
 
     original_df = pd.read_csv(df_file)
@@ -1247,120 +1489,57 @@ def parameter_sensitivity_scan(df_file, timeframe='15min'):
     min1_cache = _build_1min_cache(original_df) if (USE_NEXT_BAR_EXEC or USE_1MIN_PATH) else None
 
     grids = _get_param_grids()
-    cooldown_hours = 1.0
-    max_hold_days = 4.0
-    cooldown_bars = hours_to_bars(cooldown_hours, tf_min)
-    max_hold_bars = days_to_bars(max_hold_days, tf_min)
+    cooldown_bars = hours_to_bars(1.0, tf_min)
+    max_hold_bars = days_to_bars(4.0, tf_min)
 
-    total_combos = (len(grids['z_entry']) * len(grids['z_exit']) * len(grids['lookback_hours'])
-                    * len(grids['delta_per_day']) * len(grids['ve']) * len(grids['min_hold_hours']))
-    print(f"总参数组合: {total_combos} | cooldown={cooldown_bars}bars, max_hold={max_hold_bars}bars")
-
-    results = []
-    count = 0
-    start_time = time.time()
-
-    # --- 提速优化：提前将需要反复访问的数据转为 NumPy 数组 ---
     log_main_arr = np.log(df['close_main'].values.astype(float))
     log_sub_arr = np.log(df['close_sub'].values.astype(float))
+
+    # 构建轻量级 DataFrame 用于初始化 Worker
     base_df = df[['open_time', 'close_main', 'close_sub']].copy()
 
-    # --- 提速优化：重排循环依赖 ---
-    # KF 只和 delta, ve 有关，放最外层
+    # 任务打包：按 KF 和 Rolling 的核心参数打包
+    grouped_tasks = []
     for dpd in grids['delta_per_day']:
         delta = delta_per_day_to_bar(dpd, tf_min)
         for ve in grids['ve']:
-            # 【核心提速】：在这两层循环内，KF 只执行一次
-            kf_state = (0.0, 0.0, 1.0, 0.0, 0.0, 1.0)
-            (betas, alphas, kf_spreads, ni_values, trace_P_values,
-             _, _, _, _, _, _) = fast_kalman_filter(
-                log_sub_arr, log_main_arr,
-                delta=delta, ve=ve,
-                init_alpha=kf_state[0], init_beta=kf_state[1],
-                init_P00=kf_state[2], init_P01=kf_state[3],
-                init_P10=kf_state[4], init_P11=kf_state[5]
-            )
-
-            ni_clean = np.nan_to_num(ni_values, nan=0.0, posinf=0.0, neginf=0.0)
-            trP_clean = np.nan_to_num(trace_P_values, nan=0.0, posinf=0.0, neginf=0.0)
-            spread_s = pd.Series(kf_spreads)
-
-            # Rolling stats 只和 spread 以及 lookback 有关，放中层
             for lb_h in grids['lookback_hours']:
-                z_lb = hours_to_bars(lb_h, tf_min)
-
-                # 【核心提速】：Pandas Rolling 此时也只执行一次
-                roll_mean = spread_s.rolling(z_lb, min_periods=z_lb).mean()
-                roll_std = spread_s.rolling(z_lb, min_periods=z_lb).std()
-                z_score_raw = ((spread_s - roll_mean) / roll_std).values
-                roll_std_raw = roll_std.values
-
-                z_clean = np.nan_to_num(z_score_raw, nan=0.0, posinf=0.0, neginf=0.0)
-                rs_clean = np.nan_to_num(roll_std_raw, nan=0.0, posinf=0.0, neginf=0.0)
-
-                # 最内层循环只跑信号生成状态机和撮合
+                # 收集这个组别下所有的快参数
+                fast_params = []
                 for z_entry in grids['z_entry']:
                     for z_exit in grids['z_exit']:
-                        if z_exit >= z_entry:
-                            continue
+                        if z_exit >= z_entry: continue
                         for mh_h in grids['min_hold_hours']:
-                            min_hold = hours_to_bars(mh_h, tf_min)
-                            count += 1
-                            try:
-                                # 使用极速装配函数替代原来的 generate_pair_trading_signals
-                                full_df = _assemble_signal_df_fast(
-                                    base_df, log_main_arr, log_sub_arr,
-                                    betas, alphas, kf_spreads,
-                                    ni_values, trace_P_values, ni_clean, trP_clean,
-                                    z_clean, rs_clean, z_score_raw, roll_std_raw,
-                                    z_lb, z_entry, z_exit,
-                                    min_hold, cooldown_bars, max_hold_bars
-                                )
+                            fast_params.append((z_entry, z_exit, mh_h))
 
-                                trades_0, eq_0, _, st_0, eff_0 = _backtest_and_pnls(
-                                    full_df, min1_cache, tf_min, fee=0.0)
-                                trades_r, eq_r, _, st_r, eff_r = _backtest_and_pnls(
-                                    full_df, min1_cache, tf_min, fee=SINGLE_LEG_FEE)
+                grouped_tasks.append((
+                    dpd, ve, lb_h, delta, tf_min, cooldown_bars, max_hold_bars, fast_params
+                ))
 
-                                if len(eff_0) < 15:
-                                    continue
+    print(f"将组合划分为 {len(grouped_tasks)} 个任务包分发给 {n_workers} 个 Worker 进程...")
 
-                                stats_0 = print_backtest_stats(trades_0, eq_0, effective_pnls=eff_0)
-                                stats_r = print_backtest_stats(trades_r, eq_r, effective_pnls=eff_r)
+    results = []
+    start_time = time.time()
 
-                                fee_per_trade = stats_0['avg_profit_per_trade'] - stats_r['avg_profit_per_trade']
+    # 使用 initializer 优雅地将巨型只读数据仅在进程创建时传输 1 次
+    with ProcessPoolExecutor(
+            max_workers=n_workers,
+            initializer=_init_worker,
+            initargs=(base_df, min1_cache, log_main_arr, log_sub_arr)
+    ) as executor:
+        futures = {executor.submit(_eval_group_worker, task): task for task in grouped_tasks}
 
-                                results.append({
-                                    'z_entry': z_entry, 'z_exit': z_exit,
-                                    'lookback_hours': lb_h, 'z_lookback_bars': z_lb,
-                                    'delta_per_day': dpd, 'delta_per_bar': delta,
-                                    've': ve,
-                                    'min_hold_hours': mh_h, 'min_hold_bars': min_hold,
-                                    'trades': stats_0['total_trades'],
-                                    'zero_total_ret': round(stats_0['Total Return'], 2),
-                                    'zero_avg_pnl': round(stats_0['avg_profit_per_trade'], 4),
-                                    'zero_win_rate': round(stats_0['Win Rate'], 4),
-                                    'zero_pf': round(stats_0['Profit Factor'], 3),
-                                    'zero_max_dd': round(stats_0['Max Drawdown'], 2),
-                                    'real_total_ret': round(stats_r['Total Return'], 2),
-                                    'real_avg_pnl': round(stats_r['avg_profit_per_trade'], 4),
-                                    'real_win_rate': round(stats_r['Win Rate'], 4),
-                                    'real_pf': round(stats_r['Profit Factor'], 3),
-                                    'real_max_dd': round(stats_r['Max Drawdown'], 2),
-                                    'fee_per_trade': round(fee_per_trade, 4),
-                                    'avg_hold_hrs': round(stats_0['avg_duration'] / 60, 1),
-                                    'max_hold_hrs': round(stats_0['最长持仓时间'] / 60, 1),
-                                })
-                            except Exception:
-                                continue
+        for future in as_completed(futures):
+            res_list = future.result()
+            if res_list:
+                results.extend(res_list)
 
-                            if count % 100 == 0:
-                                elapsed = time.time() - start_time
-                                print(f"  进度: {count}/{total_combos} | "
-                                      f"有效: {len(results)} | 耗时: {elapsed:.1f}s")
+            # 打印进度提示
+            elapsed = time.time() - start_time
+            print(f"  已扫描完成有效策略数: {len(results)} | 耗时: {elapsed:.1f}s", end='\r')
 
     elapsed = time.time() - start_time
-    print(f"\n扫描完成: {count} 组合, {len(results)} 有效, 耗时 {elapsed:.1f}s")
+    print(f"\n扫描完成: 共获取 {len(results)} 条有效结果, 总耗时 {elapsed:.1f}s")
 
     if not results:
         print("没有有效结果！")
