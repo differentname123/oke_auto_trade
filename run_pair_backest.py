@@ -15,6 +15,12 @@ BETA_MIN = 0.1
 BETA_MAX = 5.0
 WF_MAX_TRAIN_MDD = -15.0
 
+# --- KF Endogenous Diagnostics (方案1) ---
+NI_ENTRY_GATE = 3.0
+KF_KILL_TRACE_MULT = 5.0
+KF_KILL_NI_CONSEC = 3
+KF_KILL_NI_THRESHOLD = 3.0
+
 
 # =============================================================================
 # 0. 时间单位工具
@@ -127,7 +133,7 @@ def resample_data(df, timeframe='15min'):
 
 
 # =============================================================================
-# 2. 卡尔曼滤波（有状态版本）
+# 2. 卡尔曼滤波（有状态版本 + 内生诊断输出）
 # =============================================================================
 @nb.njit(cache=True)
 def fast_kalman_filter(x_arr, y_arr, delta, ve,
@@ -138,6 +144,8 @@ def fast_kalman_filter(x_arr, y_arr, delta, ve,
     betas = np.zeros(n_obs)
     alphas = np.zeros(n_obs)
     spreads = np.zeros(n_obs)
+    normalized_innovations = np.zeros(n_obs)
+    trace_P_arr = np.zeros(n_obs)
 
     alpha_mean = init_alpha
     beta_mean = init_beta
@@ -156,6 +164,11 @@ def fast_kalman_filter(x_arr, y_arr, delta, ve,
         error = y - y_pred
         S = P00 + P01 * x + P10 * x + P11 * x * x + ve
 
+        if S > 0.0:
+            normalized_innovations[t] = error / np.sqrt(S)
+        else:
+            normalized_innovations[t] = 0.0
+
         K0 = (P00 + P01 * x) / S
         K1 = (P10 + P11 * x) / S
 
@@ -168,26 +181,33 @@ def fast_kalman_filter(x_arr, y_arr, delta, ve,
         new_P11 = P11 - K1 * (P01 + P11 * x)
         P00, P01, P10, P11 = new_P00, new_P01, new_P10, new_P11
 
+        trace_P_arr[t] = P00 + P11
+
         alphas[t] = alpha_mean
         betas[t] = beta_mean
         spreads[t] = error
 
-    return betas, alphas, spreads, alpha_mean, beta_mean, P00, P01, P10, P11
+    return (betas, alphas, spreads, normalized_innovations, trace_P_arr,
+            alpha_mean, beta_mean, P00, P01, P10, P11)
 
 
 # =============================================================================
-# 3. 信号生成
+# 3. 信号生成（含KF内生诊断门控）
 # =============================================================================
 @nb.njit(cache=True)
 def fast_generate_signals(z_values, spreads, betas, alphas,
                           log_main, log_sub, roll_std,
+                          ni_arr, trace_P_arr,
                           lookback, z_entry, z_exit,
                           min_hold_bars, cooldown_bars, max_hold_bars,
                           sl_mult, single_leg_fee,
+                          ni_entry_gate, kf_kill_trace_mult,
+                          kf_kill_ni_consec, kf_kill_ni_threshold,
                           beta_min=0.1, beta_max=5.0,
                           init_pos=0, init_held=0, init_since_close=9999,
                           init_frozen_beta=0.0, init_frozen_alpha=0.0,
-                          init_entry_spread=0.0, init_entry_std=0.0):
+                          init_entry_spread=0.0, init_entry_std=0.0,
+                          init_entry_trace_P=0.0, init_consec_ni_count=0):
     n = len(z_values)
     signals = np.zeros(n)
     frozen_betas_arr = np.zeros(n)
@@ -195,6 +215,7 @@ def fast_generate_signals(z_values, spreads, betas, alphas,
     entry_spreads_arr = np.zeros(n)
     entry_stds_arr = np.zeros(n)
     stop_flags = np.zeros(n)
+    kf_kill_flags = np.zeros(n)
 
     pos = init_pos
     held = init_held
@@ -203,6 +224,8 @@ def fast_generate_signals(z_values, spreads, betas, alphas,
     frozen_alpha = init_frozen_alpha
     entry_spread = init_entry_spread
     entry_std = init_entry_std
+    entry_trace_P = init_entry_trace_P
+    consec_ni_count = init_consec_ni_count
 
     start_idx = 0 if pos != 0 else lookback
 
@@ -214,7 +237,8 @@ def fast_generate_signals(z_values, spreads, betas, alphas,
             if since_close >= cooldown_bars:
                 cur_std = roll_std[i]
                 cur_beta = betas[i]
-                if cur_std > 0.0 and cur_beta >= beta_min and cur_beta <= beta_max:
+                ni_ok = abs(ni_arr[i]) <= ni_entry_gate
+                if cur_std > 0.0 and cur_beta >= beta_min and cur_beta <= beta_max and ni_ok:
                     expected_profit = (z_entry - abs(z_exit)) * cur_std
                     round_trip_cost = 2.0 * single_leg_fee * (1.0 + abs(cur_beta))
                     if expected_profit > round_trip_cost:
@@ -225,6 +249,8 @@ def fast_generate_signals(z_values, spreads, betas, alphas,
                             frozen_alpha = alphas[i]
                             entry_spread = log_main[i] - frozen_alpha - frozen_beta * log_sub[i]
                             entry_std = cur_std
+                            entry_trace_P = trace_P_arr[i]
+                            consec_ni_count = 0
                         elif z < -z_entry:
                             pos = -1
                             held = 0
@@ -232,6 +258,8 @@ def fast_generate_signals(z_values, spreads, betas, alphas,
                             frozen_alpha = alphas[i]
                             entry_spread = log_main[i] - frozen_alpha - frozen_beta * log_sub[i]
                             entry_std = cur_std
+                            entry_trace_P = trace_P_arr[i]
+                            consec_ni_count = 0
         else:
             held += 1
             frozen_spread = log_main[i] - frozen_alpha - frozen_beta * log_sub[i]
@@ -245,13 +273,32 @@ def fast_generate_signals(z_values, spreads, betas, alphas,
                     if (entry_spread - frozen_spread) > sl_mult * entry_std:
                         stopped = True
 
+            kf_killed = False
+            if not stopped:
+                if entry_trace_P > 0.0 and trace_P_arr[i] > entry_trace_P * kf_kill_trace_mult:
+                    kf_killed = True
+                if abs(ni_arr[i]) > kf_kill_ni_threshold:
+                    consec_ni_count += 1
+                else:
+                    consec_ni_count = 0
+                if consec_ni_count >= kf_kill_ni_consec:
+                    kf_killed = True
+
             if stopped:
                 pos = 0
                 since_close = 0
                 stop_flags[i] = 1.0
+                consec_ni_count = 0
+            elif kf_killed:
+                pos = 0
+                since_close = 0
+                stop_flags[i] = 1.0
+                kf_kill_flags[i] = 1.0
+                consec_ni_count = 0
             elif max_hold_bars > 0 and held >= max_hold_bars:
                 pos = 0
                 since_close = 0
+                consec_ni_count = 0
             elif held >= min_hold_bars:
                 if pos == 1:
                     spread_improved = frozen_spread < entry_spread
@@ -264,9 +311,11 @@ def fast_generate_signals(z_values, spreads, betas, alphas,
                 if pos == 1 and z < z_exit and spread_improved:
                     pos = 0
                     since_close = 0
+                    consec_ni_count = 0
                 elif pos == -1 and z > -z_exit and spread_improved:
                     pos = 0
                     since_close = 0
+                    consec_ni_count = 0
 
         signals[i] = pos
         if pos != 0:
@@ -282,9 +331,10 @@ def fast_generate_signals(z_values, spreads, betas, alphas,
 
     return (signals, frozen_betas_arr, frozen_alphas_arr,
             entry_spreads_arr, entry_stds_arr,
-            stop_flags,
+            stop_flags, kf_kill_flags,
             pos, held, since_close,
-            frozen_beta, frozen_alpha, entry_spread, entry_std)
+            frozen_beta, frozen_alpha, entry_spread, entry_std,
+            entry_trace_P, consec_ni_count)
 
 
 # =============================================================================
@@ -301,7 +351,8 @@ def generate_pair_trading_signals(merged_df, main_col='close_main', sub_col='clo
 
     if kf_state is None:
         kf_state = (0.0, 0.0, 1.0, 0.0, 0.0, 1.0)
-    betas, alphas, kf_spreads, ka, kb, kP00, kP01, kP10, kP11 = fast_kalman_filter(
+    (betas, alphas, kf_spreads, ni_values, trace_P_values,
+     ka, kb, kP00, kP01, kP10, kP11) = fast_kalman_filter(
         df['log_sub'].values, df['log_main'].values,
         delta=delta, ve=ve,
         init_alpha=kf_state[0], init_beta=kf_state[1],
@@ -313,6 +364,8 @@ def generate_pair_trading_signals(merged_df, main_col='close_main', sub_col='clo
     df['beta'] = betas
     df['alpha'] = alphas
     df['spread'] = kf_spreads
+    df['kf_ni'] = ni_values
+    df['kf_trace_P'] = trace_P_values
 
     spread_s = pd.Series(kf_spreads)
     roll_mean = spread_s.rolling(z_lookback, min_periods=z_lookback).mean()
@@ -323,26 +376,36 @@ def generate_pair_trading_signals(merged_df, main_col='close_main', sub_col='clo
 
     z_clean = np.nan_to_num(z_score, nan=0.0, posinf=0.0, neginf=0.0)
     rs_clean = np.nan_to_num(roll_std.values, nan=0.0, posinf=0.0, neginf=0.0)
+    ni_clean = np.nan_to_num(ni_values, nan=0.0, posinf=0.0, neginf=0.0)
+    trP_clean = np.nan_to_num(trace_P_values, nan=0.0, posinf=0.0, neginf=0.0)
 
     if pos_state is None:
-        pos_state = (0, 0, 9999, 0.0, 0.0, 0.0, 0.0)
+        pos_state = (0, 0, 9999, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
+    _ps = pos_state
+    _psn = len(_ps)
 
     (raw_signals, frozen_betas, frozen_alphas_state,
      entry_spreads_state, entry_stds_state,
-     stop_flags_raw,
-     fp, fh, fsc, ffb, ffa, fes, fest) = fast_generate_signals(
+     stop_flags_raw, kf_kill_flags_raw,
+     fp, fh, fsc, ffb, ffa, fes, fest,
+     f_entry_trP, f_consec_ni) = fast_generate_signals(
         z_clean, kf_spreads, betas, alphas,
         df['log_main'].values, df['log_sub'].values, rs_clean,
+        ni_clean, trP_clean,
         z_lookback, z_entry, z_exit,
         min_hold_bars, cooldown_bars, max_hold_bars,
         SL_MULT, SINGLE_LEG_FEE,
+        NI_ENTRY_GATE, KF_KILL_TRACE_MULT,
+        KF_KILL_NI_CONSEC, KF_KILL_NI_THRESHOLD,
         BETA_MIN, BETA_MAX,
-        init_pos=pos_state[0], init_held=pos_state[1],
-        init_since_close=pos_state[2],
-        init_frozen_beta=pos_state[3], init_frozen_alpha=pos_state[4],
-        init_entry_spread=pos_state[5], init_entry_std=pos_state[6]
+        init_pos=int(_ps[0]), init_held=int(_ps[1]),
+        init_since_close=int(_ps[2]),
+        init_frozen_beta=float(_ps[3]), init_frozen_alpha=float(_ps[4]),
+        init_entry_spread=float(_ps[5]), init_entry_std=float(_ps[6]),
+        init_entry_trace_P=float(_ps[7]) if _psn > 7 else 0.0,
+        init_consec_ni_count=int(_ps[8]) if _psn > 8 else 0
     )
-    final_pos_state = (fp, fh, fsc, ffb, ffa, fes, fest)
+    final_pos_state = (fp, fh, fsc, ffb, ffa, fes, fest, f_entry_trP, f_consec_ni)
 
     do_shift = USE_NEXT_BAR_EXEC
     df['signal'] = _shift_or_copy(raw_signals, do_shift)
@@ -352,11 +415,16 @@ def generate_pair_trading_signals(merged_df, main_col='close_main', sub_col='clo
     df['signal_entry_std'] = _shift_or_copy(entry_stds_state, do_shift)
     df['signal_entry_z'] = _shift_or_copy(z_score, do_shift, fill=np.nan)
     df['stop_flag'] = _shift_or_copy(stop_flags_raw, do_shift)
+    df['kf_kill_flag'] = _shift_or_copy(kf_kill_flags_raw, do_shift)
 
     _sig_ctx = {
         'z_entry': float(z_entry), 'z_exit': float(z_exit),
         'min_hold_bars': int(min_hold_bars), 'cooldown_bars': int(cooldown_bars),
         'max_hold_bars': int(max_hold_bars), 'signal_fee': float(SINGLE_LEG_FEE),
+        'ni_entry_gate': float(NI_ENTRY_GATE),
+        'kf_kill_trace_mult': float(KF_KILL_TRACE_MULT),
+        'kf_kill_ni_consec': int(KF_KILL_NI_CONSEC),
+        'kf_kill_ni_threshold': float(KF_KILL_NI_THRESHOLD),
     }
     df.attrs['_pt_signal_ctx'] = _sig_ctx
     for _k, _v in _sig_ctx.items():
@@ -366,7 +434,7 @@ def generate_pair_trading_signals(merged_df, main_col='close_main', sub_col='clo
 
 
 # =============================================================================
-# 5. 1min cache / 有效PnL / 时间三段
+# 5. 1min cache / 有效PnL / 时间分段
 # =============================================================================
 def _build_1min_cache(original_1min_df):
     odf = original_1min_df.copy()
@@ -435,6 +503,40 @@ def _split_train_thirds(segment_start_time, segment_end_time, equity_times, equi
     return [e1, e2 - e1, e3 - e2]
 
 
+def _split_train_monthly_returns(segment_start_time, segment_end_time,
+                                 equity_times, equity_curve, num_months):
+    """将权益曲线按等分月切分，返回每月收益列表。"""
+    if equity_curve is None or len(equity_curve) == 0:
+        return []
+
+    eq = np.asarray(equity_curve, dtype=float)
+    etimes = np.asarray(equity_times).astype('datetime64[ns]')
+    start = np.datetime64(segment_start_time, 'ns')
+    end = np.datetime64(segment_end_time, 'ns')
+
+    if str(start) == 'NaT' or str(end) == 'NaT':
+        return []
+
+    total_ns = int((end - start).astype('timedelta64[ns]').astype(np.int64))
+    if total_ns <= 0 or num_months <= 0:
+        return [float(eq[-1])]
+
+    def _eq_at(boundary_ns):
+        idx = np.searchsorted(etimes, boundary_ns, side='right') - 1
+        idx = max(0, min(idx, len(eq) - 1))
+        return float(eq[idx])
+
+    monthly_returns = []
+    prev_eq = 0.0
+    for i in range(1, num_months + 1):
+        boundary = start + np.timedelta64(int(total_ns * i / num_months), 'ns')
+        cur_eq = _eq_at(boundary)
+        monthly_returns.append(cur_eq - prev_eq)
+        prev_eq = cur_eq
+
+    return monthly_returns
+
+
 # =============================================================================
 # 6. 逐 bar / 逐1min 权益曲线 + 交易提取
 # =============================================================================
@@ -483,11 +585,16 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
     signal_estd = _col('signal_entry_std', lambda: np.zeros(n))
     signal_entry_z = _col('signal_entry_z', lambda: np.full(n, np.nan))
     stop_flags_col = _col('stop_flag', lambda: np.zeros(n, dtype=int), dtype=int)
+    kf_kill_flags_col = _col('kf_kill_flag', lambda: np.zeros(n, dtype=int), dtype=int)
     log_main_arr = _col('log_main', lambda: np.log(close_main))
     log_sub_arr = _col('log_sub', lambda: np.log(close_sub))
+    ni_arr = _col('kf_ni', lambda: np.zeros(n))
+    trace_P_arr = _col('kf_trace_P', lambda: np.zeros(n))
 
     z_clean = np.nan_to_num(z_scores, nan=0.0, posinf=0.0, neginf=0.0)
     rs_clean = np.nan_to_num(roll_std_arr, nan=0.0, posinf=0.0, neginf=0.0)
+    ni_clean = np.nan_to_num(ni_arr, nan=0.0, posinf=0.0, neginf=0.0)
+    trP_clean = np.nan_to_num(trace_P_arr, nan=0.0, posinf=0.0, neginf=0.0)
 
     def _read_sig_ctx(key, default):
         if '_pt_signal_ctx' in getattr(df, 'attrs', {}):
@@ -504,12 +611,17 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
     sig_cooldown_bars = int(_read_sig_ctx('cooldown_bars', 0))
     sig_max_hold_bars = int(_read_sig_ctx('max_hold_bars', 0))
     sig_fee_assumption = float(_read_sig_ctx('signal_fee', SINGLE_LEG_FEE))
+    sig_ni_entry_gate = float(_read_sig_ctx('ni_entry_gate', NI_ENTRY_GATE))
+    sig_kf_kill_trace_mult = float(_read_sig_ctx('kf_kill_trace_mult', KF_KILL_TRACE_MULT))
+    sig_kf_kill_ni_consec = int(_read_sig_ctx('kf_kill_ni_consec', KF_KILL_NI_CONSEC))
+    sig_kf_kill_ni_threshold = float(_read_sig_ctx('kf_kill_ni_threshold', KF_KILL_NI_THRESHOLD))
 
     can_rebuild_signal_path = (
         np.isfinite(sig_z_entry) and np.isfinite(sig_z_exit)
         and len(z_clean) == n and len(rs_clean) == n
         and len(spreads_arr) == n and len(betas_arr) == n and len(alphas_arr) == n
         and len(log_main_arr) == n and len(log_sub_arr) == n
+        and len(ni_clean) == n and len(trP_clean) == n
     )
 
     need_min1 = (USE_NEXT_BAR_EXEC or USE_1MIN_PATH)
@@ -637,7 +749,7 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
                          if entry_dir == -1
                          else f'做空价差 (Short BTC / Long {entry_beta_val:.3f} ETH)')
 
-        if close_reason == 'hard_stop_1m':
+        if close_reason in ('hard_stop_1m', 'kf_kill'):
             exit_z, exit_spread = np.nan, np.nan
             exit_alpha, exit_beta = entry_frozen_alpha, entry_beta_val
         else:
@@ -698,6 +810,7 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
         signal_es[stop_bar_idx] = 0.0
         signal_estd[stop_bar_idx] = 0
         stop_flags_col[stop_bar_idx] = 0
+        kf_kill_flags_col[stop_bar_idx] = 0
 
         if not can_rebuild_signal_path:
             return
@@ -708,17 +821,22 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
 
         (new_raw_sig, new_fb, new_fa,
          new_es, new_estd,
-         new_stop_raw,
-         _, _, _, _, _, _, _) = fast_generate_signals(
+         new_stop_raw, new_kf_kill_raw,
+         _, _, _, _, _, _, _,
+         _, _) = fast_generate_signals(
             z_clean[suffix:], spreads_arr[suffix:], betas_arr[suffix:], alphas_arr[suffix:],
             log_main_arr[suffix:], log_sub_arr[suffix:], rs_clean[suffix:],
+            ni_clean[suffix:], trP_clean[suffix:],
             0, sig_z_entry, sig_z_exit,
             sig_min_hold_bars, sig_cooldown_bars, sig_max_hold_bars,
             SL_MULT, sig_fee_assumption,
+            sig_ni_entry_gate, sig_kf_kill_trace_mult,
+            sig_kf_kill_ni_consec, sig_kf_kill_ni_threshold,
             BETA_MIN, BETA_MAX,
             init_pos=0, init_held=0, init_since_close=0,
             init_frozen_beta=0.0, init_frozen_alpha=0.0,
-            init_entry_spread=0.0, init_entry_std=0.0
+            init_entry_spread=0.0, init_entry_std=0.0,
+            init_entry_trace_P=0.0, init_consec_ni_count=0
         )
 
         signals[suffix:] = 0
@@ -728,6 +846,7 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
         signal_estd[suffix:] = 0.0
         signal_entry_z[suffix:] = np.nan
         stop_flags_col[suffix:] = 0
+        kf_kill_flags_col[suffix:] = 0
 
         if USE_NEXT_BAR_EXEC:
             signal_fb[suffix] = betas_arr[stop_bar_idx]
@@ -743,6 +862,7 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
                 signal_estd[assign_start:] = new_estd[:-1]
                 signal_entry_z[assign_start:] = z_scores[suffix:-1]
                 stop_flags_col[assign_start:] = new_stop_raw[:-1].astype(int)
+                kf_kill_flags_col[assign_start:] = new_kf_kill_raw[:-1].astype(int)
         else:
             signals[suffix:] = new_raw_sig
             signal_fb[suffix:] = new_fb
@@ -751,6 +871,14 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
             signal_estd[suffix:] = new_estd
             signal_entry_z[suffix:] = z_scores[suffix:]
             stop_flags_col[suffix:] = new_stop_raw.astype(int)
+            kf_kill_flags_col[suffix:] = new_kf_kill_raw.astype(int)
+
+    def _determine_close_reason(bar_idx):
+        if kf_kill_flags_col[bar_idx] == 1:
+            return 'kf_kill'
+        if stop_flags_col[bar_idx] == 1:
+            return 'hard_stop'
+        return 'signal'
 
     def _check_stop_and_maybe_close(cur_time, cur_m, cur_s, cur_lm, cur_ls, bar_idx):
         if (not in_trade) or entry_dir == 0:
@@ -797,11 +925,11 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
                     if sig != 0 and prev_sig == 0 and not in_trade:
                         _open_position(sig, exec_time_val, exec_m, exec_s, i)
                     elif in_trade and sig == 0 and prev_sig != 0:
-                        _cr = 'hard_stop' if stop_flags_col[i] == 1 else 'signal'
+                        _cr = _determine_close_reason(i)
                         _close_position(exec_time_val, exec_m, exec_s, i, close_reason=_cr)
                 else:
                     if in_trade and sig == 0 and prev_sig != 0:
-                        _cr = 'hard_stop' if stop_flags_col[i] == 1 else 'signal'
+                        _cr = _determine_close_reason(i)
                         _close_position(exec_time_val, exec_m, exec_s, i, close_reason=_cr)
                     elif sig != 0 and prev_sig == 0 and not in_trade:
                         _open_position(sig, exec_time_val, exec_m, exec_s, i)
@@ -825,7 +953,7 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
                 if sig != 0 and prev_sig == 0 and not in_trade:
                     _open_position(sig, start_t, start_m, start_s, i)
                 elif in_trade and sig == 0 and prev_sig != 0:
-                    _cr = 'hard_stop' if stop_flags_col[i] == 1 else 'signal'
+                    _cr = _determine_close_reason(i)
                     _close_position(start_t, start_m, start_s, i, close_reason=_cr)
                     _append_equity_point(start_t, cum_realized * 100.0)
                     last_mark_main = min1_cm[r - 1]
@@ -877,7 +1005,7 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
                     cur_ls = min1_ls[event_idx]
 
                     if in_trade and sig == 0 and prev_sig != 0:
-                        _cr = 'hard_stop' if stop_flags_col[i] == 1 else 'signal'
+                        _cr = _determine_close_reason(i)
                         _close_position(cur_t, cur_m, cur_s, i, close_reason=_cr)
                         _append_equity_point(cur_t, cum_realized * 100.0)
                     elif sig != 0 and prev_sig == 0 and not in_trade:
@@ -907,7 +1035,7 @@ def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
             if sig != 0 and prev_sig == 0 and not in_trade:
                 _open_position(sig, exec_time_val, exec_m, exec_s, i)
             elif in_trade and sig == 0 and prev_sig != 0:
-                _cr = 'hard_stop' if stop_flags_col[i] == 1 else 'signal'
+                _cr = _determine_close_reason(i)
                 _close_position(exec_time_val, exec_m, exec_s, i, close_reason=_cr)
 
             if in_trade and entry_dir != 0:
@@ -1136,7 +1264,7 @@ def parameter_sensitivity_scan(df_file, timeframe='15min'):
 
 
 # =============================================================================
-# 9. Walk-Forward
+# 9. Walk-Forward（含子样本稳定性评分 + 多样化集成报告）
 # =============================================================================
 def _compute_param_neighbors(param_key, param_grids):
     neighbors = []
@@ -1234,6 +1362,7 @@ def walk_forward_optimization(df_file, timeframe='15min',
     all_oos_effective_pnls = []
     param_history = []
     oos_degradation_log = []
+    diverse_ensemble_history = []
 
     start_date = df['open_time'].min()
     end_date = df['open_time'].max()
@@ -1315,9 +1444,27 @@ def walk_forward_optimization(df_file, timeframe='15min',
                                     if len(eff_15x) == 0 or np.mean(eff_15x) <= 0:
                                         continue
 
-                                    seg_pnls = _split_train_thirds(train_start_ns, train_end_ns, eq_times, eq_curve)
-                                    if sum(1 for s in seg_pnls if s > 0) < 2:
+                                    # --- 子样本稳定性评分 (方案2) ---
+                                    monthly_rets = _split_train_monthly_returns(
+                                        train_start_ns, train_end_ns, eq_times, eq_curve, train_months)
+
+                                    if len(monthly_rets) < 3:
                                         continue
+
+                                    profitable_months = sum(1 for r in monthly_rets if r > 0)
+                                    required_profitable = max(2, int(len(monthly_rets) * 0.6))
+                                    if profitable_months < required_profitable:
+                                        continue
+
+                                    monthly_arr = np.array(monthly_rets)
+                                    m_mean = np.mean(monthly_arr)
+                                    m_std = np.std(monthly_arr)
+                                    if m_std > 0:
+                                        stability_score = m_mean / m_std
+                                    else:
+                                        stability_score = np.sign(m_mean) * 10.0 if m_mean > 0 else 0.0
+
+                                    composite_score = raw_score * (1.0 + max(0.0, stability_score)) / 2.0
 
                                     if len(eq_curve) > 0:
                                         _eq_ext = np.concatenate(([0.0], eq_curve))
@@ -1330,7 +1477,11 @@ def walk_forward_optimization(df_file, timeframe='15min',
                                     train_total_ret = float(eq_curve[-1]) if len(eq_curve) > 0 else float(np.sum(eff_pnls))
 
                                     all_candidates[param_key] = {
-                                        'score': raw_score,
+                                        'score': composite_score,
+                                        'raw_t_stat': raw_score,
+                                        'stability_score': stability_score,
+                                        'profitable_months': profitable_months,
+                                        'total_months': len(monthly_rets),
                                         'params': {
                                             'z_entry': z_entry, 'z_exit': z_exit,
                                             'lookback_hours': lb_h, 'z_lookback': z_lb,
@@ -1380,6 +1531,10 @@ def walk_forward_optimization(df_file, timeframe='15min',
         param_history.append({
             'window_id': window_id, **best_params,
             'train_score': chosen['score'],
+            'raw_t_stat': chosen['raw_t_stat'],
+            'stability_score': round(chosen['stability_score'], 4),
+            'profitable_months': chosen['profitable_months'],
+            'total_months': chosen['total_months'],
             'plateau_score': best_plateau_score,
             'train_trades': chosen['train_trades'],
             'train_closed_trades': chosen['train_closed_trades'],
@@ -1389,9 +1544,52 @@ def walk_forward_optimization(df_file, timeframe='15min',
             'combos_passed_filter': len(all_candidates),
         })
         print(f"  Best (plateau): {best_params}")
-        print(f"  Train: t-stat={chosen['score']:.4f}, trades={chosen['train_trades']}, "
+        print(f"  Train: t-stat={chosen['raw_t_stat']:.4f}, "
+              f"stability={chosen['stability_score']:.4f} "
+              f"({chosen['profitable_months']}/{chosen['total_months']}mo+), "
+              f"composite={chosen['score']:.4f}, "
+              f"trades={chosen['train_trades']}, "
               f"closed={chosen['train_closed_trades']}, ret={chosen['train_ret']:.2f}%, "
               f"plateau={best_plateau_score:.4f} | passed: {len(all_candidates)}/{combo_count}")
+
+        # ===== 多样化集成候选 (方案3 - 报告层) =====
+        lookback_groups = {}
+        for pkey, info in all_candidates.items():
+            lb = info['params']['lookback_hours']
+            if lb not in lookback_groups:
+                lookback_groups[lb] = []
+            lookback_groups[lb].append((pkey, info))
+
+        diverse_ensemble = []
+        for lb in sorted(lookback_groups.keys()):
+            group = lookback_groups[lb]
+            group.sort(key=lambda x: x[1]['score'], reverse=True)
+            if group:
+                diverse_ensemble.append(group[0])
+
+        if len(diverse_ensemble) >= 2:
+            print(f"  --- Diverse Ensemble Candidates (by lookback, for live ref) ---")
+            ensemble_info = []
+            for rank, (pkey, info) in enumerate(diverse_ensemble[:5]):
+                p = info['params']
+                print(f"    #{rank+1}: lb_h={p['lookback_hours']}, "
+                      f"z_e={p['z_entry']}, z_x={p['z_exit']}, "
+                      f"dpd={p['delta_per_day']}, mh={p['min_hold_hours']}, "
+                      f"score={info['score']:.4f}, "
+                      f"stab={info['stability_score']:.2f}, "
+                      f"ret={info['train_ret']:.2f}%")
+                ensemble_info.append({
+                    'lookback_hours': p['lookback_hours'],
+                    'z_entry': p['z_entry'], 'z_exit': p['z_exit'],
+                    'delta_per_day': p['delta_per_day'],
+                    'min_hold_hours': p['min_hold_hours'],
+                    'score': round(info['score'], 4),
+                    'stability': round(info['stability_score'], 4),
+                })
+            diverse_ensemble_history.append({
+                'window_id': window_id,
+                'candidates': ensemble_info,
+            })
 
         # ===== OOS 测试 =====
         combined = pd.concat([train_df, test_df], ignore_index=True)
@@ -1525,6 +1723,18 @@ def walk_forward_optimization(df_file, timeframe='15min',
                     print(f"  🟢 退化比合理")
 
             deg_df.to_csv(f'backtest_pair/{key_word}_oos_degradation.csv', index=False)
+
+        # --- 多样化集成汇总 (方案3) ---
+        if diverse_ensemble_history:
+            print(f"\n  --- 多样化集成参数汇总 (供实盘参考) ---")
+            print(f"  各窗口按lookback_hours分组的Top候选，实盘可用共识投票机制:")
+            print(f"  (强共识→全仓, 分歧→空仓)")
+            for entry in diverse_ensemble_history:
+                wid = entry['window_id']
+                cands = entry['candidates']
+                lbs = [c['lookback_hours'] for c in cands]
+                print(f"  W{wid}: {len(cands)}组 lookbacks={lbs}")
+
     else:
         print("  所有窗口均无样本外权益变化")
 
@@ -1536,6 +1746,14 @@ def walk_forward_optimization(df_file, timeframe='15min',
             if col in ph.columns:
                 vals = ph[col]
                 print(f"  {col}: 最常选={vals.mode().values}, std={vals.std():.4f}")
+
+        if 'stability_score' in ph.columns:
+            print(f"\n  --- 稳定性评分统计 ---")
+            print(f"  stability_score: mean={ph['stability_score'].mean():.4f}, "
+                  f"min={ph['stability_score'].min():.4f}, max={ph['stability_score'].max():.4f}")
+            if 'profitable_months' in ph.columns and 'total_months' in ph.columns:
+                avg_pct = (ph['profitable_months'] / ph['total_months']).mean()
+                print(f"  平均月盈利率: {avg_pct:.1%}")
 
 
 # =============================================================================
