@@ -16,6 +16,7 @@
 
 import traceback
 from dataclasses import dataclass
+from datetime import datetime
 
 import pandas as pd
 import numpy as np
@@ -442,12 +443,12 @@ class TradeExecutor:
         self.cfg = cfg
         self.fee = fee if fee is not None else cfg.single_leg_fee
         self.trades = []
+        self._orig_exec_state = exec_state  # 必须保存原始传入的状态
 
         self._prepare_arrays(df)
         self._init_state(exec_state)
         self._setup_1min(min1_cache, tf_minutes)
         self._setup_equity_buffer()
-
     # ---------- 初始化 ----------
 
     def _prepare_arrays(self, df):
@@ -724,8 +725,10 @@ class TradeExecutor:
         if stop_idx < 0 or stop_idx >= self.n:
             return
         self.signals[stop_idx] = 0
-        self.sig_es[stop_idx] = 0.0; self.sig_estd[stop_idx] = 0
-        self.stop_flags[stop_idx] = 0; self.kf_kill_flags[stop_idx] = 0
+        self.sig_es[stop_idx] = 0.0;
+        self.sig_estd[stop_idx] = 0
+        self.stop_flags[stop_idx] = 0;
+        self.kf_kill_flags[stop_idx] = 0
 
         if not self.can_rebuild:
             return
@@ -745,13 +748,18 @@ class TradeExecutor:
             self.cfg.beta_min, self.cfg.beta_max,
             init_pos=0, init_held=0, init_since_close=0)
 
-        ns, nfb, nfa, nes, nestd, nsf, nkf = res[:7]
+        # 【修复】显式解包 16 个返回值，杜绝隐式切片 (res[:7]) 带来的错位崩溃风险
+        (ns, nfb, nfa, nes, nestd, nsf, nkf,
+         _, _, _, _, _, _, _, _, _) = res
+
         self.signals[sfx:] = 0
         self.sig_fb[sfx:] = self.betas_arr[sfx:]
         self.sig_fa[sfx:] = self.alphas_arr[sfx:]
-        self.sig_es[sfx:] = 0.0; self.sig_estd[sfx:] = 0.0
+        self.sig_es[sfx:] = 0.0;
+        self.sig_estd[sfx:] = 0.0
         self.sig_ez[sfx:] = np.nan
-        self.stop_flags[sfx:] = 0; self.kf_kill_flags[sfx:] = 0
+        self.stop_flags[sfx:] = 0;
+        self.kf_kill_flags[sfx:] = 0
 
         if self.cfg.use_next_bar_exec:
             self.sig_fb[sfx] = self.betas_arr[stop_idx]
@@ -759,24 +767,23 @@ class TradeExecutor:
             self.sig_ez[sfx] = self.z_scores[stop_idx] if stop_idx < self.n else np.nan
             a = sfx + 1
             if a < self.n and len(ns) > 0:
-                self.signals[a:]      = ns[:-1]
-                self.sig_fb[a:]       = nfb[:-1]
-                self.sig_fa[a:]       = nfa[:-1]
-                self.sig_es[a:]       = nes[:-1]
-                self.sig_estd[a:]     = nestd[:-1]
-                self.sig_ez[a:]       = self.z_scores[sfx:-1]
-                self.stop_flags[a:]   = nsf[:-1].astype(int)
-                self.kf_kill_flags[a:]= nkf[:-1].astype(int)
+                self.signals[a:] = ns[:-1]
+                self.sig_fb[a:] = nfb[:-1]
+                self.sig_fa[a:] = nfa[:-1]
+                self.sig_es[a:] = nes[:-1]
+                self.sig_estd[a:] = nestd[:-1]
+                self.sig_ez[a:] = self.z_scores[sfx:-1]
+                self.stop_flags[a:] = nsf[:-1].astype(int)
+                self.kf_kill_flags[a:] = nkf[:-1].astype(int)
         else:
-            self.signals[sfx:]      = ns
-            self.sig_fb[sfx:]       = nfb
-            self.sig_fa[sfx:]       = nfa
-            self.sig_es[sfx:]       = nes
-            self.sig_estd[sfx:]     = nestd
-            self.sig_ez[sfx:]       = self.z_scores[sfx:]
-            self.stop_flags[sfx:]   = nsf.astype(int)
-            self.kf_kill_flags[sfx:]= nkf.astype(int)
-
+            self.signals[sfx:] = ns
+            self.sig_fb[sfx:] = nfb
+            self.sig_fa[sfx:] = nfa
+            self.sig_es[sfx:] = nes
+            self.sig_estd[sfx:] = nestd
+            self.sig_ez[sfx:] = self.z_scores[sfx:]
+            self.stop_flags[sfx:] = nsf.astype(int)
+            self.kf_kill_flags[sfx:] = nkf.astype(int)
     # ---------- 主循环 ----------
 
     def execute(self):
@@ -928,7 +935,17 @@ class TradeExecutor:
                 self.e_alpha, self.e_spread, self.e_std, last_sig)
 
     def _build_empty(self):
-        fs = (0.0, 0.0, 0.0, 0.0, 0.0, _NAT, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        # 如果当前窗口没数据，原样返回上一个窗口传进来的状态
+        s = self._orig_exec_state or ()
+        sn = len(s)
+        g = lambda i, d=0.0: s[i] if i < sn else d
+
+        fs = (
+            float(g(0)), float(g(1)), float(g(2)), float(g(3)), float(g(4)),
+            g(5, _NAT), float(g(6)), float(g(7)),
+            float(g(8)), float(g(9)), float(g(10)),
+            float(g(11, float(g(2))))
+        )
         return pd.DataFrame(), np.array([]), np.array([], dtype='datetime64[ns]'), fs
 
     def _build_output(self):
@@ -942,13 +959,18 @@ class TradeExecutor:
         return tdf, eq, eq_t, fs
 
 
-def compute_equity_and_trades(full_df, original_1min_df=None, fee_override=None,
+# 修改 compute_equity_and_trades 的签名，增加 cfg 参数，并默认使用传入的 cfg
+def compute_equity_and_trades(full_df, cfg=None, original_1min_df=None, fee_override=None,
                               exec_state=None, min1_cache=None, tf_minutes=None):
     """兼容旧调用接口的封装"""
-    fee = CFG.single_leg_fee if fee_override is None else fee_override
-    if min1_cache is None and original_1min_df is not None and (CFG.use_next_bar_exec or CFG.use_1min_path):
+    active_cfg = cfg or CFG  # 优先使用传入的 cfg
+    fee = active_cfg.single_leg_fee if fee_override is None else fee_override
+
+    if min1_cache is None and original_1min_df is not None and (
+            active_cfg.use_next_bar_exec or active_cfg.use_1min_path):
         min1_cache = build_1min_cache(original_1min_df)
-    ex = TradeExecutor(CFG, full_df, min1_cache, tf_minutes, fee, exec_state)
+
+    ex = TradeExecutor(active_cfg, full_df, min1_cache, tf_minutes, fee, exec_state)
     return ex.execute()
 
 
@@ -1034,14 +1056,485 @@ def _quick_bt(full_df, m1c, tf_min, fee=None, exec_state=None):
 
 
 # =============================================================================
-# §9 参数灵敏度扫描 (并行)
+# §6.5 快速回测引擎 (numba JIT) — 用于参数扫描的高速路径
+# =============================================================================
+
+@nb.njit(cache=True)
+def _calc_norm_nb(em, es, cm, cs, ebeta, edir):
+    """与 TradeExecutor._calc_norm 完全一致"""
+    total = 1.0 + abs(ebeta)
+    if total <= 0.0:
+        return 0.0
+    br = (cm - em) / em if em != 0.0 else 0.0
+    er = (cs - es) / es if es != 0.0 else 0.0
+    gross = (br - ebeta * er) if edir == -1 else (ebeta * er - br)
+    return gross / total
+
+
+@nb.njit(cache=True)
+def _rebuild_signals_inplace(
+    signals, sig_fb, sig_fa, sig_es, sig_estd, stop_flags, kf_kill_flags,
+    z_c, spreads_arr, betas_arr, alphas_arr, log_main, log_sub,
+    rs_c, ni_c, trP_c,
+    stop_idx, n, can_rebuild, use_nbe,
+    sig_z_entry, sig_z_exit, sig_min_hold, sig_cooldown, sig_max_hold,
+    sl_mult, sig_fee, sig_ni_gate, sig_kill_trace,
+    sig_kill_ni_n, sig_kill_ni_thr, beta_min, beta_max,
+):
+    """与 TradeExecutor._rebuild_signals 完全一致的 numba 版本"""
+    if stop_idx < 0 or stop_idx >= n:
+        return
+    signals[stop_idx] = 0
+    sig_es[stop_idx] = 0.0
+    sig_estd[stop_idx] = 0.0
+    stop_flags[stop_idx] = 0
+    kf_kill_flags[stop_idx] = 0
+
+    if not can_rebuild:
+        return
+    sfx = stop_idx + 1
+    if sfx >= n:
+        return
+
+    res = generate_signals(
+        z_c[sfx:], spreads_arr[sfx:], betas_arr[sfx:], alphas_arr[sfx:],
+        log_main[sfx:], log_sub[sfx:], rs_c[sfx:],
+        ni_c[sfx:], trP_c[sfx:],
+        0, sig_z_entry, sig_z_exit,
+        sig_min_hold, sig_cooldown, sig_max_hold,
+        sl_mult, sig_fee,
+        sig_ni_gate, sig_kill_trace, sig_kill_ni_n, sig_kill_ni_thr,
+        beta_min, beta_max,
+        0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
+
+    ns   = res[0]
+    nfb  = res[1]
+    nfa  = res[2]
+    nes  = res[3]
+    nest = res[4]
+    nsf  = res[5]
+    nkf  = res[6]
+
+    for j in range(sfx, n):
+        signals[j] = 0
+        sig_fb[j] = betas_arr[j]
+        sig_fa[j] = alphas_arr[j]
+        sig_es[j] = 0.0
+        sig_estd[j] = 0.0
+        stop_flags[j] = 0
+        kf_kill_flags[j] = 0
+
+    rlen = len(ns)
+    if use_nbe:
+        sig_fb[sfx] = betas_arr[stop_idx]
+        sig_fa[sfx] = alphas_arr[stop_idx]
+        a = sfx + 1
+        if a < n and rlen > 0:
+            copy_len = min(n - a, rlen - 1)
+            for j in range(copy_len):
+                signals[a + j]    = int(ns[j])
+                sig_fb[a + j]     = nfb[j]
+                sig_fa[a + j]     = nfa[j]
+                sig_es[a + j]     = nes[j]
+                sig_estd[a + j]   = nest[j]
+                stop_flags[a + j] = int(nsf[j])
+                kf_kill_flags[a + j] = int(nkf[j])
+    else:
+        copy_len = min(n - sfx, rlen)
+        for j in range(copy_len):
+            signals[sfx + j]    = int(ns[j])
+            sig_fb[sfx + j]     = nfb[j]
+            sig_fa[sfx + j]     = nfa[j]
+            sig_es[sfx + j]     = nes[j]
+            sig_estd[sfx + j]   = nest[j]
+            stop_flags[sfx + j] = int(nsf[j])
+            kf_kill_flags[sfx + j] = int(nkf[j])
+
+
+@nb.njit(cache=True)
+def _fast_bt_loop(
+    n_bars,
+    signals_in, sig_fb_in, sig_fa_in, sig_es_in, sig_estd_in,
+    stop_flags_in, kf_kill_flags_in,
+    close_main, close_sub, log_main, log_sub,
+    z_c, spreads_arr, betas_arr, alphas_arr, rs_c, ni_c, trP_c,
+    m1_cm, m1_cs, m1_lm, m1_ls, m1t_i64,
+    bar_l, bar_r, times_i64, bd_i64,
+    sl_mult,
+    can_rebuild, use_nbe,
+    sig_z_entry, sig_z_exit, sig_min_hold, sig_cooldown, sig_max_hold,
+    sig_fee, sig_ni_gate, sig_kill_trace, sig_kill_ni_n, sig_kill_ni_thr,
+    beta_min, beta_max,
+    prev_sig_init,
+):
+    """
+    核心回测循环 (fee=0), 完全复刻 TradeExecutor._loop_1min + _handle_1m_exec 逻辑.
+    返回:
+        eq_v, eq_t       — 权益曲线 (值, 时间戳)
+        eq_fc             — 每个权益点的累计手续费次数 (用于推导 fee>0 结果)
+        trade_pnls        — 每笔交易毛收益 (% 单位, fee=0)
+        trade_durs        — 每笔交易持仓时长 (分钟)
+        n_trades          — 已平仓交易数
+        final_dir         — 最终持仓方向 (0=空仓)
+        cum_r             — 最终累计收益率 (fee=0)
+        mark_main, mark_sub — 最终 mark 价格
+    """
+    # 复制信号数组 (rebuild 会就地修改)
+    signals    = signals_in.copy()
+    sig_fb     = sig_fb_in.copy()
+    sig_fa     = sig_fa_in.copy()
+    sig_es     = sig_es_in.copy()
+    sig_estd   = sig_estd_in.copy()
+    stop_flags = stop_flags_in.copy()
+    kf_kill_flags = kf_kill_flags_in.copy()
+
+    # 预分配输出缓冲
+    m1_len = len(m1_cm)
+    max_eq = m1_len + n_bars + 1000
+    eq_v  = np.empty(max_eq, dtype=np.float64)
+    eq_t  = np.empty(max_eq, dtype=np.int64)
+    eq_fc = np.empty(max_eq, dtype=np.int64)
+    eq_n  = 0
+
+    max_trades = n_bars // 2 + 100
+    trade_pnls = np.empty(max_trades, dtype=np.float64)
+    trade_durs = np.empty(max_trades, dtype=np.float64)
+    n_trades   = 0
+
+    # 执行状态 (全部 fee=0)
+    in_trade  = False
+    e_main    = 0.0;  e_sub    = 0.0;  e_dir  = 0
+    e_beta    = 0.0;  e_alpha  = 0.0;  e_spread = 0.0;  e_std = 0.0
+    cum_r     = 0.0
+    seg_m     = 0.0;  seg_s    = 0.0
+    seg_open_i64 = np.int64(0)
+    mark_main = 0.0;  mark_sub = 0.0
+    prev_sig  = prev_sig_init
+    fc        = np.int64(0)  # fee count
+
+    # ---------- 辅助: 追加权益点 (去重) ----------
+    def _app(t_i, val, fc_v):
+        nonlocal eq_n
+        if eq_n > 0 and eq_t[eq_n - 1] == t_i:
+            eq_v[eq_n - 1]  = val
+            eq_fc[eq_n - 1] = fc_v
+        else:
+            eq_t[eq_n]  = t_i
+            eq_v[eq_n]  = val
+            eq_fc[eq_n] = fc_v
+            eq_n += 1
+
+    # ---------- 主循环 ----------
+    for i in range(n_bars):
+        sig  = int(signals[i])
+        psig = int(signals[i - 1]) if i > 0 else prev_sig
+        l = int(bar_l[i])
+        r = int(bar_r[i])
+
+        # ====== 无 1 分钟数据的 bar ======
+        if r <= l:
+            idx_1m = np.searchsorted(m1t_i64, times_i64[i])
+            if idx_1m >= m1_len:
+                idx_1m = m1_len - 1
+            exec_m = m1_cm[idx_1m]
+            exec_s = m1_cs[idx_1m]
+
+            if sig != 0 and psig == 0 and not in_trade:
+                e_main = exec_m; e_sub = exec_s; e_dir = sig
+                e_beta = sig_fb[i]; e_alpha = sig_fa[i]
+                e_spread = sig_es[i]; e_std = sig_estd[i]
+                seg_m = exec_m; seg_s = exec_s
+                seg_open_i64 = times_i64[i]
+                in_trade = True
+                fc += 1
+            elif in_trade and sig == 0 and psig != 0:
+                gross = _calc_norm_nb(e_main, e_sub, exec_m, exec_s, e_beta, e_dir)
+                cum_r += gross
+                seg_gross = _calc_norm_nb(seg_m, seg_s, exec_m, exec_s, e_beta, e_dir)
+                trade_pnls[n_trades] = seg_gross * 100.0
+                trade_durs[n_trades] = (times_i64[i] - seg_open_i64) / 60000000000.0
+                n_trades += 1
+                in_trade = False; e_dir = 0
+                fc += 1
+
+            if in_trade:
+                u = _calc_norm_nb(e_main, e_sub, close_main[i], close_sub[i], e_beta, e_dir)
+                _app(times_i64[i] + bd_i64, (cum_r + u) * 100.0, fc)
+            else:
+                _app(times_i64[i] + bd_i64, cum_r * 100.0, fc)
+
+            mark_main = close_main[i]; mark_sub = close_sub[i]
+            continue
+
+        # ====== 有 1 分钟数据的 bar (use_1m_exec 路径) ======
+        st_m = m1_cm[l]; st_s = m1_cs[l]
+
+        # --- 开仓 ---
+        if sig != 0 and psig == 0 and not in_trade:
+            e_main = st_m; e_sub = st_s; e_dir = sig
+            e_beta = sig_fb[i]; e_alpha = sig_fa[i]
+            e_spread = sig_es[i]; e_std = sig_estd[i]
+            seg_m = st_m; seg_s = st_s
+            seg_open_i64 = m1t_i64[l]
+            in_trade = True
+            fc += 1
+
+        # --- 信号平仓 ---
+        elif in_trade and sig == 0 and psig != 0:
+            gross = _calc_norm_nb(e_main, e_sub, st_m, st_s, e_beta, e_dir)
+            cum_r += gross
+            seg_gross = _calc_norm_nb(seg_m, seg_s, st_m, st_s, e_beta, e_dir)
+            trade_pnls[n_trades] = seg_gross * 100.0
+            trade_durs[n_trades] = (m1t_i64[l] - seg_open_i64) / 60000000000.0
+            n_trades += 1
+            in_trade = False; e_dir = 0
+            fc += 1
+            _app(m1t_i64[l], cum_r * 100.0, fc)
+            mark_main = m1_cm[r - 1]; mark_sub = m1_cs[r - 1]
+            continue
+
+        # --- 持仓中: 逐 1 分钟扫描止损 + 构建权益曲线 ---
+        if in_trade:
+            total_exp = 1.0 + abs(e_beta)
+            check_stop = (e_std > 0.0 and sl_mult > 0.0)
+            stopped = False
+
+            for j in range(l, r):
+                cm_j = m1_cm[j]; cs_j = m1_cs[j]
+                lm_j = m1_lm[j]; ls_j = m1_ls[j]
+
+                should_stop = False
+                if check_stop:
+                    fsp = lm_j - e_alpha - e_beta * ls_j
+                    dev = (fsp - e_spread) if e_dir == 1 else (e_spread - fsp)
+                    if dev > sl_mult * e_std:
+                        should_stop = True
+
+                br = (cm_j - e_main) / e_main if e_main != 0.0 else 0.0
+                er = (cs_j - e_sub) / e_sub if e_sub != 0.0 else 0.0
+                gross_r = (br - e_beta * er) if e_dir == -1 else (e_beta * er - br)
+                norm = gross_r / total_exp if total_exp > 0.0 else 0.0
+
+                if should_stop:
+                    # 止损平仓
+                    cum_r += norm
+                    fc += 1
+                    _app(m1t_i64[j], cum_r * 100.0, fc)
+
+                    seg_gross = _calc_norm_nb(seg_m, seg_s, cm_j, cs_j, e_beta, e_dir)
+                    trade_pnls[n_trades] = seg_gross * 100.0
+                    trade_durs[n_trades] = (m1t_i64[j] - seg_open_i64) / 60000000000.0
+                    n_trades += 1
+                    in_trade = False; e_dir = 0
+                    stopped = True
+
+                    _rebuild_signals_inplace(
+                        signals, sig_fb, sig_fa, sig_es, sig_estd,
+                        stop_flags, kf_kill_flags,
+                        z_c, spreads_arr, betas_arr, alphas_arr,
+                        log_main, log_sub, rs_c, ni_c, trP_c,
+                        i, n_bars, can_rebuild, use_nbe,
+                        sig_z_entry, sig_z_exit, sig_min_hold,
+                        sig_cooldown, sig_max_hold,
+                        sl_mult, sig_fee, sig_ni_gate, sig_kill_trace,
+                        sig_kill_ni_n, sig_kill_ni_thr, beta_min, beta_max)
+                    break
+                else:
+                    _app(m1t_i64[j], (cum_r + norm) * 100.0, fc)
+
+        mark_main = m1_cm[r - 1]; mark_sub = m1_cs[r - 1]
+
+    # 保底: 若完全没有权益点
+    if eq_n == 0 and n_bars > 0:
+        eq_t[0]  = times_i64[n_bars - 1] + bd_i64
+        eq_v[0]  = cum_r * 100.0
+        eq_fc[0] = fc
+        eq_n = 1
+
+    return (eq_v[:eq_n].copy(), eq_t[:eq_n].copy(), eq_fc[:eq_n].copy(),
+            trade_pnls[:n_trades].copy(), trade_durs[:n_trades].copy(),
+            n_trades, e_dir, cum_r, mark_main, mark_sub)
+
+
+# ---------- Python 辅助 ----------
+
+def _build_bar_mapping(times_i64, m1t_i64, bd_i64, n):
+    bar_l = np.searchsorted(m1t_i64, times_i64, side='left')
+    end_t = np.empty(n, dtype=np.int64)
+    if n > 1:
+        end_t[:-1] = times_i64[1:]
+    if n > 0:
+        end_t[-1] = times_i64[-1] + bd_i64
+    bar_r = np.searchsorted(m1t_i64, end_t, side='left')
+    return bar_l, bar_r
+
+
+def _compute_signals_only(pc, cfg, z_lookback, z_entry, z_exit, delta, ve,
+                           min_hold_bars, cooldown_bars, max_hold_bars):
+    """
+    只计算信号数组, 不创建 DataFrame.
+    返回 (signals, sig_fb, sig_fa, sig_es, sig_estd, stop_f, kill_f)
+    以及信号上下文参数 (供 rebuild 使用).
+    """
+    lm = pc['log_main']; ls = pc['log_sub']
+    betas = pc['betas']; alphas = pc['alphas']; sp = pc['spreads']
+    z_c = pc['z_clean']; rs_c = pc['rs_clean']
+    ni_c = pc['ni_clean']; trP_c = pc['trP_clean']
+
+    result = generate_signals(
+        z_c, sp, betas, alphas, lm, ls, rs_c, ni_c, trP_c,
+        z_lookback, z_entry, z_exit,
+        min_hold_bars, cooldown_bars, max_hold_bars,
+        cfg.sl_mult, cfg.single_leg_fee,
+        cfg.ni_entry_gate, cfg.kf_kill_trace_mult,
+        cfg.kf_kill_ni_consec, cfg.kf_kill_ni_threshold,
+        cfg.beta_min, cfg.beta_max)
+
+    raw_sigs, fb, fa, es, estd, sf, kf = result[0], result[1], result[2], result[3], result[4], result[5], result[6]
+
+    do_shift = cfg.use_next_bar_exec
+    signals = shift_or_copy(raw_sigs, do_shift).astype(np.int64)
+    sig_fb  = shift_or_copy(fb, do_shift)
+    sig_fa  = shift_or_copy(fa, do_shift)
+    sig_es  = shift_or_copy(es, do_shift)
+    sig_estd = shift_or_copy(estd, do_shift)
+    stop_f  = shift_or_copy(sf, do_shift).astype(np.int64)
+    kill_f  = shift_or_copy(kf, do_shift).astype(np.int64)
+
+    return signals, sig_fb, sig_fa, sig_es, sig_estd, stop_f, kill_f
+
+
+def _fast_scan_bt(pc, times_i64, close_main, close_sub, log_main, log_sub,
+                  m1c, cfg, tf_min,
+                  z_lookback, z_entry, z_exit, delta, ve,
+                  min_hold_bars, cooldown_bars, max_hold_bars,
+                  fee_real):
+    """
+    参数扫描专用快速回测: 运行一次 numba 循环 (fee=0), 推导两种费率结果.
+    返回 (eff_0, stats_0, eff_r, stats_r)
+      eff_X   = effective_pnls (np.array)
+      stats_X = backtest_stats dict
+    """
+    n = len(times_i64)
+    if n == 0:
+        empty = np.array([], dtype=np.float64)
+        s = {'Total Return': 0, 'total_trades': 0, 'Win Rate': 0,
+             'avg_profit_per_trade': 0, 'Max Drawdown': 0,
+             'Profit Factor': 0, 'avg_duration': 0, '最长持仓时间': 0}
+        return empty, s, empty, s
+
+    # 1) 生成信号
+    signals, sig_fb, sig_fa, sig_es, sig_estd, stop_f, kill_f = \
+        _compute_signals_only(pc, cfg, z_lookback, z_entry, z_exit, delta, ve,
+                              min_hold_bars, cooldown_bars, max_hold_bars)
+
+    # 2) 1 分钟数据
+    m1t_i64 = m1c['times'].view(np.int64)
+    m1_cm = m1c['close_main']; m1_cs = m1c['close_sub']
+    m1_lm = m1c['log_main'];   m1_ls = m1c['log_sub']
+
+    bd_i64 = np.int64(int(tf_min) * 60_000_000_000)
+    bar_l, bar_r = _build_bar_mapping(times_i64, m1t_i64, bd_i64, n)
+
+    # 3) 运行 numba 循环 (fee=0)
+    (eq_v_0, eq_t, eq_fc,
+     t_pnls_0, t_durs, n_tr,
+     final_dir, cum_r_0, _, _) = _fast_bt_loop(
+        n,
+        signals, sig_fb, sig_fa, sig_es, sig_estd, stop_f, kill_f,
+        close_main, close_sub, log_main, log_sub,
+        pc['z_clean'], pc['spreads'], pc['betas'], pc['alphas'],
+        pc['rs_clean'], pc['ni_clean'], pc['trP_clean'],
+        m1_cm, m1_cs, m1_lm, m1_ls, m1t_i64,
+        bar_l, bar_r, times_i64, bd_i64,
+        cfg.sl_mult,
+        True, cfg.use_next_bar_exec,
+        float(z_entry), float(z_exit),
+        int(min_hold_bars), int(cooldown_bars), int(max_hold_bars),
+        float(cfg.single_leg_fee), float(cfg.ni_entry_gate),
+        float(cfg.kf_kill_trace_mult),
+        int(cfg.kf_kill_ni_consec), float(cfg.kf_kill_ni_threshold),
+        float(cfg.beta_min), float(cfg.beta_max),
+        0,
+    )
+
+    f = fee_real
+
+    # 4a) fee=0 结果
+    eff_0 = t_pnls_0.copy()
+    has_open_0 = (final_dir != 0)
+    if has_open_0 and len(eq_v_0) > 0:
+        closed_sum_0 = float(np.sum(t_pnls_0))
+        eff_0 = np.append(eff_0, float(eq_v_0[-1]) - closed_sum_0)
+
+    stats_0 = _fast_stats(eff_0, eq_v_0, t_durs, n_tr)
+
+    # 4b) fee=real 结果 — 数学推导
+    t_pnls_r = t_pnls_0 - 200.0 * f  # 每笔: 开 + 平 = 2 * fee * 100
+    eq_v_r = eq_v_0 - eq_fc.astype(np.float64) * f * 100.0
+
+    eff_r = t_pnls_r.copy()
+    has_open_r = (final_dir != 0)
+    if has_open_r and len(eq_v_r) > 0:
+        closed_sum_r = float(np.sum(t_pnls_r))
+        eff_r = np.append(eff_r, float(eq_v_r[-1]) - closed_sum_r)
+
+    stats_r = _fast_stats(eff_r, eq_v_r, t_durs, n_tr)
+
+    return eff_0, stats_0, eff_r, stats_r
+
+
+def _fast_stats(pnl_arr, eq_curve, durs, n_trades):
+    """从数组直接计算 backtest_stats, 无需 DataFrame."""
+    nt = len(pnl_arr)
+    if nt > 0:
+        tot_r = float(np.sum(pnl_arr))
+        avg_r = float(np.mean(pnl_arr))
+        wr = float(np.sum(pnl_arr > 0)) / nt
+        gp = float(np.sum(pnl_arr[pnl_arr > 0]))
+        gl = float(abs(np.sum(pnl_arr[pnl_arr <= 0])))
+        pf = (gp / gl) if gl > 0 else (float('inf') if gp > 0 else 0.0)
+    else:
+        tot_r = avg_r = wr = pf = 0.0
+
+    avg_dur = float(np.mean(durs)) if n_trades > 0 else 0.0
+    max_dur = float(np.max(durs)) if n_trades > 0 else 0.0
+
+    if eq_curve is not None and len(eq_curve) > 0:
+        total_ret = float(eq_curve[-1])
+        eq_ext = np.empty(len(eq_curve) + 1, dtype=np.float64)
+        eq_ext[0] = 0.0
+        eq_ext[1:] = eq_curve
+    else:
+        total_ret = tot_r
+        if nt > 0:
+            eq_ext = np.empty(nt + 1, dtype=np.float64)
+            eq_ext[0] = 0.0
+            np.cumsum(pnl_arr, out=eq_ext[1:])
+        else:
+            eq_ext = np.array([0.0])
+
+    peak = np.maximum.accumulate(eq_ext)
+    mdd = float(np.min(eq_ext - peak))
+
+    return {
+        'Total Return': total_ret, 'total_trades': nt, 'Win Rate': wr,
+        'avg_profit_per_trade': avg_r, 'Max Drawdown': mdd,
+        'Profit Factor': pf, 'avg_duration': avg_dur, '最长持仓时间': max_dur,
+    }
+
+
+# =============================================================================
+# §9 参数灵敏度扫描 (并行) — 替换原有版本
 # =============================================================================
 _G_BASE = None; _G_M1C = None; _G_LM = None; _G_LS = None
+_G_TIMES_I64 = None; _G_CM = None; _G_CS = None
 
 
-def _init_worker(base_df, m1c, lm, ls):
-    global _G_BASE, _G_M1C, _G_LM, _G_LS
-    _G_BASE, _G_M1C, _G_LM, _G_LS = base_df, m1c, lm, ls
+def _init_worker(base_df, m1c, lm, ls, times_i64, cm, cs):
+    global _G_BASE, _G_M1C, _G_LM, _G_LS, _G_TIMES_I64, _G_CM, _G_CS
+    _G_BASE = base_df; _G_M1C = m1c; _G_LM = lm; _G_LS = ls
+    _G_TIMES_I64 = times_i64; _G_CM = cm; _G_CS = cs
 
 
 def _eval_group_worker(args):
@@ -1051,9 +1544,9 @@ def _eval_group_worker(args):
 
     print(f"[Worker {pid}] 📥 收到任务: dpd={dpd}, ve={ve}, lb_h={lb_h} | 共 {total_combos} 个组合")
     try:
-        global _G_BASE, _G_M1C, _G_LM, _G_LS
+        global _G_BASE, _G_M1C, _G_LM, _G_LS, _G_TIMES_I64, _G_CM, _G_CS
 
-        # 1. 运行全局 KF 和 Rolling
+        # 1. KF + Rolling (与原版一致)
         t0_kf = time.time()
         kf_st = (0.0, 0.0, 1.0, 0.0, 0.0, 1.0)
         betas, alphas, sp, ni, trP, _, z_raw, rs_raw, z_c, rs_c, ni_c, trP_c = \
@@ -1071,34 +1564,21 @@ def _eval_group_worker(args):
             t_combo_start = time.time()
             mh = hours_to_bars(mh_h, tf_min)
 
-            # --- 监控：组装 DF 耗时 ---
-            t_df = time.time()
-            fdf, _, _ = build_signal_df(
-                _G_BASE, z_lookback=z_lb, z_entry=ze, z_exit=zx,
-                delta=delta, ve=ve, min_hold_bars=mh,
-                cooldown_bars=cd, max_hold_bars=mhb, precomputed=pc)
-            df_time = time.time() - t_df
-
-            # --- 监控：0手续费回测耗时 ---
-            t_bt0 = time.time()
-            t0, eq0, _, _, e0 = _quick_bt(fdf, _G_M1C, tf_min, fee=0.0)
-            bt0_time = time.time() - t_bt0
-
-            # --- 监控：真实手续费回测耗时 ---
-            t_btr = time.time()
-            tr, eqr, _, _, er = _quick_bt(fdf, _G_M1C, tf_min, fee=CFG.single_leg_fee)
-            btr_time = time.time() - t_btr
+            # 使用快速回测
+            e0, s0, er, sr = _fast_scan_bt(
+                pc, _G_TIMES_I64, _G_CM, _G_CS, _G_LM, _G_LS,
+                _G_M1C, CFG, tf_min,
+                z_lb, ze, zx, delta, ve,
+                mh, cd, mhb,
+                CFG.single_leg_fee)
 
             combo_total_time = time.time() - t_combo_start
+            print(f"[Worker {pid}]   [{idx + 1}/{total_combos}] z_e={ze}, z_x={zx}, mh={mh_h} | "
+                  f"总耗时:{combo_total_time:.2f}s 当前时间: {datetime.now().strftime('%H:%M:%S')}")
 
-            # 👇 就是这里：还原你原来的细粒度耗时打印！
-            print(f"[Worker {pid}]   [{idx + 1}/{total_combos}] z_e={ze}, z_x={zx} | "
-                  f"总耗时:{combo_total_time:.2f}s (组装DF:{df_time:.2f}s, 测0费:{bt0_time:.2f}s, 测实费:{btr_time:.2f}s)")
+            if len(e0) < 15:
+                continue
 
-            if len(e0) < 15: continue
-
-            s0 = backtest_stats(t0, eq0, effective_pnls=e0)
-            sr = backtest_stats(tr, eqr, effective_pnls=er)
             fpt = s0['avg_profit_per_trade'] - sr['avg_profit_per_trade']
 
             results.append({
@@ -1125,17 +1605,20 @@ def _eval_group_worker(args):
         print(f"[Worker {pid}] ✅ 任务包处理完毕，产出 {len(results)} 条有效结果")
         return results
     except Exception as e:
-        print(f"[Worker {pid}] ❌ {e}");
-        traceback.print_exc();
+        print(f"[Worker {pid}] ❌ {e}")
+        traceback.print_exc()
         return []
 
-def parameter_sensitivity_scan(df_file, timeframe='15min', n_workers=1):
+
+def parameter_sensitivity_scan(df_file, timeframe='15min', n_workers=2):
     import multiprocessing as mp
     from concurrent.futures import ProcessPoolExecutor, as_completed
-    if n_workers is None: n_workers = max(1, mp.cpu_count() - 1)
+    if n_workers is None:
+        n_workers = max(1, mp.cpu_count() - 1)
     key = os.path.basename(df_file).replace('.csv', '')
 
-    odf = pd.read_csv(df_file); odf['open_time'] = pd.to_datetime(odf['open_time'])
+    odf = pd.read_csv(df_file)
+    odf['open_time'] = pd.to_datetime(odf['open_time'])
     if timeframe != '1min':
         df = resample_data(odf, timeframe)
         print(f"[{key}] 重采样 {len(odf)} → {len(df)} ({timeframe})")
@@ -1145,9 +1628,13 @@ def parameter_sensitivity_scan(df_file, timeframe='15min', n_workers=1):
     tf_min = get_tf_minutes(timeframe)
     m1c = build_1min_cache(odf) if (CFG.use_next_bar_exec or CFG.use_1min_path) else None
     grids = Config.param_grids()
-    cd = hours_to_bars(1.0, tf_min); mhb = days_to_bars(4.0, tf_min)
-    lm = np.log(df['close_main'].values.astype(float))
-    ls = np.log(df['close_sub'].values.astype(float))
+    cd = hours_to_bars(1.0, tf_min)
+    mhb = days_to_bars(4.0, tf_min)
+    cm = df['close_main'].values.astype(np.float64)
+    cs = df['close_sub'].values.astype(np.float64)
+    lm = np.log(cm)
+    ls = np.log(cs)
+    times_i64 = pd.to_datetime(df['open_time']).values.astype('datetime64[ns]').view(np.int64)
     base = df[['open_time', 'close_main', 'close_sub']].copy()
 
     tasks = []
@@ -1164,45 +1651,68 @@ def parameter_sensitivity_scan(df_file, timeframe='15min', n_workers=1):
     print(f"{len(tasks)} 任务包 → {n_workers} Worker")
 
     # 预热 Numba
-    _d = np.zeros(5, dtype=np.float64); _di = np.zeros(5, dtype=np.int64)
+    _d = np.zeros(5, dtype=np.float64)
+    _di = np.zeros(5, dtype=np.int64)
     try:
         kalman_filter(_d, _d, 0.001, 0.001)
-        generate_signals(_d,_d,_d,_d,_d,_d,_d,_d,_d, 2,2.0,0.5, 1,1,1, 1.0,0.001, 3.0,5.0,3,3.0)
-        scan_1min_equity(_d,_d,_d,_d,_di, 0,2, 1.,1.,1.,1, 0.,0.,0., 1.,0.,0.001)
-    except Exception: pass
+        generate_signals(_d, _d, _d, _d, _d, _d, _d, _d, _d,
+                         2, 2.0, 0.5, 1, 1, 1, 1.0, 0.001, 3.0, 5.0, 3, 3.0)
+        scan_1min_equity(_d, _d, _d, _d, _di, 0, 2, 1., 1., 1., 1,
+                         0., 0., 0., 1., 0., 0.001)
+        # 预热 _fast_bt_loop
+        _si = np.zeros(5, dtype=np.int64)
+        _bl = np.zeros(5, dtype=np.intp)
+        _br = np.ones(5, dtype=np.intp)
+        _fast_bt_loop(
+            5, _si, _d, _d, _d, _d, _si, _si,
+            _d, _d, _d, _d,
+            _d, _d, _d, _d, _d, _d, _d,
+            _d, _d, _d, _d, _di,
+            _bl, _br, _di, np.int64(60000000000),
+            1.0,
+            True, True,
+            2.0, 0.5, 1, 1, 1,
+            0.001, 3.0, 5.0, 3, 3.0, 0.1, 5.0,
+            0)
+    except Exception:
+        pass
 
-    results = []; t0 = time.time()
+    results = []
+    t0 = time.time()
     with ProcessPoolExecutor(max_workers=n_workers, initializer=_init_worker,
-                             initargs=(base, m1c, lm, ls)) as exe:
+                             initargs=(base, m1c, lm, ls, times_i64, cm, cs)) as exe:
         futs = {exe.submit(_eval_group_worker, t): t for t in tasks}
         for f in as_completed(futs):
             r = f.result()
-            if r: results.extend(r)
-            print(f"  有效策略: {len(results)} | {time.time()-t0:.1f}s", end='\r')
+            if r:
+                results.extend(r)
+            print(f"  有效策略: {len(results)} | {time.time() - t0:.1f}s", end='\r')
 
     elapsed = time.time() - t0
     print(f"\n扫描完成: {len(results)} 条, {elapsed:.1f}s")
-    if not results: return pd.DataFrame()
+    if not results:
+        return pd.DataFrame()
 
     rdf = pd.DataFrame(results)
     os.makedirs('backtest_pair', exist_ok=True)
-    out = f'backtest_pair/param_scan_{key}_{timeframe}.csv'; rdf.to_csv(out, index=False)
+    out = f'backtest_pair/param_scan_{key}_{timeframe}.csv'
+    rdf.to_csv(out, index=False)
 
-    print(f"\n{'='*100}\nTOP 20 | {key} | {timeframe}\n{'='*100}")
+    print(f"\n{'=' * 100}\nTOP 20 | {key} | {timeframe}\n{'=' * 100}")
     top20 = rdf.sort_values('real_total_ret', ascending=False).head(20)
-    cols = ['z_entry','z_exit','lookback_hours','delta_per_day','min_hold_hours',
-            'trades','zero_avg_pnl','real_avg_pnl','fee_per_trade',
-            'real_total_ret','real_win_rate','real_pf','real_max_dd','avg_hold_hrs']
+    cols = ['z_entry', 'z_exit', 'lookback_hours', 'delta_per_day', 'min_hold_hours',
+            'trades', 'zero_avg_pnl', 'real_avg_pnl', 'fee_per_trade',
+            'real_total_ret', 'real_win_rate', 'real_pf', 'real_max_dd', 'avg_hold_hrs']
     print(top20[cols].to_string(index=False))
 
-    print(f"\n{'='*100}\n各维度边际效应 | {key} | {timeframe}\n{'='*100}")
-    for dim in ['z_entry','z_exit','lookback_hours','delta_per_day','min_hold_hours']:
-        g = rdf.groupby(dim).agg({'zero_avg_pnl':'mean','real_avg_pnl':'mean',
-                                   'trades':'mean','real_total_ret':'mean'}).round(4)
+    print(f"\n{'=' * 100}\n各维度边际效应 | {key} | {timeframe}\n{'=' * 100}")
+    for dim in ['z_entry', 'z_exit', 'lookback_hours', 'delta_per_day', 'min_hold_hours']:
+        g = rdf.groupby(dim).agg({'zero_avg_pnl': 'mean', 'real_avg_pnl': 'mean',
+                                   'trades': 'mean', 'real_total_ret': 'mean'}).round(4)
         print(f"\n--- {dim} ---\n{g.to_string()}")
 
     prof = rdf[rdf['real_total_ret'] > 0]
-    print(f"\n{'='*80}\n核心判断 | {key} | {timeframe}\n{'='*80}")
+    print(f"\n{'=' * 80}\n核心判断 | {key} | {timeframe}\n{'=' * 80}")
     print(f"  总: {len(rdf)} | 盈利: {len(prof)}")
     if len(prof):
         print(f"  最高: {prof['real_total_ret'].max():.2f}% | "
