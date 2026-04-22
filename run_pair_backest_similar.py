@@ -1266,7 +1266,6 @@ def _fast_bt_loop(
                         trade_durs[n_trades] = (m1t_i64[j] - seg_open_i64) / 60000000000.0
                         n_trades += 1
 
-                    # ★ 修复幽灵重入：轻量级抹除后续残余信号
                     signals[i] = 0
                     k = i + 1
                     # 一直往后清零，直到遇到平仓信号 (0) 或反向开仓信号 (-e_dir)
@@ -1930,6 +1929,7 @@ def walk_forward_optimization(df_file, timeframe='15min',
         if len(oos_eq_adj): all_oos_eq.append(oos_eq_adj + (all_oos_eq[-1][-1] if all_oos_eq else 0))
         if len(oos_eff): all_oos_eff.append(oos_eff)
         if not oos_t.empty:
+            print(oos_t.groupby('close_reason')['net_pnl'].agg(['count', 'mean', 'sum']))
             oos_t['window_id'] = wid;
             oos_t['best_params'] = str(bp)
             all_oos_trades.append(oos_t)
@@ -2012,20 +2012,20 @@ def walk_forward_optimization(df_file, timeframe='15min',
 # =============================================================================
 if __name__ == '__main__':
 
-    # 跳过 rebuild 是一种近似，但它对排名的影响极小。具体来说，回测结果的差异来源于**“影子冷却期 (Shadow Cooldown)”**
-    target_dir = 'kline_data'
-    suffix = '1m.csv'
-    df_files = [os.path.join(target_dir, f)
-                for f in os.listdir(target_dir)
-                if os.path.isfile(os.path.join(target_dir, f))
-                and f.endswith(suffix) and f.count('_') == 2]
-    timeframes = ['1min', '5min', '10min', '15min', '30min']
+    # # 跳过 rebuild 是一种近似，但它对排名的影响极小。具体来说，回测结果的差异来源于**“影子冷却期 (Shadow Cooldown)”**
+    # target_dir = 'kline_data'
+    # suffix = '1m.csv'
+    # df_files = [os.path.join(target_dir, f)
+    #             for f in os.listdir(target_dir)
+    #             if os.path.isfile(os.path.join(target_dir, f))
+    #             and f.endswith(suffix) and f.count('_') == 2]
+    # timeframes = ['1min', '5min', '10min', '15min', '30min']
+    #
+    # for df_file in df_files:
+    #     for tf in timeframes:
+    #         print(f"\n{'='*70}\n参数扫描 | {os.path.basename(df_file)} | {tf}\n{'='*70}")
+    #         parameter_sensitivity_scan(df_file, timeframe=tf)
 
-    for df_file in df_files:
-        for tf in timeframes:
-            print(f"\n{'='*70}\n参数扫描 | {os.path.basename(df_file)} | {tf}\n{'='*70}")
-            parameter_sensitivity_scan(df_file, timeframe=tf)
-
-    walk_forward_optimization('kline_data/DOGE_ETH_1m.csv', timeframe='30min',
+    walk_forward_optimization('kline_data/DOGE_XRP_1m.csv', timeframe='30min',
                               train_months=6, test_months=1,
                               cooldown_hours=1.0, max_hold_days=4.0)
