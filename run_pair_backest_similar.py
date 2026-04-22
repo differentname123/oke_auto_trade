@@ -1859,7 +1859,7 @@ def walk_forward_optimization(df_file, timeframe='15min',
                                     all_scores[pk] = 0.0
 
         if not cands:
-            print(f"  W{wid}: 无通过筛选 ({combo_n} 组合)");
+            print(f"  [W{wid} 失败] 扫描 {combo_n} 种组合，0 种通过筛选。");
             cur += test_d;
             wid += 1;
             continue
@@ -1886,9 +1886,10 @@ def walk_forward_optimization(df_file, timeframe='15min',
                            'tr_ret': round(ch['tr_ret'], 4),
                            'tr_avg': round(ch['tr_avg'], 4),
                            'combos': combo_n, 'passed': len(cands)})
-        print(f"  Best: {bp}\n  t={ch['raw_t']:.4f} stab={ch['stab']:.4f} "
-              f"({ch['pm']}/{ch['tm']}mo+) trades={ch['n_trades']} closed={ch['n_closed']} "
-              f"ret={ch['tr_ret']:.2f}% plateau={best_ps:.4f}")
+
+        # 优化打印日志：参数筛选漏斗与最优参数
+        print(f"  [参数筛选] 扫描总数组合: {combo_n} | 通过基础风控与盈利筛选: {len(cands)}")
+        print(f"  [最优参数] {bp}")
 
         # 多样化集成 (与之前保持一致)
         lb_groups = {}
@@ -1905,7 +1906,7 @@ def walk_forward_optimization(df_file, timeframe='15min',
                   for _, i in div[:5]]
             diverse_hist.append({'window_id': wid, 'candidates': ei})
 
-        # OOS 测试 (与之前保持一致)
+        # OOS 测试准备 (获取 tr_trades 用于分析训练期盈亏分布)
         combined = pd.concat([tr_df, te_df], ignore_index=True)
         test_start = te_df['open_time'].iloc[0]
         test_full, _, _ = build_signal_df(
@@ -1916,9 +1917,22 @@ def walk_forward_optimization(df_file, timeframe='15min',
         tmask = test_full['open_time'] >= test_start
         tr_part = test_full[~tmask].copy();
         te_part = test_full[tmask].copy()
-        _, tr_eq, _, tr_es = compute_equity_and_trades(tr_part, min1_cache=m1c, tf_minutes=tf_min)
+
+        # 【修改】捕获 tr_trades，用于分析训练期的死因
+        tr_trades, tr_eq, _, tr_es = compute_equity_and_trades(tr_part, min1_cache=m1c, tf_minutes=tf_min)
         bnd_eq = tr_eq[-1] if len(tr_eq) else 0.0
 
+        # 打印训练期 (IS) 表现与分布
+        print(
+            f"  [训练期 IS] 收益: {ch['tr_ret']:.2f}% | 交易: {ch['n_trades']}笔 | 平均每笔: {ch['tr_avg']:.4f}% | 胜率月: {ch['pm']}/{ch['tm']}")
+        if not tr_trades.empty and 'close_reason' in tr_trades.columns:
+            is_cr = tr_trades.groupby('close_reason')['net_pnl'].agg(['count', 'mean', 'sum']).round(4)
+            print("  > 训练期平仓归因:")
+            for idx, row in is_cr.iterrows():
+                print(
+                    f"    - {idx.ljust(15)}: {int(row['count'])}笔 | 均利: {row['mean']:.4f}% | 总计: {row['sum']:.4f}%")
+
+        # 执行 OOS 测试
         oos_t, oos_eq, oos_et, te_es = compute_equity_and_trades(
             te_part, min1_cache=m1c, exec_state=tr_es, tf_minutes=tf_min)
         oos_t, te_es, _ = _wf_force_close(oos_t, oos_eq, te_es, bnd_eq, te_part)
@@ -1928,29 +1942,48 @@ def walk_forward_optimization(df_file, timeframe='15min',
 
         if len(oos_eq_adj): all_oos_eq.append(oos_eq_adj + (all_oos_eq[-1][-1] if all_oos_eq else 0))
         if len(oos_eff): all_oos_eff.append(oos_eff)
-        if not oos_t.empty:
-            print(oos_t.groupby('close_reason')['net_pnl'].agg(['count', 'mean', 'sum']))
-            oos_t['window_id'] = wid;
-            oos_t['best_params'] = str(bp)
-            all_oos_trades.append(oos_t)
 
+        # 统计并打印测试期 (OOS) 表现与分布
         st = backtest_stats(oos_t, oos_eq_adj, effective_pnls=oos_eff)
         if st:
             st['window_id'] = wid;
             all_oos_stats.append(st)
-            print(f"  OOS: trades={st['total_trades']} avg={st['avg_profit_per_trade']:.4f}% "
-                  f"win={st['Win Rate']:.2%} ret={st['Total Return']:.2f}% MDD={st['Max Drawdown']:.4f}%")
+            print(
+                f"  [测试期 OOS] 收益: {st['Total Return']:.2f}% | 交易: {st['total_trades']}笔 | 平均每笔: {st['avg_profit_per_trade']:.4f}% | 胜率: {st['Win Rate']:.2%} | MDD: {st['Max Drawdown']:.4f}%")
+
+            if not oos_t.empty and 'close_reason' in oos_t.columns:
+                oos_cr = oos_t.groupby('close_reason')['net_pnl'].agg(['count', 'mean', 'sum']).round(4)
+                print("  > 测试期平仓归因:")
+                for idx, row in oos_cr.iterrows():
+                    print(
+                        f"    - {idx.ljust(15)}: {int(row['count'])}笔 | 均利: {row['mean']:.4f}% | 总计: {row['sum']:.4f}%")
+
+            oos_t['window_id'] = wid;
+            oos_t['best_params'] = str(bp)
+            all_oos_trades.append(oos_t)
+
+            # 计算更直观的 OOS 保留率 (Retain Rate)
             oos_avg = st['avg_profit_per_trade']
-            deg = (ch['tr_avg'] / oos_avg) if oos_avg > 0 else float('inf')
-            deg_log.append({'window_id': wid, 'tr_avg': round(ch['tr_avg'], 4),
-                            'oos_avg': round(oos_avg, 4), 'deg': round(deg, 2) if np.isfinite(deg) else float('inf')})
-            ds = f"{deg:.2f}" if np.isfinite(deg) else "inf"
-            print(f"  退化比: {ds}")
+            tr_avg = ch['tr_avg']
+            if abs(tr_avg) > 1e-8:
+                retain_pct = (oos_avg / tr_avg) * 100
+                retain_str = f"{retain_pct:.1f}%"
+            else:
+                retain_pct = 0.0
+                retain_str = "N/A"
+
+            deg_log.append({'window_id': wid, 'tr_avg': round(tr_avg, 4),
+                            'oos_avg': round(oos_avg, 4), 'retain_pct': round(retain_pct, 2)})
+
+            # 颜色标记提醒
+            warn_flag = " 🔴反向亏损" if retain_pct < 0 else (" 🟢优秀" if retain_pct > 40 else " 🟡衰退严重")
+            print(
+                f"  [稳健性评估] 训练均利: {tr_avg:.4f}% -> 测试均利: {oos_avg:.4f}% | OOS收益保留率: {retain_str}{warn_flag}")
 
         cur += test_d;
         wid += 1
 
-    # ========== 汇总 (与之前完全保持一致) ==========
+    # ========== 汇总 ==========
     print(f"\n{'=' * 60}\nWF 汇总 | {key}\n{'=' * 60}")
     os.makedirs('backtest_pair', exist_ok=True)
 
@@ -1981,22 +2014,24 @@ def walk_forward_optimization(df_file, timeframe='15min',
         if deg_log:
             ddf = pd.DataFrame(deg_log)
             for _, r in ddf.iterrows():
-                d = r['deg'];
-                f = " ⚠️" if (not np.isfinite(d) or d > 3) else ""
+                rt = r['retain_pct'];
+                f = " ⚠️负收益" if rt < 0 else (" ⭐稳健" if rt > 40 else "")
                 print(f"  W{int(r['window_id'])}: tr={r['tr_avg']:.4f}% oos={r['oos_avg']:.4f}% "
-                      f"deg={f'{d:.2f}' if np.isfinite(d) else 'inf'}{f}")
-            fr = [r['deg'] for r in deg_log if np.isfinite(r['deg'])]
+                      f"保留率={rt:.1f}%{f}")
+
+            # 修改综合评价逻辑
+            fr = [r['retain_pct'] for r in deg_log if r['retain_pct'] > -999]  # 排除无效值
             if fr:
                 am = np.mean(fr);
-                hi = sum(1 for r in fr if r > 3)
-                print(f"\n  平均退化: {am:.2f} | >3: {hi}/{len(fr)}")
-                if am > 3:
-                    print("  🔴 退化严重")
-                elif am > 2:
-                    print("  🟡 有退化")
+                hi = sum(1 for r in fr if r < 0)
+                print(f"\n  平均保留率: {am:.1f}% | 负向窗口数: {hi}/{len(fr)}")
+                if hi > len(fr) / 2:
+                    print("  🔴 多数窗口反向亏损，策略存在严重过拟合或止损缺陷。")
+                elif am < 20:
+                    print("  🟡 衰退极其严重，需收紧训练集条件或修改止损阈值。")
                 else:
-                    print("  🟢 合理")
-            ddf.to_csv(f'backtest_pair/{key}_oos_degradation.csv', index=False)
+                    print("  🟢 稳健性合理。")
+            ddf.to_csv(f'backtest_pair/{key}_oos_retention.csv', index=False)
 
     if param_hist:
         ph = pd.DataFrame(param_hist)
