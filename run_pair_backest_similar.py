@@ -2061,6 +2061,6 @@ if __name__ == '__main__':
     #         print(f"\n{'='*70}\n参数扫描 | {os.path.basename(df_file)} | {tf}\n{'='*70}")
     #         parameter_sensitivity_scan(df_file, timeframe=tf)
 
-    walk_forward_optimization('kline_data/DOGE_XRP_1m.csv', timeframe='30min',
+    walk_forward_optimization('kline_data/ARB_OP_1m.csv', timeframe='30min',
                               train_months=6, test_months=1,
                               cooldown_hours=1.0, max_hold_days=4.0)
