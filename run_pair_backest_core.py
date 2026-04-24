@@ -28,7 +28,7 @@ def calc_volatility_squeeze(series, short_win=60):
 
 def run_backtest(df):
     print(">>> 终局架构: STARV 7.1 (均值回归 + 纯理论防暴毙机制) 启动...")
-    df['log_spread'] = np.log(df['close_sub'])
+    df['log_spread'] = np.log(df['close_main'])
 
     # 1. 效率系数 (用于判断噪音 vs 趋势)
     df['ER_Fast'] = calc_kaufman_er(df['log_spread'], window=5)  # 微观动能
