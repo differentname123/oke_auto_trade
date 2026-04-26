@@ -4,34 +4,6 @@ import os
 from datetime import timedelta
 
 
-# ==========================================
-# 0. 准备测试数据 (为了让你拿到就能跑，实盘请删掉这部分)
-# ==========================================
-def generate_mock_data():
-    os.makedirs("kline_data", exist_ok=True)
-    dates = pd.date_range("2023-01-01", "2023-06-01", freq="1min")
-    np.random.seed(42)
-
-    # 模拟 BTC 和 ETH
-    btc_prices = 20000 * np.exp(np.cumsum(np.random.normal(0.00001, 0.001, len(dates))))
-    eth_prices = 1500 * np.exp(np.cumsum(np.random.normal(0.000012, 0.0015, len(dates))))
-    df_btc_eth = pd.DataFrame({"open_time": dates, "close_main": btc_prices, "close_sub": eth_prices})
-    df_btc_eth.to_csv("kline_data/BTC_ETH_1m.csv", index=False)
-
-    # 模拟 DOGE 和 SOL
-    doge_prices = 0.08 * np.exp(np.cumsum(np.random.normal(0.000005, 0.002, len(dates))))
-    sol_prices = 20 * np.exp(np.cumsum(np.random.normal(0.000015, 0.0025, len(dates))))
-    df_doge_sol = pd.DataFrame({"open_time": dates, "close_main": doge_prices, "close_sub": sol_prices})
-    df_doge_sol.to_csv("kline_data/DOGE_SOL_1m.csv", index=False)
-
-    # 模拟 TON 和 XRP
-    ton_prices = 2 * np.exp(np.cumsum(np.random.normal(-0.00001, 0.002, len(dates))))
-    xrp_prices = 0.5 * np.exp(np.cumsum(np.random.normal(-0.00002, 0.0018, len(dates))))
-    df_ton_xrp = pd.DataFrame({"open_time": dates, "close_main": ton_prices, "close_sub": xrp_prices})
-    df_ton_xrp.to_csv("kline_data/TON_XRP_1m.csv", index=False)
-
-    print("✅ 模拟 1分钟 K 线数据生成完毕！")
-
 
 # ==========================================
 # 1. 数据解析与合成模块
@@ -59,18 +31,28 @@ def load_and_preprocess_data(file_list):
 
 
 # ==========================================
-# 2. 策略引擎与回测逻辑 (零延迟 + 详尽统计版)
+# 2. 策略引擎与回测逻辑 (支持动态参数注入)
 # ==========================================
-def run_backtest(df):
-    print("\n🚀 启动截面动量(做空)回测引擎...")
+def run_backtest(df, param_name="默认基准参数", custom_params=None):
+    print(f"\n🚀 启动截面动量(做空)回测引擎... [{param_name}]")
 
-    MOM_WINDOW = 20 * 6
-    VOL_WINDOW = 20 * 6
-    BTC_TREND_WINDOW = 60 * 6
-    MAX_WEIGHT = 0.30
-    TOP_K = 2
-    FEE_RATE = 0.0005
-    INITIAL_CAPITAL = 10000.0
+    # --- 策略参数 (动态支持) ---
+    if custom_params is None:
+        custom_params = {
+            'MOM_WINDOW': 20 * 6,
+            'VOL_WINDOW': 20 * 6,
+            'BTC_TREND_WINDOW': 60 * 6,
+            'MAX_WEIGHT': 0.30
+        }
+
+    MOM_WINDOW = custom_params['MOM_WINDOW']
+    VOL_WINDOW = custom_params['VOL_WINDOW']
+    BTC_TREND_WINDOW = custom_params['BTC_TREND_WINDOW']
+    MAX_WEIGHT = custom_params['MAX_WEIGHT']
+
+    TOP_K = 2  # 每次做空排名前 2 的跌幅币种
+    FEE_RATE = 0.0005  # 统一修改为真实的万分之五 Taker 手续费
+    INITIAL_CAPITAL = 10000.0  # 初始本金 ($)
 
     coins = list(df.columns)
     if 'BTC' not in coins:
@@ -103,13 +85,15 @@ def run_backtest(df):
 
         target_weights = {coin: 0.0 for coin in coins}
 
-        # 🔴 改回零延迟：直接使用当前的 i 获取信号，并在同一刻用 prices 执行
+        # 🔴 零延迟：直接使用当前的 i 获取信号，并在同一刻用 prices 执行
         if btc_trend_off.iloc[i]:
             current_mom = adj_mom.iloc[i].dropna()
 
+            # 寻找动量为负的币种
             negative_mom = current_mom[current_mom < 0]
 
             if not negative_mom.empty:
+                # 选取跌得最惨的 TOP_K 个币种
                 top_coins = negative_mom.nsmallest(TOP_K).index.tolist()
 
                 inv_vol = {}
@@ -122,7 +106,7 @@ def run_backtest(df):
                 for c in top_coins:
                     if total_inv_vol > 0:
                         raw_weight = inv_vol[c] / total_inv_vol
-                        target_weights[c] = -min(raw_weight, MAX_WEIGHT)
+                        target_weights[c] = -min(raw_weight, MAX_WEIGHT)  # 🔴 设置为负数，代表做空目标
 
         target_values = {c: current_equity * w for c, w in target_weights.items()}
 
@@ -206,16 +190,34 @@ def run_backtest(df):
 # ==========================================
 if __name__ == "__main__":
 
+
     file_list = ["kline_data/BTC_ETH_1m.csv", "kline_data/DOGE_SOL_1m.csv", "kline_data/TON_XRP_1m.csv"]
     df_4h = load_and_preprocess_data(file_list)
-    logs_df, curve_df = run_backtest(df_4h)
 
-    print("\n📝 === 最近 10 笔交易日志 ===")
-    if not logs_df.empty:
-        display_logs = logs_df.tail(10).copy()
-        display_logs['price'] = display_logs['price'].apply(lambda x: f"${x:.4f}")
-        display_logs['value'] = display_logs['value'].apply(lambda x: f"${x:.2f}")
-        display_logs['fee'] = display_logs['fee'].apply(lambda x: f"${x:.2f}")
-        print(display_logs.to_string(index=False))
-    else:
-        print("未发生任何交易 (可能是因为宏观开关一直未触发，或动量全为负)。")
+    # ==========================================
+    # 🔴 循环测试参数敏感性 (做空组)
+    # ==========================================
+    test_scenarios = [
+        {
+            "name": "基准参数 (最初设定)",
+            "params": {'MOM_WINDOW': 20 * 6, 'VOL_WINDOW': 20 * 6, 'BTC_TREND_WINDOW': 60 * 6, 'MAX_WEIGHT': 0.30}
+        },
+        {
+            "name": "挑战组 1：短期敏捷神经质 (减半周期)",
+            "params": {'MOM_WINDOW': 10 * 6, 'VOL_WINDOW': 10 * 6, 'BTC_TREND_WINDOW': 30 * 6, 'MAX_WEIGHT': 0.30}
+        },
+        {
+            "name": "挑战组 2：长期宏观迟钝 (拉长周期)",
+            "params": {'MOM_WINDOW': 30 * 6, 'VOL_WINDOW': 30 * 6, 'BTC_TREND_WINDOW': 90 * 6, 'MAX_WEIGHT': 0.30}
+        },
+        {
+            "name": "挑战组 3：风控资本极度受限 (减半仓位)",
+            "params": {'MOM_WINDOW': 20 * 6, 'VOL_WINDOW': 20 * 6, 'BTC_TREND_WINDOW': 60 * 6, 'MAX_WEIGHT': 0.15}
+        }
+    ]
+
+    # 依次执行各组参数
+    for scenario in test_scenarios:
+        logs_df, curve_df = run_backtest(df_4h, param_name=scenario["name"], custom_params=scenario["params"])
+
+    print("\n✅ 所有做空参数组敏感性测试执行完毕。")

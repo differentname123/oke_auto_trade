@@ -42,16 +42,25 @@ def load_and_preprocess_data(file_list):
 # ==========================================
 # 2. 策略引擎与回测逻辑
 # ==========================================
-def run_backtest(df):
-    print("\n🚀 启动截面动量回测引擎...")
+def run_backtest(df, param_name="默认基准参数", custom_params=None):
+    print(f"\n🚀 启动截面动量回测引擎... [{param_name}]")
 
-    # --- 策略参数 ---
-    MOM_WINDOW = 20 * 6  # 20天的 4H K线数 (20 * 6 = 120)
-    VOL_WINDOW = 20 * 6  # 波动率计算窗口
-    BTC_TREND_WINDOW = 60 * 6  # BTC 60天均线作为多头开关
-    MAX_WEIGHT = 0.30  # 单币最大仓位 30%
+    # --- 策略参数 (支持动态传入) ---
+    if custom_params is None:
+        custom_params = {
+            'MOM_WINDOW': 20 * 6,
+            'VOL_WINDOW': 20 * 6,
+            'BTC_TREND_WINDOW': 60 * 6,
+            'MAX_WEIGHT': 0.30
+        }
+
+    MOM_WINDOW = custom_params['MOM_WINDOW']
+    VOL_WINDOW = custom_params['VOL_WINDOW']
+    BTC_TREND_WINDOW = custom_params['BTC_TREND_WINDOW']
+    MAX_WEIGHT = custom_params['MAX_WEIGHT']
+
     TOP_K = 2  # 每次做多排名前 2 的币种
-    FEE_RATE = 0.0005  # 固定的单边交易手续费 (0.1%)
+    FEE_RATE = 0.0005  # 固定的单边交易手续费 (0.05%)
     INITIAL_CAPITAL = 10000.0  # 初始本金 ($)
 
     coins = list(df.columns)
@@ -211,24 +220,36 @@ def run_backtest(df):
 # ==========================================
 if __name__ == "__main__":
 
-
     # 2. 你的输入列表
     file_list = ["kline_data/BTC_ETH_1m.csv", "kline_data/DOGE_SOL_1m.csv", "kline_data/TON_XRP_1m.csv"]
 
     # 3. 解析为 4H 数据
     df_4h = load_and_preprocess_data(file_list)
 
-    # 4. 运行回测
-    logs_df, curve_df = run_backtest(df_4h)
+    # ==========================================
+    # 🔴 新增：循环测试参数敏感性
+    # ==========================================
+    test_scenarios = [
+        {
+            "name": "基准参数 (最初设定)",
+            "params": {'MOM_WINDOW': 20 * 6, 'VOL_WINDOW': 20 * 6, 'BTC_TREND_WINDOW': 60 * 6, 'MAX_WEIGHT': 0.30}
+        },
+        {
+            "name": "挑战组 1：短期敏捷神经质 (减半周期)",
+            "params": {'MOM_WINDOW': 10 * 6, 'VOL_WINDOW': 10 * 6, 'BTC_TREND_WINDOW': 30 * 6, 'MAX_WEIGHT': 0.30}
+        },
+        {
+            "name": "挑战组 2：长期宏观迟钝 (拉长周期)",
+            "params": {'MOM_WINDOW': 30 * 6, 'VOL_WINDOW': 30 * 6, 'BTC_TREND_WINDOW': 90 * 6, 'MAX_WEIGHT': 0.30}
+        },
+        {
+            "name": "挑战组 3：风控资本极度受限 (减半仓位)",
+            "params": {'MOM_WINDOW': 20 * 6, 'VOL_WINDOW': 20 * 6, 'BTC_TREND_WINDOW': 60 * 6, 'MAX_WEIGHT': 0.15}
+        }
+    ]
 
-    # 5. 打印最近的 10 笔交易日志方便分析
-    print("\n📝 === 最近 10 笔交易日志 ===")
-    if not logs_df.empty:
-        # 格式化一下输出让它更好看
-        display_logs = logs_df.tail(10).copy()
-        display_logs['price'] = display_logs['price'].apply(lambda x: f"${x:.4f}")
-        display_logs['value'] = display_logs['value'].apply(lambda x: f"${x:.2f}")
-        display_logs['fee'] = display_logs['fee'].apply(lambda x: f"${x:.2f}")
-        print(display_logs.to_string(index=False))
-    else:
-        print("未发生任何交易 (可能是因为宏观开关一直未触发，或动量全为负)。")
+    # 依次执行各组参数
+    for scenario in test_scenarios:
+        logs_df, curve_df = run_backtest(df_4h, param_name=scenario["name"], custom_params=scenario["params"])
+
+    print("\n✅ 所有参数组敏感性测试执行完毕。")
