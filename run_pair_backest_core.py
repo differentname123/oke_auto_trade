@@ -1,227 +1,234 @@
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
+import os
 from datetime import timedelta
 
 
 # ==========================================
-# 第一部分：因子计算模块 (The Alpha Math)
+# 0. 准备测试数据 (为了让你拿到就能跑，实盘请删掉这部分)
 # ==========================================
-
-def calc_kaufman_er(series, window=20):
-    change = series.diff(window).abs()
-    volatility = series.diff().abs().rolling(window=window).sum()
-    er = change / volatility
-    return er.fillna(0)
-
-
-def calc_volatility_squeeze(series, short_win=60):
-    price_mean = series.rolling(window=short_win).mean()
-    price_std = series.rolling(window=short_win).std()
-    price_z = (series - price_mean) / price_std
-    return price_z.fillna(0), price_std.fillna(0)
 
 
 # ==========================================
-# 第二部分：策略回测引擎 (Backtest Engine)
+# 1. 数据解析与合成模块
 # ==========================================
+def load_and_preprocess_data(file_list):
+    print("⏳ 正在解析并合并数据...")
+    dfs = []
+    for file in file_list:
+        # 从文件名提取币种名称，例如 BTC_ETH_1m.csv -> main: BTC, sub: ETH
+        basename = os.path.basename(file).split('_')
+        coin_main, coin_sub = basename[0], basename[1]
 
+        df = pd.read_csv(file)
+        df['open_time'] = pd.to_datetime(df['open_time'])
+        df.set_index('open_time', inplace=True)
+
+        # 拆分并重命名列
+        df_main = df[['close_main']].rename(columns={'close_main': coin_main})
+        df_sub = df[['close_sub']].rename(columns={'close_sub': coin_sub})
+
+        dfs.extend([df_main, df_sub])
+
+    # 横向合并所有币种，向前填充缺失值 (处理停机或不同步)
+    price_df_1m = pd.concat(dfs, axis=1).sort_index().ffill()
+
+    # 【降采样】：将 1m 数据合成为 4H 级别，取每个 4H 窗口的最后一个收盘价
+    price_df_4h = price_df_1m.resample('4h').last().dropna()
+    print(f"✅ 数据合并完成！共有 {len(price_df_4h)} 根 4H K线。包含币种: {list(price_df_4h.columns)}")
+    return price_df_4h
+
+
+# ==========================================
+# 2. 策略引擎与回测逻辑
+# ==========================================
 def run_backtest(df):
-    print(">>> 终局架构: STARV 7.1 (均值回归 + 纯理论防暴毙机制) 启动...")
-    df['log_spread'] = np.log(df['close_main'])
+    print("\n🚀 启动截面动量回测引擎...")
 
-    # 1. 效率系数 (用于判断噪音 vs 趋势)
-    df['ER_Fast'] = calc_kaufman_er(df['log_spread'], window=5)  # 微观动能
-    df['ER_Slow'] = calc_kaufman_er(df['log_spread'], window=15)  # 局部结构相变监测
+    # --- 策略参数 ---
+    MOM_WINDOW = 20 * 6  # 20天的 4H K线数 (20 * 6 = 120)
+    VOL_WINDOW = 20 * 6  # 波动率计算窗口
+    BTC_TREND_WINDOW = 60 * 6  # BTC 60天均线作为多头开关
+    MAX_WEIGHT = 0.30  # 单币最大仓位 30%
+    TOP_K = 2  # 每次做多排名前 2 的币种
+    FEE_RATE = 0.0005  # 固定的单边交易手续费 (0.1%)
+    INITIAL_CAPITAL = 10000.0  # 初始本金 ($)
 
-    # 2. Z-Score (用于测算偏离度)
-    df['Price_Z'], df['Local_Std'] = calc_volatility_squeeze(df['log_spread'], short_win=60)
+    coins = list(df.columns)
+    if 'BTC' not in coins:
+        raise ValueError("数据中必须包含 BTC 作为宏观开关！")
 
-    # 3. Z-Score 的一阶导数 (速度)，用于监测是否发生“动量逃逸”
-    df['Z_Velocity'] = df['Price_Z'].diff(3)
+    # --- 预计算向量化指标 (Alpha 层) ---
+    # 1. 累计收益率 (分子)
+    returns = df.pct_change(MOM_WINDOW)
+    # 2. 年化波动率 (分母)，这里用 4H 收益率的滚动标准差代替
+    log_returns = np.log(df / df.shift(1))
+    volatility = log_returns.rolling(window=VOL_WINDOW).std() * np.sqrt(365 * 6)
+    # 3. 风险调整后动量
+    adj_mom = returns / (volatility + 1e-8)
 
-    df = df.dropna().reset_index(drop=True)
-    print(f">>> 因子计算完毕，开始逐K线撮合，共 {len(df)} 根 1分钟 K线...")
+    # --- 预计算宏观开关 (Beta 层) ---
+    btc_ma = df['BTC'].rolling(window=BTC_TREND_WINDOW).mean()
+    btc_trend_on = df['BTC'] > btc_ma
 
-    position = 0
-    entry_price = 0.0
-    entry_time = None
+    # --- 初始化账户 ---
+    cash = INITIAL_CAPITAL
+    positions = {coin: 0.0 for coin in coins}  # 持币数量
+    trade_logs = []
+    equity_curve = []
 
-    trade_log = []
-    current_equity = 1.0
-    equity_curve = np.ones(len(df))
+    # --- 逐根 K 线步进模拟 ---
+    # 从指标计算需要的最大窗口后开始遍历
+    start_idx = max(MOM_WINDOW, VOL_WINDOW, BTC_TREND_WINDOW)
 
-    FEE_RATE = 0.0004
-    ROUND_TRIP_FEE = 2 * FEE_RATE
+    for i in range(start_idx, len(df)):
+        current_time = df.index[i]
+        prices = df.iloc[i]
 
-    # ================= 理论参数 (非拟合常数) =================
-    Z_EXTREME_THRESH = 2.6  # 统计学极值：2.6 sigma (正态分布中 99% 的边界)
-    ER_EXHAUST_THRESH = 0.35  # 物理极值：微观动能处于布朗运动态 (无序)
+        # 计算当前总资产 (现金 + 持仓市值)
+        current_equity = cash + sum(positions[c] * prices[c] for c in coins)
+        equity_curve.append({'time': current_time, 'equity': current_equity})
 
-    # 【理论防线 1】相变切断：如果在持仓期间，局部结构突然变得极其有序 (ER > 0.65)，证明假设破产
-    PHASE_TRANSITION_ER = 0.65
-    # 【理论防线 2】时间引力失效：经验半衰期极限，假设为 20 分钟
-    MAX_GRAVITY_MINS = 20
-    # =========================================================
+        # 每隔 1 天 (即 6 根 4H K线) 触发一次换仓评估，避免换手过高
+        if i % 6 != 0:
+            continue
 
-    for i in range(5, len(df)):
-        current_time = df['open_time'].iloc[i]
-        price = df['log_spread'].iloc[i]
+        target_weights = {coin: 0.0 for coin in coins}
 
-        price_z = df['Price_Z'].iloc[i - 1]
-        price_z_current = df['Price_Z'].iloc[i]
-        er_fast = df['ER_Fast'].iloc[i]
-        er_slow = df['ER_Slow'].iloc[i]
-        z_velocity = df['Z_Velocity'].iloc[i]
+        # 1. 判断宏观开关 (当前代码已经是 iloc[i]，零延迟逻辑)
+        if btc_trend_on.iloc[i]:
+            # 获取当前时刻的截面动量得分
+            current_mom = adj_mom.iloc[i].dropna()
+            # 筛选动量 > 0 的币种
+            positive_mom = current_mom[current_mom > 0]
 
-        # -------------------
-        # 入场逻辑：只在“无序”极值处捡硬币
-        # -------------------
-        if position == 0:
-            if er_fast < ER_EXHAUST_THRESH:
-                # 向上偏离极值且速度开始放缓，做空
-                if price_z > Z_EXTREME_THRESH and z_velocity < 0:
-                    position = -1
-                    entry_price = price
-                    entry_time = current_time
-                    print(f"[入场] {current_time} | 逆势做空 | Z: {price_z:.2f}, ER: {er_fast:.2f}")
+            if not positive_mom.empty:
+                # 选取排名前 TOP_K 的币种
+                top_coins = positive_mom.nlargest(TOP_K).index.tolist()
 
-                # 向下偏离极值且速度开始放缓，做多
-                elif price_z < -Z_EXTREME_THRESH and z_velocity > 0:
-                    position = 1
-                    entry_price = price
-                    entry_time = current_time
-                    print(f"[入场] {current_time} | 逆势做多 | Z: {price_z:.2f}, ER: {er_fast:.2f}")
+                # 2. Risk 层：逆波动率分配权重
+                inv_vol = {}
+                for c in top_coins:
+                    c_vol = volatility[c].iloc[i]
+                    inv_vol[c] = 1.0 / c_vol if c_vol > 0 else 0
 
-        # -------------------
-        # 出场逻辑：动态状态机证伪
-        # -------------------
-        elif position != 0:
-            hold_time = (current_time - entry_time).total_seconds() / 60.0
-            gross_return = (price - entry_price) * position
-            net_return = gross_return - ROUND_TRIP_FEE
-            exit_reason = None
+                total_inv_vol = sum(inv_vol.values())
 
-            # 【圣杯时刻】完美回归均值
-            if (position == 1 and price_z_current >= 0) or (position == -1 and price_z_current <= 0):
-                exit_reason = "均值回归完成(Z=0)"
+                for c in top_coins:
+                    if total_inv_vol > 0:
+                        raw_weight = inv_vol[c] / total_inv_vol
+                        target_weights[c] = min(raw_weight, MAX_WEIGHT)  # 强制限制最大仓位
 
-            # 【防线 1：相变切断】如果我们做回归，但市场打出了流畅的单边直线 (ER_Slow 飙升)
-            # 意味着我们接飞刀接在了主升浪的起点，旧模型物理崩塌，立刻逃生！
-            elif er_slow > PHASE_TRANSITION_ER and gross_return < 0:
-                exit_reason = f"结构相变逃生(ER>{PHASE_TRANSITION_ER})"
+        # 3. Execution 层：执行交易 (先卖后买，释放现金)
+        target_values = {c: current_equity * w for c, w in target_weights.items()}
 
-            # 【防线 2：动量逃逸】Z-score 反向以极快的速度继续扩大 (列车加速)
-            elif (position == 1 and z_velocity < -0.5) or (position == -1 and z_velocity > 0.5):
-                if gross_return < -0.001:  # 仅在亏损且加速时切断
-                    exit_reason = "动量逃逸(Z加速扩大)"
+        # [执行卖出]
+        for c in coins:
+            current_val = positions[c] * prices[c]
+            diff_val = target_values.get(c, 0) - current_val
 
-            # 【防线 3：引力失效】过了预定半衰期依然没有回到均线附近
-            elif hold_time >= MAX_GRAVITY_MINS:
-                exit_reason = f"引力失效({MAX_GRAVITY_MINS}m不归)"
+            if diff_val < -1.0:  # 需要卖出 (阈值 1 美金避免浮点误差导致的微小交易)
+                sell_amount = abs(diff_val) / prices[c]
+                # 确保持仓足够
+                sell_amount = min(sell_amount, positions[c])
+                actual_sell_val = sell_amount * prices[c]
+                fee = actual_sell_val * FEE_RATE
 
-            if exit_reason:
-                current_equity += net_return
-                gross_pnl_percent = gross_return * 100
-                net_pnl_percent = net_return * 100
+                positions[c] -= sell_amount
+                cash += (actual_sell_val - fee)
 
-                trade_log.append({
-                    'entry_time': entry_time,
-                    'exit_time': current_time,
-                    'direction': 'Long' if position == 1 else 'Short',
-                    'hold_time_mins': hold_time,
-                    'entry_price': entry_price,
-                    'exit_price': price,
-                    'gross_return': gross_return,
-                    'net_return': net_return,
-                    'gross_pnl_percent': gross_pnl_percent,
-                    'net_pnl_percent': net_pnl_percent,
-                    'reason': exit_reason
+                trade_logs.append({
+                    "time": current_time, "action": "SELL", "coin": c,
+                    "price": prices[c], "amount": sell_amount, "value": actual_sell_val,
+                    "fee": fee, "reason": "Target rebalance or Macro turn off"
                 })
 
-                print(
-                    f"  [出场] {current_time} | 原因: {exit_reason:<22} | 耗时: {hold_time}m | 毛利: {gross_pnl_percent:+.3f}% | 净利: {net_pnl_percent:+.3f}%")
+        # [执行买入]
+        for c in coins:
+            current_val = positions[c] * prices[c]
+            diff_val = target_values.get(c, 0) - current_val
 
-                position = 0
-                entry_price = 0.0
+            if diff_val > 1.0:  # 需要买入
+                # 考虑手续费后的可买金额
+                available_to_spend = diff_val / (1 + FEE_RATE)
+                if cash >= available_to_spend:
+                    buy_val = available_to_spend
+                else:
+                    buy_val = cash / (1 + FEE_RATE)  # 现金不足时 All-in
 
-        if position == 0:
-            equity_curve[i] = current_equity
-        else:
-            open_fee = 1 * FEE_RATE
-            unrealized_gross = (price - entry_price) * position
-            equity_curve[i] = current_equity + unrealized_gross - open_fee
+                if buy_val > 1.0:
+                    fee = buy_val * FEE_RATE
+                    buy_amount = buy_val / prices[c]
 
-    df['Equity'] = equity_curve
-    return pd.DataFrame(trade_log), df
+                    positions[c] += buy_amount
+                    cash -= (buy_val + fee)
 
+                    trade_logs.append({
+                        "time": current_time, "action": "BUY", "coin": c,
+                        "price": prices[c], "amount": buy_amount, "value": buy_val,
+                        "fee": fee, "reason": "Target rebalance"
+                    })
 
-if __name__ == "__main__":
-    # 请继续使用你的数据测试
-    df = pd.read_csv("kline_data/BTC_ETH_1m.csv", parse_dates=['open_time'])
+    # --- 结果与指标统计 ---
+    final_equity = cash + sum(positions[c] * df.iloc[-1][c] for c in coins)
+    total_return = (final_equity - INITIAL_CAPITAL) / INITIAL_CAPITAL
 
-    trades_df, curve_df = run_backtest(df)
+    # 🔴 新增：转换为 DataFrame 方便计算高级指标
+    curve_df = pd.DataFrame(equity_curve).set_index('time')
 
-    if len(trades_df) > 0:
-        print("\n" + "=" * 70)
-        print("📊 STARV 7.1 Alpha 绩效统计 (全天候极值逆转 + 理论防御)")
-        print("=" * 70)
+    # 计算最大回撤 (Max Drawdown)
+    curve_df['cum_max'] = curve_df['equity'].cummax()
+    curve_df['drawdown'] = (curve_df['equity'] - curve_df['cum_max']) / curve_df['cum_max']
+    max_drawdown = curve_df['drawdown'].min()
 
-        total_trades = len(trades_df)
-        gross_winning = trades_df[trades_df['gross_return'] > 0]
-        gross_losing = trades_df[trades_df['gross_return'] <= 0]
-        gross_win_rate = len(gross_winning) / total_trades if total_trades > 0 else 0
-        total_gross_pct = trades_df['gross_return'].sum() * 100
-        avg_gross_win_pct = gross_winning['gross_return'].mean() * 100 if len(gross_winning) > 0 else 0
-        avg_gross_loss_pct = gross_losing['gross_return'].mean() * 100 if len(gross_losing) > 0 else 0
-        gross_pf = abs(gross_winning['gross_return'].sum() / gross_losing['gross_return'].sum()) if len(
-            gross_losing) > 0 and gross_losing['gross_return'].sum() != 0 else float('inf')
-        gross_expectancy = (gross_win_rate * avg_gross_win_pct) + ((1 - gross_win_rate) * avg_gross_loss_pct)
-
-        net_winning = trades_df[trades_df['net_return'] > 0]
-        net_losing = trades_df[trades_df['net_return'] <= 0]
-        net_win_rate = len(net_winning) / total_trades if total_trades > 0 else 0
-        total_net_pct = trades_df['net_return'].sum() * 100
-        avg_net_win_pct = net_winning['net_return'].mean() * 100 if len(net_winning) > 0 else 0
-        avg_net_loss_pct = net_losing['net_return'].mean() * 100 if len(net_losing) > 0 else 0
-        net_pf = abs(net_winning['net_return'].sum() / net_losing['net_return'].sum()) if len(net_losing) > 0 and \
-                                                                                          net_losing[
-                                                                                              'net_return'].sum() != 0 else float(
-            'inf')
-        net_expectancy = (net_win_rate * avg_net_win_pct) + ((1 - net_win_rate) * avg_net_loss_pct)
-
-        roll_max = curve_df['Equity'].cummax()
-        drawdown_pct = (curve_df['Equity'] - roll_max) * 100
-        max_drawdown_pct = drawdown_pct.min()
-
-        print(f"总交易次数: {total_trades} 次")
-        print("-" * 70)
-        print(f"{'指标':<12} | {'无手续费 (Gross Alpha)':<22} | {'带手续费 (Net Alpha)':<22}")
-        print("-" * 70)
-        print(f"{'[胜率]':<12} | {gross_win_rate:>18.2%}     | {net_win_rate:>18.2%}")
-        print(f"{'[总收益率]':<10} | {total_gross_pct:>18.2f}%    | {total_net_pct:>18.2f}%")
-        print(f"{'[单笔期望]':<10} | {gross_expectancy:>18.4f}%    | {net_expectancy:>18.4f}%")
-        print(f"{'[盈亏比]':<11} | {gross_pf:>18.2f}     | {net_pf:>18.2f}")
-        print(f"{'[平均盈利]':<10} | {avg_gross_win_pct:>18.3f}%    | {avg_net_win_pct:>18.3f}%")
-        print(f"{'[平均亏损]':<10} | {avg_gross_loss_pct:>18.3f}%    | {avg_net_loss_pct:>18.3f}%")
-        print("-" * 70)
-        print(f"最大回撤幅:  {max_drawdown_pct:.2f}% (含手续费)")
-
-        print("\n🔍 出场原因分布 (这是检验理论防线是否起效的核心):")
-        reason_counts = trades_df['reason'].value_counts()
-        for reason, count in reason_counts.items():
-            avg_gross_pnl = trades_df[trades_df['reason'] == reason]['gross_pnl_percent'].mean()
-            print(f"   - {reason:<25}: {count:>3} 次 | 平均毛收益: {avg_gross_pnl:+.3f}%")
-
-        fig, ax1 = plt.subplots(figsize=(14, 6))
-        ax1.plot(curve_df['open_time'], curve_df['log_spread'], color='grey', alpha=0.5, label='Log Price')
-        ax1.set_ylabel('Log Price', color='grey')
-        ax2 = ax1.twinx()
-        ax2.plot(curve_df['open_time'], curve_df['Equity'], color='red', linewidth=2, label='Strategy Equity')
-        ax2.set_ylabel('Cumulative Equity', color='red')
-        plt.title('STARV 7.1 Single Coin (Theoretical Mean Reversion + Phase Abort)')
-        ax2.legend(loc='upper left')
-        fig.tight_layout()
-        plt.show()
+    # 计算年化收益率 (Annualized Return)
+    days_passed = (curve_df.index[-1] - curve_df.index[0]).days
+    if days_passed > 0:
+        annual_return = (final_equity / INITIAL_CAPITAL) ** (365 / days_passed) - 1
     else:
-        print("没有触发交易。")
+        annual_return = 0.0
+
+    # 计算夏普比率 (Sharpe Ratio)，按 4H 频率调整为年化 (365天 * 每天 6 根 K线)
+    curve_df['returns'] = curve_df['equity'].pct_change()
+    mean_return = curve_df['returns'].mean()
+    std_return = curve_df['returns'].std()
+    sharpe_ratio = (mean_return / std_return * np.sqrt(365 * 6)) if std_return > 0 else 0
+
+    print("\n📊 === 回测结果核心指标 ===")
+    print(f"初始资金:     ${INITIAL_CAPITAL:.2f}")
+    print(f"最终资金:     ${final_equity:.2f}")
+    print(f"总收益率:     {total_return * 100:.2f}%")
+    print(f"年化收益率:   {annual_return * 100:.2f}%")
+    print(f"最大回撤:     {max_drawdown * 100:.2f}%")
+    print(f"夏普比率:     {sharpe_ratio:.2f}")
+    print(f"总交易笔数:   {len(trade_logs)} 笔")
+
+    return pd.DataFrame(trade_logs), curve_df
+
+
+# ==========================================
+# 主程序入口
+# ==========================================
+if __name__ == "__main__":
+
+
+    # 2. 你的输入列表
+    file_list = ["kline_data/BTC_ETH_1m.csv", "kline_data/DOGE_SOL_1m.csv", "kline_data/TON_XRP_1m.csv"]
+
+    # 3. 解析为 4H 数据
+    df_4h = load_and_preprocess_data(file_list)
+
+    # 4. 运行回测
+    logs_df, curve_df = run_backtest(df_4h)
+
+    # 5. 打印最近的 10 笔交易日志方便分析
+    print("\n📝 === 最近 10 笔交易日志 ===")
+    if not logs_df.empty:
+        # 格式化一下输出让它更好看
+        display_logs = logs_df.tail(10).copy()
+        display_logs['price'] = display_logs['price'].apply(lambda x: f"${x:.4f}")
+        display_logs['value'] = display_logs['value'].apply(lambda x: f"${x:.2f}")
+        display_logs['fee'] = display_logs['fee'].apply(lambda x: f"${x:.2f}")
+        print(display_logs.to_string(index=False))
+    else:
+        print("未发生任何交易 (可能是因为宏观开关一直未触发，或动量全为负)。")
