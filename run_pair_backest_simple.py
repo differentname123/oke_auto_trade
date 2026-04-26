@@ -4,7 +4,6 @@ import os
 from datetime import timedelta
 
 
-
 # ==========================================
 # 1. 数据解析与合成模块
 # ==========================================
@@ -49,7 +48,7 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
     VOL_WINDOW = custom_params['VOL_WINDOW']
     BTC_TREND_WINDOW = custom_params['BTC_TREND_WINDOW']
     MAX_WEIGHT = custom_params['MAX_WEIGHT']
-
+    # MAX_WEIGHT = 1
     TOP_K = 2  # 每次做空排名前 2 的跌幅币种
     FEE_RATE = 0.0005  # 统一修改为真实的万分之五 Taker 手续费
     INITIAL_CAPITAL = 10000.0  # 初始本金 ($)
@@ -173,6 +172,83 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
     std_return = curve_df['returns'].std()
     sharpe_ratio = (mean_return / std_return * np.sqrt(365 * 6)) if std_return > 0 else 0
 
+    # ==========================================
+    # 🔴 新增模块：高级交易统计 (做空适配版)
+    # ==========================================
+    win_trades = 0
+    loss_trades = 0
+    total_profit = 0.0
+    total_loss = 0.0
+    holding_times = []
+
+    # 动态追踪各币种的开仓成本和首次建仓时间
+    # 注意：做空逻辑下，记录的 qty 为负数或取绝对值计算
+    coin_states = {c: {'qty': 0.0, 'cost': 0.0, 'entry_time': None} for c in coins}
+
+    for log in trade_logs:
+        c = log['coin']
+        action = log['action']
+        amt = log['amount']
+        price = log['price']
+        fee = log['fee']
+        time = log['time']
+
+        if action == 'SELL (SHORT)':
+            # 开空/加空：计算加权均价 (使用仓位绝对值处理)
+            old_qty = abs(coin_states[c]['qty'])
+            old_cost = coin_states[c]['cost']
+            new_qty = old_qty + amt
+
+            if new_qty > 0:
+                coin_states[c]['cost'] = (old_qty * old_cost + amt * price) / new_qty
+
+            # 做空状态下，内部实际 qty 记为负数以追踪余额
+            coin_states[c]['qty'] -= amt
+
+            # 记录此轮空头持仓的首次开仓时间
+            if coin_states[c]['entry_time'] is None:
+                coin_states[c]['entry_time'] = time
+
+        elif action == 'BUY (COVER)':
+            # 平空/减空：计算已实现盈亏
+            cost_price = coin_states[c]['cost']
+            if cost_price > 0:
+                # 🔴 核心反转：做空利润 = (开仓均价 - 当前平仓价) * 数量 - 手续费
+                pnl = amt * (cost_price - price) - fee
+
+                if pnl > 0:
+                    win_trades += 1
+                    total_profit += pnl
+                else:
+                    loss_trades += 1
+                    total_loss += abs(pnl)
+
+                # 计算持仓时间
+                if coin_states[c]['entry_time'] is not None:
+                    duration = time - coin_states[c]['entry_time']
+                    holding_times.append(duration)
+
+            # 更新剩余空头数量 (加上 amt 使其趋向于 0)
+            coin_states[c]['qty'] += amt
+
+            # 清理微小浮点误差，视为完全平仓
+            if abs(coin_states[c]['qty']) < 1e-6:
+                coin_states[c]['qty'] = 0.0
+                coin_states[c]['cost'] = 0.0
+                coin_states[c]['entry_time'] = None
+
+    # 统计结算
+    total_closed_trades = win_trades + loss_trades
+    win_rate = win_trades / total_closed_trades if total_closed_trades > 0 else 0.0
+    avg_profit = total_profit / win_trades if win_trades > 0 else 0.0
+    avg_loss = total_loss / loss_trades if loss_trades > 0 else 0.0
+    profit_loss_ratio = avg_profit / avg_loss if avg_loss > 0 else float('inf')
+
+    if holding_times:
+        avg_holding_time = sum(holding_times, timedelta()) / len(holding_times)
+    else:
+        avg_holding_time = timedelta(0)
+
     print("\n📊 === 回测结果核心指标 ===")
     print(f"初始资金:     ${INITIAL_CAPITAL:.2f}")
     print(f"最终资金:     ${final_equity:.2f}")
@@ -180,7 +256,12 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
     print(f"年化收益率:   {annual_return * 100:.2f}%")
     print(f"最大回撤:     {max_drawdown * 100:.2f}%")
     print(f"夏普比率:     {sharpe_ratio:.2f}")
-    print(f"总交易笔数:   {len(trade_logs)} 笔")
+    print("-" * 25)
+    print(f"总触发操作:   {len(trade_logs)} 次")
+    print(f"有效平仓笔数: {total_closed_trades} 笔")
+    print(f"胜率 (Win%):  {win_rate * 100:.2f}%")
+    print(f"盈亏比 (P/L): {profit_loss_ratio:.2f}")
+    print(f"平均持仓时间: {avg_holding_time}")
 
     return pd.DataFrame(trade_logs), curve_df
 
@@ -189,7 +270,6 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
 # 主程序入口
 # ==========================================
 if __name__ == "__main__":
-
 
     file_list = ["kline_data/BTC_ETH_1m.csv", "kline_data/DOGE_SOL_1m.csv", "kline_data/TON_XRP_1m.csv"]
     df_4h = load_and_preprocess_data(file_list)

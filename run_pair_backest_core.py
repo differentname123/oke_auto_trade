@@ -182,7 +182,7 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
     final_equity = cash + sum(positions[c] * df.iloc[-1][c] for c in coins)
     total_return = (final_equity - INITIAL_CAPITAL) / INITIAL_CAPITAL
 
-    # 🔴 新增：转换为 DataFrame 方便计算高级指标
+    # 转换为 DataFrame 方便计算高级指标
     curve_df = pd.DataFrame(equity_curve).set_index('time')
 
     # 计算最大回撤 (Max Drawdown)
@@ -203,6 +203,77 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
     std_return = curve_df['returns'].std()
     sharpe_ratio = (mean_return / std_return * np.sqrt(365 * 6)) if std_return > 0 else 0
 
+    # ==========================================
+    # 🔴 新增模块：高级交易统计 (胜率、盈亏比、持仓时间)
+    # ==========================================
+    win_trades = 0
+    loss_trades = 0
+    total_profit = 0.0
+    total_loss = 0.0
+    holding_times = []
+
+    # 动态追踪各币种的开仓成本和首次建仓时间
+    coin_states = {c: {'qty': 0.0, 'cost': 0.0, 'entry_time': None} for c in coins}
+
+    for log in trade_logs:
+        c = log['coin']
+        action = log['action']
+        amt = log['amount']
+        price = log['price']
+        fee = log['fee']
+        time = log['time']
+
+        if action == 'BUY':
+            # 均价计算 (加权平均成本)
+            old_qty = coin_states[c]['qty']
+            old_cost = coin_states[c]['cost']
+            new_qty = old_qty + amt
+            if new_qty > 0:
+                coin_states[c]['cost'] = (old_qty * old_cost + amt * price) / new_qty
+            coin_states[c]['qty'] = new_qty
+
+            # 记录此轮持仓的首次开仓时间
+            if coin_states[c]['entry_time'] is None:
+                coin_states[c]['entry_time'] = time
+
+        elif action == 'SELL':
+            # 计算已实现盈亏 (Realized PnL)
+            cost_price = coin_states[c]['cost']
+            if cost_price > 0:
+                pnl = amt * (price - cost_price) - fee
+                if pnl > 0:
+                    win_trades += 1
+                    total_profit += pnl
+                else:
+                    loss_trades += 1
+                    total_loss += abs(pnl)
+
+                # 计算并记录此次卖出份额的持仓时间
+                if coin_states[c]['entry_time'] is not None:
+                    duration = time - coin_states[c]['entry_time']
+                    holding_times.append(duration)
+
+            # 更新剩余数量
+            coin_states[c]['qty'] -= amt
+
+            # 避免浮点数精度问题，仓位极小时视为清仓，重置开仓时间和成本
+            if coin_states[c]['qty'] < 1e-6:
+                coin_states[c]['qty'] = 0.0
+                coin_states[c]['cost'] = 0.0
+                coin_states[c]['entry_time'] = None
+
+    # 计算统计结果
+    total_closed_trades = win_trades + loss_trades
+    win_rate = win_trades / total_closed_trades if total_closed_trades > 0 else 0.0
+    avg_profit = total_profit / win_trades if win_trades > 0 else 0.0
+    avg_loss = total_loss / loss_trades if loss_trades > 0 else 0.0
+    profit_loss_ratio = avg_profit / avg_loss if avg_loss > 0 else float('inf')
+
+    if holding_times:
+        avg_holding_time = sum(holding_times, timedelta()) / len(holding_times)
+    else:
+        avg_holding_time = timedelta(0)
+
     print("\n📊 === 回测结果核心指标 ===")
     print(f"初始资金:     ${INITIAL_CAPITAL:.2f}")
     print(f"最终资金:     ${final_equity:.2f}")
@@ -210,7 +281,12 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
     print(f"年化收益率:   {annual_return * 100:.2f}%")
     print(f"最大回撤:     {max_drawdown * 100:.2f}%")
     print(f"夏普比率:     {sharpe_ratio:.2f}")
-    print(f"总交易笔数:   {len(trade_logs)} 笔")
+    print("-" * 25)
+    print(f"总触发操作:   {len(trade_logs)} 次")
+    print(f"有效平仓笔数: {total_closed_trades} 笔")
+    print(f"胜率 (Win%):  {win_rate * 100:.2f}%")
+    print(f"盈亏比 (P/L): {profit_loss_ratio:.2f}")
+    print(f"平均持仓时间: {avg_holding_time}")
 
     return pd.DataFrame(trade_logs), curve_df
 
@@ -227,7 +303,7 @@ if __name__ == "__main__":
     df_4h = load_and_preprocess_data(file_list)
 
     # ==========================================
-    # 🔴 新增：循环测试参数敏感性
+    # 循环测试参数敏感性
     # ==========================================
     test_scenarios = [
         {
