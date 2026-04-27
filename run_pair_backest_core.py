@@ -5,11 +5,6 @@ from datetime import timedelta
 
 
 # ==========================================
-# 0. 准备测试数据 (为了让你拿到就能跑，实盘请删掉这部分)
-# ==========================================
-
-
-# ==========================================
 # 1. 数据解析与合成模块
 # ==========================================
 def load_and_preprocess_data(file_list):
@@ -80,15 +75,32 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
     btc_ma = df['BTC'].rolling(window=BTC_TREND_WINDOW).mean()
     btc_trend_on = df['BTC'] > btc_ma
 
+    # --- 逐根 K 线步进模拟 ---
+    # 从指标计算需要的最大窗口后开始遍历
+    start_idx = max(MOM_WINDOW, VOL_WINDOW, BTC_TREND_WINDOW)
+
+    # ==========================================
+    # 🔴 新增模块：回测区间与标的基准涨跌幅统计
+    # ==========================================
+    if start_idx < len(df):
+        actual_start_time = df.index[start_idx]
+        actual_end_time = df.index[-1]
+        print(f"\n📅 【实际交易区间】: {actual_start_time} 至 {actual_end_time}")
+        print(f"📈 【区间内各标的基准涨跌幅 (Buy & Hold)】:")
+        for c in coins:
+            start_price = df[c].iloc[start_idx]
+            end_price = df[c].iloc[-1]
+            pct_change = (end_price - start_price) / start_price * 100
+            print(f"   - {c}: {pct_change:+.2f}% (起点: ${start_price:.6f} -> 终点: ${end_price:.6f})")
+    else:
+        print("\n⚠️ 警告：数据量不足以支撑当前参数的预热窗口。")
+    # ==========================================
+
     # --- 初始化账户 ---
     cash = INITIAL_CAPITAL
     positions = {coin: 0.0 for coin in coins}  # 持币数量
     trade_logs = []
     equity_curve = []
-
-    # --- 逐根 K 线步进模拟 ---
-    # 从指标计算需要的最大窗口后开始遍历
-    start_idx = max(MOM_WINDOW, VOL_WINDOW, BTC_TREND_WINDOW)
 
     for i in range(start_idx, len(df)):
         current_time = df.index[i]
@@ -204,7 +216,7 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
     sharpe_ratio = (mean_return / std_return * np.sqrt(365 * 6)) if std_return > 0 else 0
 
     # ==========================================
-    # 🔴 新增模块：高级交易统计 (胜率、盈亏比、持仓时间)
+    # 🔴 高级交易统计 (胜率、盈亏比、持仓时间)
     # ==========================================
     win_trades = 0
     loss_trades = 0
