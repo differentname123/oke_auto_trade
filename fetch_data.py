@@ -3,18 +3,18 @@ import requests
 import pandas as pd
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
+import zipfile  # <--- 新增这行导入，用于校验压缩包完整性
 # ================= 配置区域 =================
 TARGET_FILES = ["kline_data/BTC_ETH_1m.csv", "kline_data/DOGE_SOL_1m.csv", "kline_data/TON_XRP_1m.csv"]
 # 自动解析列表涉及到的币，并拼接成 USDT 交易对 (例如: BTCUSDT, ETHUSDT)
-SYMBOLS = []
-for f in TARGET_FILES:
-    # 提取文件名如 'BTC_ETH_1m.csv' -> 'BTC_ETH' -> ['BTC', 'ETH']
-    base_name = f.split('/')[-1].replace('_1m.csv', '')
-    for coin in base_name.split('_'):
-        sym = f"{coin}USDT"
-        if sym not in SYMBOLS:
-            SYMBOLS.append(sym)
+SYMBOLS = ["TONUSDT"]  # 预先添加已知的 TON 和 XRP 交易对
+# for f in TARGET_FILES:
+#     # 提取文件名如 'BTC_ETH_1m.csv' -> 'BTC_ETH' -> ['BTC', 'ETH']
+#     base_name = f.split('/')[-1].replace('_1m.csv', '')
+#     for coin in base_name.split('_'):
+#         sym = f"{coin}USDT"
+#         if sym not in SYMBOLS:
+#             SYMBOLS.append(sym)
 
 INTERVAL = "1m"  # K线级别
 MARKET = "futures/um"  # 市场类型：现货填"spot"，U本位填"futures/um"
@@ -38,9 +38,17 @@ def download_single_day(symbol, date_str):
     download_url = base_url + file_name
     save_path = os.path.join(SAVE_DIR, file_name)
 
-    # 如果本地已经有这个zip了，直接返回路径（支持断点续传/重复运行）
+    # 增强版检测：如果本地已经有这个zip了，检查它是否完整
     if os.path.exists(save_path):
-        return save_path, True, "已存在"
+        # 既要有大小，且能通过 zip 格式校验
+        if os.path.getsize(save_path) > 0 and zipfile.is_zipfile(save_path):
+            return save_path, True, "已存在且有效"
+        else:
+            # 如果是损坏的残骸，将其删除，让下方的 try 继续执行重新下载逻辑
+            try:
+                os.remove(save_path)
+            except Exception as e:
+                pass # 忽略删除报错（例如文件正被占用）
 
     try:
         response = requests.get(download_url, stream=True, timeout=15)
@@ -55,6 +63,7 @@ def download_single_day(symbol, date_str):
             return save_path, False, f"状态码: {response.status_code}"
     except Exception as e:
         return save_path, False, f"异常: {e}"
+
 
 def main():
     if not os.path.exists(SAVE_DIR):
