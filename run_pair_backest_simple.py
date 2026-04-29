@@ -44,7 +44,7 @@ def load_and_preprocess_data(file_list):
     for c in price_df_1m.columns:
         missing = missing_counts[c]
         fill_ratio = (missing / total_1m_rows) * 100
-        alert_flag = " ⚠️ [流动性差/频繁断档]" if fill_ratio > 5.0 else ""
+        alert_flag = " ⚠️[流动性差/频繁断档]" if fill_ratio > 5.0 else ""
         print(f"   - {c:8s}: 真实缺失/需填充 {missing:>8d} 条 | 填充率 {fill_ratio:>6.2f}%{alert_flag}")
     print("-" * 50)
 
@@ -75,6 +75,19 @@ def load_and_preprocess_data(file_list):
         print(f"   >>> 📊 基准表现 (等权 Buy & Hold):")
         print(f"            平均涨跌幅: {avg_pct_change:+.2f}%")
         print(f"            平均最大回撤: {avg_mdd:.2f}%")
+
+        # =========================================================
+        # ⚠️ 优化点 1：把大盘分年明细提出来，在开始只全局打印一次，避免冗余
+        # =========================================================
+        print("-" * 50)
+        print(f"   >>> 📅 【全局基准：各年度等权大盘表现】")
+        for year, group in price_df_4h.groupby(price_df_4h.index.year):
+            start_prices = group.iloc[0]
+            end_prices = group.iloc[-1]
+            pct_changes = (end_prices - start_prices) / start_prices * 100
+            avg_beta = pct_changes.mean()
+            coin_details = ", ".join([f"{c}: {pct:+.1f}%" for c, pct in pct_changes.items()])
+            print(f"            ► {year}年: {avg_beta:>+7.2f}% | [{coin_details}]")
         print("=" * 50)
 
     return price_df_4h
@@ -84,8 +97,6 @@ def load_and_preprocess_data(file_list):
 # 核心：策略引擎与回测逻辑 (二元进出测试版)
 # ==========================================
 def run_backtest(df, param_name="默认基准参数", custom_params=None):
-    print(f"\n🚀 启动截面动量回测引擎 (验证：信号驱动二元进出)... [{param_name}]")
-
     if custom_params is None:
         custom_params = {
             'MOM_WINDOW': 20 * 6,
@@ -98,6 +109,13 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
     VOL_WINDOW = custom_params['VOL_WINDOW']
     BTC_TREND_WINDOW = custom_params['BTC_TREND_WINDOW']
     MAX_WEIGHT = custom_params['MAX_WEIGHT']
+
+    # =========================================================
+    # ⚠️ 优化点 2：明确打出本次回测的具体参数组合参数值
+    # =========================================================
+    print(f"\n🚀 启动截面动量回测引擎 (验证：信号驱动二元进出)... [{param_name}]")
+    print(
+        f"   ⚙️ 参数配置: MOM_WIN={MOM_WINDOW}, VOL_WIN={VOL_WINDOW}, BTC_TREND={BTC_TREND_WINDOW}, MAX_WT={MAX_WEIGHT}")
 
     TOP_K = 2
     FEE_RATE = 0.0005
@@ -129,9 +147,6 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
         current_equity = cash + sum(positions[c] * prices[c] for c in coins)
         equity_curve.append({'time': current_time, 'equity': current_equity})
 
-        # =========================================================
-        # ⚠️ 修改点 1：删除 if i % 6 != 0: continue，改为每 K 线监控信号
-        # =========================================================
         top_coins = []
 
         # 1. 截面动量打分（计算当前信号）
@@ -140,10 +155,6 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
             positive_mom = current_mom[current_mom > 0]
             if not positive_mom.empty:
                 top_coins = positive_mom.nlargest(TOP_K).index.tolist()
-
-        # =========================================================
-        # ⚠️ 修改点 2：拆分买卖逻辑，实现二元进出（不微调，只做开/平仓）
-        # =========================================================
 
         # [卖出] 只要持仓标的触发了卖出信号（不再属于 top_coins，或宏观关闭） -> 直接全仓清空
         for c in coins:
@@ -241,6 +252,12 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
             cost_price = coin_states[c]['cost']
             if cost_price > 0:
                 pnl = amt * (price - cost_price) - fee
+
+                # =========================================================
+                # ⚠️ 优化点 3：顺手将 pnl （每笔平仓盈亏）动态记入 log 中，方便后续年度穿透分析
+                # =========================================================
+                log['pnl'] = pnl
+
                 if pnl > 0:
                     win_trades += 1
                     total_profit += pnl
@@ -265,7 +282,7 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
     print("\n" + "=" * 45)
     print(f"📊 【测试结果面板】: {param_name}")
     print("-" * 45)
-    print(f"💸 [资金与收益]")
+    print(f"💸[资金与收益]")
     print(f"  初始资金:     ${INITIAL_CAPITAL:.2f}")
     print(f"  最终资金:     ${final_equity:.2f}")
     print(f"  总收益率:     {total_return * 100:.2f}%")
@@ -306,6 +323,14 @@ def deep_robustness_check(logs_df, curve_df, price_df, param_name=""):
     print("\n📅 [年度绩效拆解] (策略表现 vs 同期市场基准):")
     curve_df['year'] = curve_df.index.year
 
+    # 提取有 pnl 的平仓记录，为了计算当年专属的胜率和盈亏比
+    if 'time' in logs_df.columns:
+        logs_df['year'] = logs_df['time'].dt.year
+    else:
+        logs_df['year'] = pd.to_datetime(logs_df['time']).dt.year
+
+    sell_logs = logs_df[(logs_df['action'] == 'SELL') & (logs_df['pnl'].notna())]
+
     for year, group in curve_df.groupby('year'):
         # 1. 计算策略当年表现
         start_eq = group['equity'].iloc[0]
@@ -322,25 +347,42 @@ def deep_robustness_check(logs_df, curve_df, price_df, param_name=""):
         if not year_prices.empty:
             start_prices = year_prices.iloc[0]
             end_prices = year_prices.iloc[-1]
-            pct_changes = (end_prices - start_prices) / start_prices * 100
-
-            # 计算等权平均 Beta 作为市场基准
-            avg_beta = pct_changes.mean()
-
-            # 格式化各个币种的涨跌幅字符串
-            coin_details = ", ".join([f"{c}: {pct:+.1f}%" for c, pct in pct_changes.items()])
+            avg_beta = ((end_prices - start_prices) / start_prices * 100).mean()
         else:
             avg_beta = 0.0
-            coin_details = "无数据"
 
-        # 3. 打印对比面板
-        print(f"   ► 【{year}年】 策略收益: {y_ret:>+7.2f}% (最大回撤 {y_mdd:>7.2f}%)")
-        print(f"            等权大盘: {avg_beta:>+7.2f}%")
-        print(f"            标的明细: [{coin_details}]")
+        # =========================================================
+        # ⚠️ 优化点 4：替换冗长的硬编码大盘币种明细，改为输出每年的交易质量剖析
+        # =========================================================
+        y_sells = sell_logs[sell_logs['year'] == year]
+        trades_cnt = len(y_sells)
+        if trades_cnt > 0:
+            y_win = (y_sells['pnl'] > 0).sum()
+            y_win_rate = y_win / trades_cnt * 100
+
+            sum_win = y_sells[y_sells['pnl'] > 0]['pnl'].sum()
+            avg_win = sum_win / y_win if y_win > 0 else 0.0
+
+            y_loss_cnt = trades_cnt - y_win
+            sum_loss = abs(y_sells[y_sells['pnl'] <= 0]['pnl'].sum())
+            avg_loss = sum_loss / y_loss_cnt if y_loss_cnt > 0 else 0.0
+
+            y_pl_ratio = avg_win / avg_loss if avg_loss > 0 else float('inf')
+
+            trade_stats = f"{trades_cnt:>3d} 笔平仓 | 胜率: {y_win_rate:>5.1f}% | 盈亏比: {y_pl_ratio:>4.2f}"
+        else:
+            trade_stats = "  0 笔平仓"
+
+        excess_ret = y_ret - avg_beta
+
+        # 3. 打印对比与策略当年剖析面板
+        print(
+            f"   ► 【{year}年】 策略收益: {y_ret:>+7.2f}% (最大回撤 {y_mdd:>7.2f}%) | 等权大盘: {avg_beta:>+7.2f}% | 超额: {excess_ret:>+7.2f}%")
+        print(f"            交易统计: {trade_stats}")
         print("-" * 50)
 
     # --- 2. 摩擦成本极限压力测试 (Transaction Cost Stress Test) ---
-    print("\n🌪️ [滑点与手续费压力测试] (检验低胜率策略的生存力):")
+    print("\n🌪️[滑点与手续费压力测试] (检验低胜率策略的生存力):")
     stress_fees = [0.0005, 0.0010, 0.0020, 0.0030]  # 万5, 千1, 千2, 千3
     base_fee_rate = 0.0005
 
@@ -357,7 +399,7 @@ def deep_robustness_check(logs_df, curve_df, price_df, param_name=""):
         stressed_return = (stressed_equity - 10000) / 10000
 
         status = "✅ 存活" if stressed_return > 0 else "💀 破产"
-        print(f"   - 单边综合成本 {test_fee * 10000:>2.0f} bps: 最终收益率 {stressed_return * 100:>8.2f}% [{status}]")
+        print(f"   - 单边综合成本 {test_fee * 10000:>2.0f} bps: 最终收益率 {stressed_return * 100:>8.2f}%[{status}]")
 
     print("=" * 60)
 
