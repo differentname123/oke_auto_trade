@@ -1,17 +1,103 @@
+
+import os
+
 import pandas as pd
 import numpy as np
-import os
 from datetime import timedelta
+def load_and_preprocess_data(file_list):
+    print("⏳ 正在解析并合并数据...")
+    dfs = []
+    for file in file_list:
+        basename = os.path.basename(file).split('_')
+        coin_main, coin_sub = basename[0], basename[1]
 
-from data_utils import load_and_preprocess_data
+        df = pd.read_csv(file)
+        df['open_time'] = pd.to_datetime(df['open_time'])
+        df.set_index('open_time', inplace=True)
 
+        df_main = df[['close_main']].rename(columns={'close_main': coin_main})
+        df_sub = df[['close_sub']].rename(columns={'close_sub': coin_sub})
 
+        dfs.extend([df_main, df_sub])
 
+    # 1. 基础合并
+    price_df_1m_raw = pd.concat(dfs, axis=1).sort_index()
+    price_df_1m_raw = price_df_1m_raw.loc[:, ~price_df_1m_raw.columns.duplicated()]
+
+    # ==========================================
+    # 🎯 核心修正：锁定全局共有区间 (Intersection)
+    # ==========================================
+    # 获取每个币种的第一个有效值(非NaN)时间和最后一个有效值时间
+    # 大家的“最大”起步时间 -> 公共起点
+    common_start = max([price_df_1m_raw[c].first_valid_index() for c in price_df_1m_raw.columns])
+    # 大家的“最小”结束时间 -> 公共终点
+    common_end = min([price_df_1m_raw[c].last_valid_index() for c in price_df_1m_raw.columns])
+
+    # 截取纯净的共有区间
+    price_df_1m = price_df_1m_raw.loc[common_start:common_end].copy()
+
+    print(f"✅ 成功锁定公共时间窗口: {common_start} 至 {common_end}")
+
+    # ==========================================
+    # 🛠️ 数据质量与填充统计 (共有区间内)
+    # ==========================================
+    total_1m_rows = len(price_df_1m)
+    missing_counts = price_df_1m.isna().sum()
+
+    print(f"\n🔍 【数据质量检测：共有区间内填充统计】 (总 1m K线数: {total_1m_rows})")
+    for c in price_df_1m.columns:
+        missing = missing_counts[c]
+        fill_ratio = (missing / total_1m_rows) * 100
+
+        # 此时的 fill_ratio 才是真正反映流动性和交易断档的真实指标
+        alert_flag = " ⚠️ [流动性差/频繁断档]" if fill_ratio > 5.0 else ""
+        print(f"   - {c:8s}: 真实缺失/需填充 {missing:>8d} 条 | 填充率 {fill_ratio:>6.2f}%{alert_flag}")
+    print("-" * 50)
+
+    # 2. 填充与降频操作
+    # 现在的填充只会发生在共有区间内部的断档，非常安全
+    price_df_1m = price_df_1m.ffill()
+    # 因为首尾非共有的 NaN 已经被切掉，这里 resample 后产生的 4H 也是完全对齐的
+    price_df_4h = price_df_1m.resample('4h').last()
+
+    # ==========================================
+    # 🔴 涨跌幅与风险（最大回撤）统计
+    # ==========================================
+    if not price_df_4h.empty:
+        print(f"\n📈 【共有区间内各标的表现 (Buy & Hold)】:")
+
+        roll_max = price_df_4h.cummax()
+        drawdowns = (price_df_4h - roll_max) / roll_max
+        max_drawdowns_pct = drawdowns.min() * 100
+
+        total_pct_change = 0.0
+        num_coins = len(price_df_4h.columns)
+
+        for c in price_df_4h.columns:
+            start_price = price_df_4h[c].iloc[0]
+            end_price = price_df_4h[c].iloc[-1]
+
+            pct_change = (end_price - start_price) / start_price * 100
+            total_pct_change += pct_change
+            mdd = max_drawdowns_pct[c]
+
+            print(f"   - {c:8s}: 涨跌幅 {pct_change:>8.2f}%  |  最大回撤 {mdd:>8.2f}%")
+
+        avg_pct_change = total_pct_change / num_coins if num_coins > 0 else 0.0
+        avg_mdd = max_drawdowns_pct.mean() if num_coins > 0 else 0.0
+
+        print("-" * 50)
+        print(f"   >>> 📊 基准表现 (等权 Buy & Hold):")
+        print(f"            平均涨跌幅: {avg_pct_change:+.2f}%")
+        print(f"            平均最大回撤: {avg_mdd:.2f}%")
+        print("=" * 50)
+
+    return price_df_4h
 # ==========================================
-# 核心：策略引擎与回测逻辑 (做空版)
+# 核心：策略引擎与回测逻辑
 # ==========================================
 def run_backtest(df, param_name="默认基准参数", custom_params=None):
-    print(f"\n🚀 启动截面动量回测引擎... [做空组 - {param_name}]")
+    print(f"\n🚀 启动截面动量回测引擎... [{param_name}]")
 
     # --- 策略参数 ---
     if custom_params is None:
@@ -41,9 +127,9 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
     volatility = log_returns.rolling(window=VOL_WINDOW).std() * np.sqrt(365 * 6)
     adj_mom = returns / (volatility + 1e-8)
 
-    # --- 预计算宏观开关 (Beta 层 - 做空看跌开关) ---
+    # --- 预计算宏观开关 (Beta 层) ---
     btc_ma = df['BTC'].rolling(window=BTC_TREND_WINDOW).mean()
-    btc_trend_off = df['BTC'] < btc_ma
+    btc_trend_on = df['BTC'] > btc_ma
 
     # --- 初始化账户 ---
     cash = INITIAL_CAPITAL
@@ -65,13 +151,13 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
 
         target_weights = {coin: 0.0 for coin in coins}
 
-        # 1. 截面动量打分 (寻找跌幅最大的币种)
-        if btc_trend_off.iloc[i]:
+        # 1. 截面动量打分
+        if btc_trend_on.iloc[i]:
             current_mom = adj_mom.iloc[i].dropna()
-            negative_mom = current_mom[current_mom < 0]
+            positive_mom = current_mom[current_mom > 0]
 
-            if not negative_mom.empty:
-                top_coins = negative_mom.nsmallest(TOP_K).index.tolist()
+            if not positive_mom.empty:
+                top_coins = positive_mom.nlargest(TOP_K).index.tolist()
 
                 # 2. 逆波动率分配权重
                 inv_vol = {}
@@ -84,37 +170,19 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
                 for c in top_coins:
                     if total_inv_vol > 0:
                         raw_weight = inv_vol[c] / total_inv_vol
-                        target_weights[c] = -min(raw_weight, MAX_WEIGHT)  # 🔴 负数代表做空权重
+                        target_weights[c] = min(raw_weight, MAX_WEIGHT)
 
-        # 3. 执行交易 (先买后卖：先平空释放保证金，再开新空单)
+        # 3. 执行交易 (先卖后买)
         target_values = {c: current_equity * w for c, w in target_weights.items()}
 
-        # [买入：平空 (Cover Short) 或 减空]
-        for c in coins:
-            current_val = positions[c] * prices[c]
-            diff_val = target_values.get(c, 0) - current_val
-
-            if diff_val > 1.0:
-                buy_val = diff_val
-                fee = buy_val * FEE_RATE
-                buy_amount = buy_val / prices[c]
-
-                positions[c] += buy_amount
-                cash -= (buy_val + fee)
-
-                trade_logs.append({
-                    "time": current_time, "action": "BUY (COVER)", "coin": c,
-                    "price": prices[c], "amount": buy_amount, "value": buy_val,
-                    "fee": fee, "reason": "Cover Short"
-                })
-
-        # [卖出：开空 (Open Short) 或 加空]
+        # [卖出]
         for c in coins:
             current_val = positions[c] * prices[c]
             diff_val = target_values.get(c, 0) - current_val
 
             if diff_val < -1.0:
                 sell_amount = abs(diff_val) / prices[c]
+                sell_amount = min(sell_amount, positions[c])
                 actual_sell_val = sell_amount * prices[c]
                 fee = actual_sell_val * FEE_RATE
 
@@ -122,13 +190,38 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
                 cash += (actual_sell_val - fee)
 
                 trade_logs.append({
-                    "time": current_time, "action": "SELL (SHORT)", "coin": c,
+                    "time": current_time, "action": "SELL", "coin": c,
                     "price": prices[c], "amount": sell_amount, "value": actual_sell_val,
-                    "fee": fee, "reason": "Open Short"
+                    "fee": fee, "reason": "Target rebalance"
                 })
 
+        # [买入]
+        for c in coins:
+            current_val = positions[c] * prices[c]
+            diff_val = target_values.get(c, 0) - current_val
+
+            if diff_val > 1.0:
+                available_to_spend = diff_val / (1 + FEE_RATE)
+                if cash >= available_to_spend:
+                    buy_val = available_to_spend
+                else:
+                    buy_val = cash / (1 + FEE_RATE)
+
+                if buy_val > 1.0:
+                    fee = buy_val * FEE_RATE
+                    buy_amount = buy_val / prices[c]
+
+                    positions[c] += buy_amount
+                    cash -= (buy_val + fee)
+
+                    trade_logs.append({
+                        "time": current_time, "action": "BUY", "coin": c,
+                        "price": prices[c], "amount": buy_amount, "value": buy_val,
+                        "fee": fee, "reason": "Target rebalance"
+                    })
+
     # ==========================================
-    # 🔴 核心指标与高级统计计算 (严格对齐做多代码)
+    # 🔴 核心指标与高级统计计算
     # ==========================================
     final_equity = cash + sum(positions[c] * df.iloc[-1][c] for c in coins)
     total_return = (final_equity - INITIAL_CAPITAL) / INITIAL_CAPITAL
@@ -155,37 +248,34 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
     coin_states = {c: {'qty': 0.0, 'cost': 0.0, 'entry_time': None} for c in coins}
 
     for log in trade_logs:
-        c, action, amt, price, fee, time = log['coin'], log['action'], log['amount'], log['price'], log['fee'], log['time']
+        c, action, amt, price, fee, time = log['coin'], log['action'], log['amount'], log['price'], log['fee'], log[
+            'time']
 
-        if action == 'SELL (SHORT)':
-            old_qty = abs(coin_states[c]['qty'])
-            old_cost = coin_states[c]['cost']
+        if action == 'BUY':
+            old_qty, old_cost = coin_states[c]['qty'], coin_states[c]['cost']
             new_qty = old_qty + amt
-
             if new_qty > 0:
                 coin_states[c]['cost'] = (old_qty * old_cost + amt * price) / new_qty
-
-            coin_states[c]['qty'] -= amt
+            coin_states[c]['qty'] = new_qty
             if coin_states[c]['entry_time'] is None:
                 coin_states[c]['entry_time'] = time
 
-        elif action == 'BUY (COVER)':
+        elif action == 'SELL':
             cost_price = coin_states[c]['cost']
             if cost_price > 0:
-                # 🔴 做空利润 = (开仓均价 - 当前平仓价) * 数量 - 手续费
-                pnl = amt * (cost_price - price) - fee
+                pnl = amt * (price - cost_price) - fee
                 if pnl > 0:
-                    win_trades += 1
+                    win_trades += 1;
                     total_profit += pnl
                 else:
-                    loss_trades += 1
+                    loss_trades += 1;
                     total_loss += abs(pnl)
 
                 if coin_states[c]['entry_time'] is not None:
                     holding_times.append(time - coin_states[c]['entry_time'])
 
-            coin_states[c]['qty'] += amt
-            if abs(coin_states[c]['qty']) < 1e-6:
+            coin_states[c]['qty'] -= amt
+            if coin_states[c]['qty'] < 1e-6:
                 coin_states[c]['qty'], coin_states[c]['cost'], coin_states[c]['entry_time'] = 0.0, 0.0, None
 
     total_closed_trades = win_trades + loss_trades
@@ -195,7 +285,7 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
     profit_loss_ratio = avg_profit / avg_loss if avg_loss > 0 else float('inf')
     avg_holding_time = sum(holding_times, timedelta()) / len(holding_times) if holding_times else timedelta(0)
 
-    # 🔴 恢复并增强输出面板 (与做多代码完全一致)
+    # 🔴 恢复并增强输出面板
     print("\n" + "=" * 45)
     print(f"📊 【测试结果面板】: {param_name}")
     print("-" * 45)
@@ -246,4 +336,4 @@ if __name__ == "__main__":
     for scenario in test_scenarios:
         logs_df, curve_df = run_backtest(df_4h, param_name=scenario["name"], custom_params=scenario["params"])
 
-    print("\n✅ 所有做空参数组敏感性测试执行完毕。")
+    print("\n✅ 所有参数组敏感性测试执行完毕。")
