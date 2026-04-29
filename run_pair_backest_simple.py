@@ -105,7 +105,7 @@ def load_and_preprocess_data(file_list):
 
 
 # ==========================================
-# 核心：策略引擎与回测逻辑 (二元进出测试版)
+# 核心：策略引擎与回测逻辑 (做空对称版)
 # ==========================================
 def run_backtest(df, param_name="默认基准参数", custom_params=None):
     if custom_params is None:
@@ -121,7 +121,7 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
     BTC_TREND_WINDOW = custom_params['BTC_TREND_WINDOW']
     MAX_WEIGHT = custom_params['MAX_WEIGHT']
 
-    print(f"\n🚀 启动截面动量回测引擎 (验证：信号驱动二元进出)... [{param_name}]")
+    print(f"\n🚀 启动截面动量回测引擎 (验证：做空信号驱动二元进出)... [{param_name}]")
     print(
         f"   ⚙️ 参数配置: MOM_WIN={MOM_WINDOW}, VOL_WIN={VOL_WINDOW}, BTC_TREND={BTC_TREND_WINDOW}, MAX_WT={MAX_WEIGHT}")
 
@@ -174,7 +174,8 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
         f"             -> 均值对比 | ATR_pct: {atr_pct.mean().mean():.4f}  vs  原波动率: {old_volatility.mean().mean():.4f}")
 
     btc_ma = df['BTC'].rolling(window=BTC_TREND_WINDOW).mean()
-    btc_trend_on = df['BTC'] > btc_ma
+    # 【做空修正】宏观过滤开关反转：当BTC价格低于均线时（即处于下跌趋势），才开启做空。
+    btc_trend_off = df['BTC'] < btc_ma
 
     cash = INITIAL_CAPITAL
     positions = {coin: 0.0 for coin in coins}
@@ -187,74 +188,73 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
         current_time = df.index[i]
         prices = df.iloc[i]
 
+        # 资金账户核算不变。由于做空时 positions 为负，所以负负得正，价格下跌资产净值增加
         current_equity = cash + sum(positions[c] * prices[c] for c in coins)
         equity_curve.append({'time': current_time, 'equity': current_equity})
 
-        top_coins = []
+        target_coins = []
 
-        # 1. 截面动量打分（计算当前信号）
-        if btc_trend_on.iloc[i]:
+        # 1. 截面动量打分（计算当前做空信号）
+        if btc_trend_off.iloc[i]:
             current_mom = adj_mom.iloc[i].dropna()
-            positive_mom = current_mom[current_mom > 0]
-            if not positive_mom.empty:
-                top_coins = positive_mom.nlargest(TOP_K).index.tolist()
+            # 【做空修正】寻找动量为负的标的，且选择动量最低（跌幅最猛）的 TOP_K 个
+            negative_mom = current_mom[current_mom < 0]
+            if not negative_mom.empty:
+                target_coins = negative_mom.nsmallest(TOP_K).index.tolist()
 
-        # [卖出] 只要持仓标的触发了卖出信号（不再属于 top_coins，或宏观关闭） -> 直接全仓清空
+        # [平空] 只要持仓标的触发了平仓信号（不再属于 target_coins，或宏观关闭转为上涨） -> 直接全仓平空
         for c in coins:
-            if positions[c] > 0:
-                if c not in top_coins:
-                    sell_amount = positions[c]
-                    actual_sell_val = sell_amount * prices[c]
-                    fee = actual_sell_val * FEE_RATE
+            if positions[c] < 0:  # 【做空修正】持仓小于0代表持有空单
+                if c not in target_coins:
+                    cover_amount = abs(positions[c])  # 取绝对值作为平仓数量
+                    actual_cover_val = cover_amount * prices[c]
+                    fee = actual_cover_val * FEE_RATE
 
-                    positions[c] -= sell_amount  # 清零
-                    cash += (actual_sell_val - fee)
+                    positions[c] += cover_amount  # 空单归零
+                    cash -= (actual_cover_val + fee)  # 平空买回，现金减少并扣手续费
 
                     trade_logs.append({
-                        "time": current_time, "action": "SELL", "coin": c,
-                        "price": prices[c], "amount": sell_amount, "value": actual_sell_val,
-                        "fee": fee, "reason": "Signal Exit (Not in Top K / Trend Off)"
+                        "time": current_time, "action": "COVER", "coin": c,
+                        "price": prices[c], "amount": cover_amount, "value": actual_cover_val,
+                        "fee": fee, "reason": "Signal Exit (Not in Bottom K / Trend On)"
                     })
 
-        # [买入] 如果目前有入场信号，并且当前空仓 -> 才分配资金买入。死拿不补仓、不减仓。
-        if top_coins:
-            # 仅为计算初始买入权重提供参考
+        # [做空] 如果目前有入场信号，并且当前空仓 -> 才分配资金做空。死拿不补仓、不减仓。
+        if target_coins:
+            # 仅为计算初始做空权重提供参考
             inv_vol = {}
-            for c in top_coins:
+            for c in target_coins:
                 c_vol = volatility[c].iloc[i]
                 inv_vol[c] = 1.0 / c_vol if c_vol > 0 else 0
 
             total_inv_vol = sum(inv_vol.values())
 
-            for c in top_coins:
-                # 🔴 关键核心：只有完全空仓时，才进行买入。一旦买入，无论涨跌不再微调
+            for c in target_coins:
+                # 🔴 关键核心：只有完全空仓时，才进行做空。一旦做空，无论涨跌不再微调
                 if positions[c] == 0:
                     if total_inv_vol > 0:
                         raw_weight = inv_vol[c] / total_inv_vol
                         target_weight = min(raw_weight, MAX_WEIGHT)
                         target_val = current_equity * target_weight
 
-                        available_to_spend = target_val / (1 + FEE_RATE)
-                        if cash >= available_to_spend:
-                            buy_val = available_to_spend
-                        else:
-                            buy_val = cash / (1 + FEE_RATE)
+                        # 取目标权益估算做空价值
+                        short_val = target_val / (1 + FEE_RATE)
 
-                        if buy_val > 1.0:
-                            fee = buy_val * FEE_RATE
-                            buy_amount = buy_val / prices[c]
+                        if short_val > 1.0:
+                            fee = short_val * FEE_RATE
+                            short_amount = short_val / prices[c]
 
-                            positions[c] += buy_amount
-                            cash -= (buy_val + fee)
+                            positions[c] -= short_amount  # 【做空修正】做空头寸为负
+                            cash += (short_val - fee)  # 做空收到保证金现金并扣除手续费
 
                             trade_logs.append({
-                                "time": current_time, "action": "BUY", "coin": c,
-                                "price": prices[c], "amount": buy_amount, "value": buy_val,
-                                "fee": fee, "reason": "Signal Entry (Top K)"
+                                "time": current_time, "action": "SHORT", "coin": c,
+                                "price": prices[c], "amount": short_amount, "value": short_val,
+                                "fee": fee, "reason": "Signal Entry (Bottom K)"
                             })
 
     # ==========================================
-    # 🔴 核心指标与高级统计计算 (保持完全不变)
+    # 🔴 核心指标与高级统计计算 (对称修复)
     # ==========================================
     final_equity = cash + sum(positions[c] * df.iloc[-1][c] for c in coins)
     total_return = (final_equity - INITIAL_CAPITAL) / INITIAL_CAPITAL
@@ -276,13 +276,14 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
     win_trades, loss_trades = 0, 0
     total_profit, total_loss = 0.0, 0.0
     holding_times = []
+    # qty 在记录成本时仍保留绝对值
     coin_states = {c: {'qty': 0.0, 'cost': 0.0, 'entry_time': None} for c in coins}
 
     for log in trade_logs:
         c, action, amt, price, fee, time = log['coin'], log['action'], log['amount'], log['price'], log['fee'], log[
             'time']
 
-        if action == 'BUY':
+        if action == 'SHORT':
             old_qty, old_cost = coin_states[c]['qty'], coin_states[c]['cost']
             new_qty = old_qty + amt
             if new_qty > 0:
@@ -291,10 +292,11 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
             if coin_states[c]['entry_time'] is None:
                 coin_states[c]['entry_time'] = time
 
-        elif action == 'SELL':
+        elif action == 'COVER':
             cost_price = coin_states[c]['cost']
             if cost_price > 0:
-                pnl = amt * (price - cost_price) - fee
+                # 【做空修正】做空单笔平仓利润公式：数量 * (成本价 - 平仓价) - 平仓手续费
+                pnl = amt * (cost_price - price) - fee
                 log['pnl'] = pnl
 
                 if pnl > 0:
@@ -332,7 +334,7 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
     print(f"  卡玛比率:     {calmar_ratio:.2f}")
     print(f"⚖️ [交易统计]")
     print(f"  总触发动作:   {len(trade_logs)} 次")
-    print(f"  有效平仓笔数: {total_closed_trades} 笔")
+    print(f"  有效平空笔数: {total_closed_trades} 笔")
     if total_closed_trades > 0:
         print(f"  胜率 (Win%):  {win_rate * 100:.2f}%")
         print(f"  盈亏比 (P/L): {profit_loss_ratio:.2f}")
@@ -367,7 +369,8 @@ def deep_robustness_check(logs_df, curve_df, price_df, param_name=""):
     else:
         logs_df['year'] = pd.to_datetime(logs_df['time']).dt.year
 
-    sell_logs = logs_df[(logs_df['action'] == 'SELL') & (logs_df['pnl'].notna())]
+    # 【修改】从之前的 SELL 改为 COVER（平空）
+    sell_logs = logs_df[(logs_df['action'] == 'COVER') & (logs_df['pnl'].notna())]
 
     # 过滤衍生OHLC列，计算大盘时仅看Close价格
     coins = [c for c in price_df.columns if not any(sub in c for sub in ['_open', '_high', '_low'])]
@@ -422,8 +425,9 @@ def deep_robustness_check(logs_df, curve_df, price_df, param_name=""):
     base_fee_rate = 0.0005
 
     for test_fee in stress_fees:
-        buy_volume = logs_df[logs_df['action'] == 'BUY']['value'].sum()
-        sell_volume = logs_df[logs_df['action'] == 'SELL']['value'].sum()
+        # 【修改】从 BUY 和 SELL 分别改为 SHORT 和 COVER
+        buy_volume = logs_df[logs_df['action'] == 'SHORT']['value'].sum()
+        sell_volume = logs_df[logs_df['action'] == 'COVER']['value'].sum()
         total_trading_volume = buy_volume + sell_volume
 
         extra_fee_rate = max(0, test_fee - base_fee_rate)
