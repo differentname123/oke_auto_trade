@@ -49,20 +49,34 @@ def load_and_preprocess_data(file_list):
     print("-" * 50)
 
     price_df_1m = price_df_1m.ffill()
-    price_df_4h = price_df_1m.resample('4h').last()
 
-    if not price_df_4h.empty:
+    # ==========================================
+    # ⚠️ 优化点 1：基于1m数据提取 4h 的 OHLC 数据
+    # ==========================================
+    df_4h_close = price_df_1m.resample('4h').last()
+    df_4h_open = price_df_1m.resample('4h').first()
+    df_4h_high = price_df_1m.resample('4h').max()
+    df_4h_low = price_df_1m.resample('4h').min()
+
+    # 组合为包含所有 OHLC 字段的大 DataFrame
+    price_df_4h = df_4h_close.copy()
+    for c in df_4h_close.columns:
+        price_df_4h[f"{c}_open"] = df_4h_open[c]
+        price_df_4h[f"{c}_high"] = df_4h_high[c]
+        price_df_4h[f"{c}_low"] = df_4h_low[c]
+
+    if not df_4h_close.empty:
         print(f"\n📈 【共有区间内各标的表现 (Buy & Hold)】:")
-        roll_max = price_df_4h.cummax()
-        drawdowns = (price_df_4h - roll_max) / roll_max
+        roll_max = df_4h_close.cummax()
+        drawdowns = (df_4h_close - roll_max) / roll_max
         max_drawdowns_pct = drawdowns.min() * 100
 
         total_pct_change = 0.0
-        num_coins = len(price_df_4h.columns)
+        num_coins = len(df_4h_close.columns)
 
-        for c in price_df_4h.columns:
-            start_price = price_df_4h[c].iloc[0]
-            end_price = price_df_4h[c].iloc[-1]
+        for c in df_4h_close.columns:
+            start_price = df_4h_close[c].iloc[0]
+            end_price = df_4h_close[c].iloc[-1]
             pct_change = (end_price - start_price) / start_price * 100
             total_pct_change += pct_change
             mdd = max_drawdowns_pct[c]
@@ -76,12 +90,9 @@ def load_and_preprocess_data(file_list):
         print(f"            平均涨跌幅: {avg_pct_change:+.2f}%")
         print(f"            平均最大回撤: {avg_mdd:.2f}%")
 
-        # =========================================================
-        # ⚠️ 优化点 1：把大盘分年明细提出来，在开始只全局打印一次，避免冗余
-        # =========================================================
         print("-" * 50)
         print(f"   >>> 📅 【全局基准：各年度等权大盘表现】")
-        for year, group in price_df_4h.groupby(price_df_4h.index.year):
+        for year, group in df_4h_close.groupby(df_4h_close.index.year):
             start_prices = group.iloc[0]
             end_prices = group.iloc[-1]
             pct_changes = (end_prices - start_prices) / start_prices * 100
@@ -110,9 +121,6 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
     BTC_TREND_WINDOW = custom_params['BTC_TREND_WINDOW']
     MAX_WEIGHT = custom_params['MAX_WEIGHT']
 
-    # =========================================================
-    # ⚠️ 优化点 2：明确打出本次回测的具体参数组合参数值
-    # =========================================================
     print(f"\n🚀 启动截面动量回测引擎 (验证：信号驱动二元进出)... [{param_name}]")
     print(
         f"   ⚙️ 参数配置: MOM_WIN={MOM_WINDOW}, VOL_WIN={VOL_WINDOW}, BTC_TREND={BTC_TREND_WINDOW}, MAX_WT={MAX_WEIGHT}")
@@ -121,14 +129,49 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
     FEE_RATE = 0.0005
     INITIAL_CAPITAL = 10000.0
 
-    coins = list(df.columns)
+    # 过滤掉衍生出来的 _open, _high, _low 列，只保留基础币种作为交易对象 (即 close)
+    coins = [c for c in df.columns if not any(suffix in c for suffix in ['_open', '_high', '_low'])]
     if 'BTC' not in coins:
         raise ValueError("数据中必须包含 BTC 作为宏观开关！")
 
-    returns = df.pct_change(MOM_WINDOW)
-    log_returns = np.log(df / df.shift(1))
-    volatility = log_returns.rolling(window=VOL_WINDOW).std() * np.sqrt(365 * 6)
-    adj_mom = returns / (volatility + 1e-8)
+    df_close = df[coins]
+    returns = df_close.pct_change(MOM_WINDOW)
+
+    # =========================================================
+    # ⚠️ 优化点 2：计算 ATR_pct，并将 adj_mom 分母替换为 ATR_pct
+    # =========================================================
+    tr_df = pd.DataFrame(index=df.index, columns=coins)
+    for c in coins:
+        high = df[f"{c}_high"]
+        low = df[f"{c}_low"]
+        prev_close = df_close[c].shift(1)
+
+        tr1 = high - low
+        tr2 = (high - prev_close).abs()
+        tr3 = (low - prev_close).abs()
+
+        tr_df[c] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    atr = tr_df.rolling(window=VOL_WINDOW).mean()
+    atr_pct = atr / df_close  # 归一化为百分比形式
+
+    # 【新增归因日志统计计算】：计算原版 std 波动率以对比
+    log_returns = np.log(df_close / df_close.shift(1))
+    old_volatility = log_returns.rolling(window=VOL_WINDOW).std() * np.sqrt(365 * 6)
+    old_adj_mom = returns / (old_volatility + 1e-8)
+
+    # 新版截面动量
+    adj_mom = returns / (atr_pct + 1e-8)
+
+    # 将 volatility 变量指向 atr_pct，保证后续仓位控制(inv_vol)同样基于 ATR 进行反向加权
+    volatility = atr_pct
+
+    # 打印归因验证统计日志
+    print(f"   [归因验证] 动量计算分母已从 原标准差(Std) 替换为 ATR_pct !")
+    rank_corr = old_adj_mom.rank(axis=1).corrwith(adj_mom.rank(axis=1), axis=1).mean()
+    print(f"             -> 截面排序平均相关系数 (Rank Corr): {rank_corr:.4f} (越低说明优化影响越大)")
+    print(
+        f"             -> 均值对比 | ATR_pct: {atr_pct.mean().mean():.4f}  vs  原波动率: {old_volatility.mean().mean():.4f}")
 
     btc_ma = df['BTC'].rolling(window=BTC_TREND_WINDOW).mean()
     btc_trend_on = df['BTC'] > btc_ma
@@ -252,10 +295,6 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None):
             cost_price = coin_states[c]['cost']
             if cost_price > 0:
                 pnl = amt * (price - cost_price) - fee
-
-                # =========================================================
-                # ⚠️ 优化点 3：顺手将 pnl （每笔平仓盈亏）动态记入 log 中，方便后续年度穿透分析
-                # =========================================================
                 log['pnl'] = pnl
 
                 if pnl > 0:
@@ -323,7 +362,6 @@ def deep_robustness_check(logs_df, curve_df, price_df, param_name=""):
     print("\n📅 [年度绩效拆解] (策略表现 vs 同期市场基准):")
     curve_df['year'] = curve_df.index.year
 
-    # 提取有 pnl 的平仓记录，为了计算当年专属的胜率和盈亏比
     if 'time' in logs_df.columns:
         logs_df['year'] = logs_df['time'].dt.year
     else:
@@ -331,8 +369,10 @@ def deep_robustness_check(logs_df, curve_df, price_df, param_name=""):
 
     sell_logs = logs_df[(logs_df['action'] == 'SELL') & (logs_df['pnl'].notna())]
 
+    # 过滤衍生OHLC列，计算大盘时仅看Close价格
+    coins = [c for c in price_df.columns if not any(sub in c for sub in ['_open', '_high', '_low'])]
+
     for year, group in curve_df.groupby('year'):
-        # 1. 计算策略当年表现
         start_eq = group['equity'].iloc[0]
         end_eq = group['equity'].iloc[-1]
         y_ret = (end_eq - start_eq) / start_eq * 100
@@ -340,9 +380,8 @@ def deep_robustness_check(logs_df, curve_df, price_df, param_name=""):
         roll_max = group['equity'].cummax()
         y_mdd = ((group['equity'] - roll_max) / roll_max).min() * 100
 
-        # 2. 计算同期市场 Beta 表现 (使用传入的 price_df)
         year_mask = price_df.index.year == year
-        year_prices = price_df[year_mask]
+        year_prices = price_df[year_mask][coins]
 
         if not year_prices.empty:
             start_prices = year_prices.iloc[0]
@@ -351,9 +390,6 @@ def deep_robustness_check(logs_df, curve_df, price_df, param_name=""):
         else:
             avg_beta = 0.0
 
-        # =========================================================
-        # ⚠️ 优化点 4：替换冗长的硬编码大盘币种明细，改为输出每年的交易质量剖析
-        # =========================================================
         y_sells = sell_logs[sell_logs['year'] == year]
         trades_cnt = len(y_sells)
         if trades_cnt > 0:
@@ -375,7 +411,6 @@ def deep_robustness_check(logs_df, curve_df, price_df, param_name=""):
 
         excess_ret = y_ret - avg_beta
 
-        # 3. 打印对比与策略当年剖析面板
         print(
             f"   ► 【{year}年】 策略收益: {y_ret:>+7.2f}% (最大回撤 {y_mdd:>7.2f}%) | 等权大盘: {avg_beta:>+7.2f}% | 超额: {excess_ret:>+7.2f}%")
         print(f"            交易统计: {trade_stats}")
@@ -426,7 +461,6 @@ if __name__ == "__main__":
     for scenario in test_scenarios:
         logs_df, curve_df = run_backtest(df_4h, param_name=scenario["name"], custom_params=scenario["params"])
 
-        # ⚠️ 注意这里传入了 df_4h 以便计算市场基准
         deep_robustness_check(logs_df, curve_df, df_4h, param_name=scenario["name"])
 
     print("\n✅ 所有参数组敏感性及深度检验执行完毕。")
