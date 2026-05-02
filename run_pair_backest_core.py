@@ -414,6 +414,41 @@ def deep_robustness_check(logs_df, curve_df, price_df, param_name=""):
         print(
             f"   ► 【{year}年】 策略收益: {y_ret:>+7.2f}% (最大回撤 {y_mdd:>7.2f}%) | 等权大盘: {avg_beta:>+7.2f}% | 超额: {excess_ret:>+7.2f}%")
         print(f"            交易统计: {trade_stats}")
+
+        # === 🎯 核心修改点：新增单币种维度的表现透视 ===
+        print(f"            ↳ [各标的归因明细]")
+        for c in coins:
+            # 1. 计算单币的大盘基准表现
+            if not year_prices.empty and c in year_prices.columns:
+                c_start = year_prices[c].iloc[0]
+                c_end = year_prices[c].iloc[-1]
+                c_beta = (c_end - c_start) / c_start * 100
+            else:
+                c_beta = 0.0
+
+            # 2. 截取该币种当年的卖出平仓日志
+            c_sells = y_sells[y_sells['coin'] == c]
+            c_trades_cnt = len(c_sells)
+
+            if c_trades_cnt > 0:
+                c_win = (c_sells['pnl'] > 0).sum()
+                c_win_rate = c_win / c_trades_cnt * 100
+
+                c_sum_win = c_sells[c_sells['pnl'] > 0]['pnl'].sum()
+                c_avg_win = c_sum_win / c_win if c_win > 0 else 0.0
+
+                c_loss_cnt = c_trades_cnt - c_win
+                c_sum_loss = abs(c_sells[c_sells['pnl'] <= 0]['pnl'].sum())
+                c_avg_loss = c_sum_loss / c_loss_cnt if c_loss_cnt > 0 else 0.0
+
+                c_pl_ratio = c_avg_win / c_avg_loss if c_avg_loss > 0 else float('inf')
+                c_net_pnl = c_sells['pnl'].sum()
+
+                print(
+                    f"              - {c:4s}: 策略净盈亏 ${c_net_pnl:>+8.2f} | 基准: {c_beta:>+7.2f}% | 平仓: {c_trades_cnt:>3d}笔 | 胜率: {c_win_rate:>5.1f}% | 盈亏比: {c_pl_ratio:>4.2f}")
+            else:
+                print(f"              - {c:4s}: 策略净盈亏 $   +0.00 | 基准: {c_beta:>+7.2f}% | 平仓:   0笔")
+
         print("-" * 50)
 
     # --- 2. 摩擦成本极限压力测试 (Transaction Cost Stress Test) ---
