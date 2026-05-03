@@ -1,21 +1,10 @@
-# ============================================================
-# ⚠️ 关键：必须在 import numpy/pandas 之前设置！
-# 关闭 BLAS/OpenMP 内部多线程，避免与 multiprocessing 冲突
-# ============================================================
+import itertools
 import os
-os.environ.setdefault('OMP_NUM_THREADS', '1')
-os.environ.setdefault('MKL_NUM_THREADS', '1')
-os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
-os.environ.setdefault('NUMEXPR_NUM_THREADS', '1')
-
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import pandas as pd
 import numpy as np
 from datetime import timedelta, datetime
-from itertools import product
-import time as time_module
-import pickle
-import traceback
-import multiprocessing as mp
 
 
 def load_and_preprocess_data(file_list):
@@ -119,8 +108,702 @@ def load_and_preprocess_data(file_list):
 
 
 # ==========================================
-# 核心：策略引擎与回测逻辑 (二元做空测试版)
+# 🆕 评价指标辅助函数 (Helper Functions)
 # ==========================================
+def _compute_gini(values):
+    """计算 Gini 系数（衡量利润集中度）"""
+    if values is None or len(values) == 0:
+        return np.nan
+    arr = np.abs(np.asarray(values, dtype=float))
+    if arr.sum() == 0:
+        return 0.0
+    sorted_arr = np.sort(arr)
+    n = len(sorted_arr)
+    index = np.arange(1, n + 1)
+    return float((2.0 * np.sum(index * sorted_arr)) / (n * np.sum(sorted_arr)) - (n + 1.0) / n)
+
+
+def _compute_underwater_periods(curve_df):
+    """计算所有水下时段（单位：天），返回 (max, mean, list)"""
+    if curve_df.empty:
+        return 0.0, 0.0, []
+    cum_max = curve_df['equity'].cummax()
+    drawdown = (curve_df['equity'] - cum_max) / cum_max
+    underwater = drawdown < -1e-9
+    if not underwater.any():
+        return 0.0, 0.0, []
+
+    periods = []
+    in_uw, start_uw = False, None
+    for t, uw in underwater.items():
+        if uw and not in_uw:
+            start_uw, in_uw = t, True
+        elif not uw and in_uw:
+            periods.append((t - start_uw).total_seconds() / 86400.0)
+            in_uw = False
+    if in_uw:
+        periods.append((underwater.index[-1] - start_uw).total_seconds() / 86400.0)
+
+    if not periods:
+        return 0.0, 0.0, []
+    return float(max(periods)), float(np.mean(periods)), periods
+
+
+def _compute_time_in_market(logs_df, time_index):
+    """根据交易日志重建持仓时间线，计算 Time in Market 占比"""
+    if logs_df is None or logs_df.empty or len(time_index) == 0:
+        return 0.0
+    logs_sorted = logs_df.sort_values('time').reset_index(drop=True)
+    events = [(row['time'], row['coin'], row['action'], row['amount'])
+              for _, row in logs_sorted.iterrows()]
+
+    holdings = {}
+    in_market = np.zeros(len(time_index), dtype=bool)
+    event_idx = 0
+
+    for i, t in enumerate(time_index):
+        while event_idx < len(events) and events[event_idx][0] <= t:
+            _, coin, action, amt = events[event_idx]
+            if action == 'SHORT':
+                holdings[coin] = holdings.get(coin, 0) + amt
+            else:  # COVER
+                holdings[coin] = holdings.get(coin, 0) - amt
+                if abs(holdings[coin]) < 1e-9:
+                    holdings[coin] = 0
+            event_idx += 1
+        in_market[i] = any(qty > 1e-9 for qty in holdings.values())
+
+    return float(in_market.sum() / len(in_market))
+
+
+def _compute_mae_mfe(logs_df, price_df):
+    """根据交易日志和价格 OHLC 数据，计算做空交易的 MAE / MFE / 持仓时长"""
+    out = {'mae': [], 'mfe': [], 'holding_h': []}
+    if logs_df is None or logs_df.empty:
+        return out
+
+    logs_sorted = logs_df.sort_values('time').reset_index(drop=True)
+    states = {}
+
+    for _, log in logs_sorted.iterrows():
+        c, t, p = log['coin'], log['time'], log['price']
+        action, amt = log['action'], log['amount']
+
+        if action == 'SHORT':
+            if c not in states or states[c]['qty'] == 0:
+                states[c] = {'qty': amt, 'cost': p, 'entry': t}
+            else:
+                old_qty = states[c]['qty']
+                old_cost = states[c]['cost']
+                new_qty = old_qty + amt
+                states[c]['cost'] = (old_qty * old_cost + amt * p) / new_qty
+                states[c]['qty'] = new_qty
+        elif action == 'COVER':
+            if c in states and states[c]['qty'] > 0:
+                entry_t = states[c]['entry']
+                entry_p = states[c]['cost']
+                out['holding_h'].append((t - entry_t).total_seconds() / 3600.0)
+
+                if f"{c}_high" in price_df.columns and f"{c}_low" in price_df.columns:
+                    period = price_df.loc[entry_t:t]
+                    if not period.empty and entry_p > 0:
+                        ph = float(period[f"{c}_high"].max())
+                        pl = float(period[f"{c}_low"].min())
+                        # 做空的 MFE（最大有利运行）是价格最低时，MAE（最大不利运行）是价格最高时
+                        out['mfe'].append((entry_p - pl) / entry_p)
+                        out['mae'].append((entry_p - ph) / entry_p)
+
+                states[c]['qty'] -= amt
+                if states[c]['qty'] < 1e-6:
+                    states[c] = {'qty': 0, 'cost': 0, 'entry': None}
+    return out
+
+
+# ==========================================
+# 🆕 完整指标计算（按方案的 A/B/C/D/E/F 六大维度组织）
+# ==========================================
+def calculate_comprehensive_metrics(logs_df, curve_df, price_df, custom_params, param_name,
+                                    initial_capital=10000.0, fee_rate=0.0005,
+                                    final_equity_override=None):
+    """根据回测结果计算完整的评价指标字典 (覆盖方案的 A/B/C/D/E/F 全部六大类)"""
+    metrics = {'param_name': param_name}
+    metrics.update({f'param_{k}': v for k, v in custom_params.items()})
+
+    bars_per_year = 365 * 6  # 4h K线
+
+    if curve_df is None or curve_df.empty:
+        return metrics
+
+    # =============== A. 资金曲线层面 ===============
+    final_equity = float(final_equity_override) if final_equity_override is not None else float(
+        curve_df['equity'].iloc[-1])
+    metrics['initial_capital'] = float(initial_capital)
+    metrics['final_equity'] = final_equity
+    metrics['total_return'] = (final_equity - initial_capital) / initial_capital
+
+    days_passed = max(1, (curve_df.index[-1] - curve_df.index[0]).days)
+    metrics['days_passed'] = days_passed
+    metrics['annual_return'] = (
+                (final_equity / initial_capital) ** (365 / days_passed) - 1) if final_equity > 0 else -1.0
+
+    cum_max = curve_df['equity'].cummax()
+    drawdown = (curve_df['equity'] - cum_max) / cum_max
+    metrics['max_drawdown'] = float(drawdown.min())
+    metrics['avg_drawdown'] = float(drawdown[drawdown < 0].mean()) if (drawdown < 0).any() else 0.0
+
+    dd_pct = drawdown * 100
+    metrics['ulcer_index'] = float(np.sqrt((dd_pct ** 2).mean()))
+    metrics['pain_index'] = float(dd_pct.abs().mean())
+
+    max_uw, avg_uw, _ = _compute_underwater_periods(curve_df)
+    metrics['max_time_under_water_days'] = max_uw
+    metrics['avg_recovery_time_days'] = avg_uw
+
+    # log(equity) 的 R²
+    log_eq = np.log(curve_df['equity'].clip(lower=1e-9).values)
+    x = np.arange(len(log_eq))
+    if len(x) > 2 and np.std(log_eq) > 0:
+        slope, intercept = np.polyfit(x, log_eq, 1)
+        y_pred = slope * x + intercept
+        ss_res = float(np.sum((log_eq - y_pred) ** 2))
+        ss_tot = float(np.sum((log_eq - log_eq.mean()) ** 2))
+        metrics['log_equity_r2'] = (1 - ss_res / ss_tot) if ss_tot > 0 else 0.0
+    else:
+        metrics['log_equity_r2'] = 0.0
+
+    metrics['time_in_market_pct'] = _compute_time_in_market(logs_df, curve_df.index)
+
+    # =============== E. 风险调整收益族 ===============
+    rets_4h = curve_df['equity'].pct_change().dropna()
+    if len(rets_4h) > 1:
+        mr, sr_ = float(rets_4h.mean()), float(rets_4h.std())
+        metrics['sharpe_ratio'] = (mr / sr_ * np.sqrt(bars_per_year)) if sr_ > 0 else 0.0
+
+        downside = rets_4h[rets_4h < 0]
+        d_std = float(downside.std()) if len(downside) > 1 else 0
+        metrics['sortino_ratio'] = (mr / d_std * np.sqrt(bars_per_year)) if d_std and d_std > 0 else 0.0
+
+        metrics['calmar_ratio'] = (metrics['annual_return'] / abs(metrics['max_drawdown'])) if metrics[
+                                                                                                   'max_drawdown'] < 0 else float(
+            'inf')
+        metrics['mar_ratio'] = metrics['calmar_ratio']
+
+        pos_r = float(rets_4h[rets_4h > 0].sum())
+        neg_r = float(abs(rets_4h[rets_4h < 0].sum()))
+        metrics['omega_ratio'] = pos_r / neg_r if neg_r > 0 else float('inf')
+
+        if len(rets_4h) > 20:
+            p95 = float(rets_4h.quantile(0.95))
+            p5 = float(rets_4h.quantile(0.05))
+            metrics['tail_ratio'] = p95 / abs(p5) if abs(p5) > 0 else float('inf')
+        else:
+            metrics['tail_ratio'] = np.nan
+    else:
+        for k in ['sharpe_ratio', 'sortino_ratio', 'calmar_ratio', 'mar_ratio', 'omega_ratio', 'tail_ratio']:
+            metrics[k] = 0.0
+
+    # 滚动 12 个月
+    monthly_eq = curve_df['equity'].resample('M').last()
+    monthly_rets = monthly_eq.pct_change().dropna()
+
+    if len(monthly_rets) >= 12:
+        rolling_12m = monthly_eq.pct_change(12).dropna()
+        metrics['rolling_12m_return_mean'] = float(rolling_12m.mean())
+        metrics['rolling_12m_return_std'] = float(rolling_12m.std())
+        metrics['rolling_12m_return_min'] = float(rolling_12m.min())
+
+        roll_sharpe = monthly_rets.rolling(12).apply(
+            lambda x: (x.mean() / x.std() * np.sqrt(12)) if x.std() > 0 else 0
+        ).dropna()
+        metrics['rolling_12m_sharpe_mean'] = float(roll_sharpe.mean())
+        metrics['rolling_12m_sharpe_std'] = float(roll_sharpe.std())
+        metrics['rolling_12m_sharpe_cv'] = (
+            float(abs(roll_sharpe.std() / roll_sharpe.mean()))
+            if abs(roll_sharpe.mean()) > 1e-9 else np.nan
+        )
+
+        def _r_sortino(x):
+            if not (x < 0).any():
+                return 0
+            d = x[x < 0].std()
+            return (x.mean() / d * np.sqrt(12)) if d > 0 else 0
+
+        roll_sortino = monthly_rets.rolling(12).apply(_r_sortino).dropna()
+        metrics['rolling_12m_sortino_mean'] = float(roll_sortino.mean())
+        metrics['rolling_12m_sortino_std'] = float(roll_sortino.std())
+        metrics['rolling_12m_sortino_cv'] = (
+            float(abs(roll_sortino.std() / roll_sortino.mean()))
+            if abs(roll_sortino.mean()) > 1e-9 else np.nan
+        )
+    else:
+        for k in ['rolling_12m_return_mean', 'rolling_12m_return_std', 'rolling_12m_return_min',
+                  'rolling_12m_sharpe_mean', 'rolling_12m_sharpe_std', 'rolling_12m_sharpe_cv',
+                  'rolling_12m_sortino_mean', 'rolling_12m_sortino_std', 'rolling_12m_sortino_cv']:
+            metrics[k] = np.nan
+
+    # =============== B. 交易层面 ===============
+    cover_logs = pd.DataFrame()
+    if logs_df is not None and not logs_df.empty:
+        cover_logs = logs_df[(logs_df['action'] == 'COVER') & (logs_df['pnl'].notna())].copy()
+
+    metrics['total_actions'] = int(len(logs_df)) if logs_df is not None else 0
+    metrics['total_closed_trades'] = int(len(cover_logs))
+
+    if len(cover_logs) > 0:
+        pnls = cover_logs['pnl'].values
+        metrics['pnl_mean'] = float(np.mean(pnls))
+        metrics['pnl_std'] = float(np.std(pnls))
+        metrics['pnl_skew'] = float(pd.Series(pnls).skew()) if len(pnls) > 2 else 0.0
+        metrics['pnl_kurtosis'] = float(pd.Series(pnls).kurtosis()) if len(pnls) > 3 else 0.0
+        metrics['pnl_gini'] = _compute_gini(pnls)
+
+        sorted_desc = np.sort(pnls)[::-1]
+        total_pnl = float(sorted_desc.sum())
+
+        if total_pnl > 0:
+            metrics['top1_pnl_ratio'] = float(sorted_desc[0]) / total_pnl
+            metrics['top3_pnl_ratio'] = float(sorted_desc[:min(3, len(sorted_desc))].sum()) / total_pnl
+            metrics['top5_pnl_ratio'] = float(sorted_desc[:min(5, len(sorted_desc))].sum()) / total_pnl
+        else:
+            metrics['top1_pnl_ratio'] = np.nan
+            metrics['top3_pnl_ratio'] = np.nan
+            metrics['top5_pnl_ratio'] = np.nan
+
+        wins = cover_logs[cover_logs['pnl'] > 0]
+        losses = cover_logs[cover_logs['pnl'] <= 0]
+        metrics['win_rate'] = float(len(wins) / len(cover_logs))
+        metrics['avg_win'] = float(wins['pnl'].mean()) if len(wins) > 0 else 0.0
+        metrics['avg_loss'] = float(abs(losses['pnl'].mean())) if len(losses) > 0 else 0.0
+        metrics['profit_loss_ratio'] = (metrics['avg_win'] / metrics['avg_loss']) if metrics['avg_loss'] > 0 else float(
+            'inf')
+
+        metrics['expectancy'] = metrics['pnl_mean']
+        if len(pnls) > 1:
+            se = float(np.std(pnls)) / np.sqrt(len(pnls))
+            metrics['expectancy_ci_low'] = metrics['expectancy'] - 1.96 * se
+            metrics['expectancy_ci_high'] = metrics['expectancy'] + 1.96 * se
+        else:
+            metrics['expectancy_ci_low'] = metrics['expectancy']
+            metrics['expectancy_ci_high'] = metrics['expectancy']
+
+        # Drop-Top-K 衰减
+        for k in [1, 3, 5]:
+            if len(sorted_desc) > k:
+                after_drop = float(sorted_desc[k:].sum())
+                metrics[f'drop_top{k}_pnl_decay'] = (total_pnl - after_drop) / total_pnl if total_pnl > 0 else 0.0
+            else:
+                metrics[f'drop_top{k}_pnl_decay'] = 1.0
+
+        # Bootstrap 重采样
+        if len(pnls) > 5:
+            n_boot = 1000
+            rng = np.random.default_rng(42)
+            boots = np.array([rng.choice(pnls, size=len(pnls), replace=True).mean() for _ in range(n_boot)])
+            metrics['bootstrap_pnl_mean_mean'] = float(boots.mean())
+            metrics['bootstrap_pnl_mean_std'] = float(boots.std())
+            metrics['bootstrap_pnl_mean_p5'] = float(np.percentile(boots, 5))
+            metrics['bootstrap_pnl_mean_p95'] = float(np.percentile(boots, 95))
+            metrics['bootstrap_positive_prob'] = float((boots > 0).mean())
+        else:
+            for k in ['bootstrap_pnl_mean_mean', 'bootstrap_pnl_mean_std', 'bootstrap_pnl_mean_p5',
+                      'bootstrap_pnl_mean_p95', 'bootstrap_positive_prob']:
+                metrics[k] = np.nan
+    else:
+        for k in ['pnl_mean', 'pnl_std', 'pnl_skew', 'pnl_kurtosis', 'pnl_gini',
+                  'top1_pnl_ratio', 'top3_pnl_ratio', 'top5_pnl_ratio',
+                  'win_rate', 'avg_win', 'avg_loss', 'profit_loss_ratio',
+                  'expectancy', 'expectancy_ci_low', 'expectancy_ci_high',
+                  'drop_top1_pnl_decay', 'drop_top3_pnl_decay', 'drop_top5_pnl_decay',
+                  'bootstrap_pnl_mean_mean', 'bootstrap_pnl_mean_std',
+                  'bootstrap_pnl_mean_p5', 'bootstrap_pnl_mean_p95',
+                  'bootstrap_positive_prob']:
+            metrics[k] = np.nan
+
+    # MAE/MFE/持仓时长
+    mm = _compute_mae_mfe(logs_df, price_df)
+    if mm['mae']:
+        metrics['mae_pct_mean'] = float(np.mean(mm['mae']))
+        metrics['mae_pct_median'] = float(np.median(mm['mae']))
+        metrics['mae_pct_worst'] = float(np.min(mm['mae']))
+        metrics['mfe_pct_mean'] = float(np.mean(mm['mfe']))
+        metrics['mfe_pct_median'] = float(np.median(mm['mfe']))
+        metrics['mfe_pct_best'] = float(np.max(mm['mfe']))
+    else:
+        for k in ['mae_pct_mean', 'mae_pct_median', 'mae_pct_worst',
+                  'mfe_pct_mean', 'mfe_pct_median', 'mfe_pct_best']:
+            metrics[k] = np.nan
+
+    if mm['holding_h']:
+        metrics['avg_holding_hours'] = float(np.mean(mm['holding_h']))
+        metrics['median_holding_hours'] = float(np.median(mm['holding_h']))
+    else:
+        metrics['avg_holding_hours'] = 0.0
+        metrics['median_holding_hours'] = 0.0
+
+    # =============== C. 标的层面 ===============
+    coins = [c for c in price_df.columns if not any(s in c for s in ['_open', '_high', '_low'])]
+    asset_records = {}
+    total_pnl_all = float(cover_logs['pnl'].sum()) if len(cover_logs) > 0 else 0.0
+
+    for c in coins:
+        c_covers = cover_logs[cover_logs['coin'] == c] if len(cover_logs) > 0 else pd.DataFrame()
+        if len(c_covers) > 0:
+            cp = c_covers['pnl'].values
+            cw = c_covers[c_covers['pnl'] > 0]
+            cl = c_covers[c_covers['pnl'] <= 0]
+            avg_w = float(cw['pnl'].mean()) if len(cw) > 0 else 0.0
+            avg_l = float(abs(cl['pnl'].mean())) if len(cl) > 0 else 0.0
+            expect = float(np.mean(cp))
+            ci_low = expect - 1.96 * float(np.std(cp)) / np.sqrt(len(cp)) if len(cp) > 1 else expect
+            net = float(cp.sum())
+            share = net / total_pnl_all if total_pnl_all > 0 else 0.0
+            asset_records[c] = {
+                'trades': int(len(c_covers)),
+                'win_rate': float(len(cw) / len(c_covers)),
+                'avg_win': avg_w, 'avg_loss': avg_l,
+                'profit_loss_ratio': avg_w / avg_l if avg_l > 0 else float('inf'),
+                'expectancy': expect, 'expectancy_ci_low': ci_low,
+                'net_pnl': net, 'pnl_share': share
+            }
+        else:
+            asset_records[c] = {
+                'trades': 0, 'win_rate': 0.0, 'avg_win': 0.0, 'avg_loss': 0.0,
+                'profit_loss_ratio': 0.0, 'expectancy': 0.0, 'expectancy_ci_low': 0.0,
+                'net_pnl': 0.0, 'pnl_share': 0.0
+            }
+
+    for c, m in asset_records.items():
+        for k, v in m.items():
+            metrics[f'asset_{c}_{k}'] = v
+
+    # 标的级 HHI 与 Top-1 占比 (基于正利润标的)
+    pos_pnls = [m['net_pnl'] for m in asset_records.values() if m['net_pnl'] > 0]
+    if pos_pnls:
+        tp = sum(pos_pnls)
+        shares = [p / tp for p in pos_pnls]
+        metrics['asset_hhi'] = float(sum(s ** 2 for s in shares))
+        metrics['asset_top1_share'] = float(max(shares))
+    else:
+        metrics['asset_hhi'] = np.nan
+        metrics['asset_top1_share'] = np.nan
+
+    metrics['active_assets'] = int(sum(1 for m in asset_records.values() if m['trades'] > 0))
+    metrics['negative_expectancy_assets'] = int(sum(
+        1 for m in asset_records.values() if m['expectancy'] < 0 and m['trades'] > 0))
+
+    # 简易 LOO
+    for c, m in asset_records.items():
+        metrics[f'asset_{c}_loo_pnl_change'] = -m['net_pnl']
+        metrics[f'asset_{c}_loo_total_pnl'] = total_pnl_all - m['net_pnl']
+
+    # =============== D. 时间维度 ===============
+    if len(monthly_rets) > 0:
+        metrics['monthly_positive_ratio'] = float((monthly_rets > 0).sum() / len(monthly_rets))
+
+        ls, mls = 0, 0
+        for r in monthly_rets:
+            if r < 0:
+                ls += 1
+                mls = max(mls, ls)
+            else:
+                ls = 0
+        metrics['max_consecutive_losing_months'] = int(mls)
+        metrics['monthly_return_mean'] = float(monthly_rets.mean())
+        metrics['monthly_return_std'] = float(monthly_rets.std())
+
+        # 月度时间集中度
+        m_pnl_dollar = monthly_eq.diff().dropna()
+        pos_m_pnl = m_pnl_dollar[m_pnl_dollar > 0]
+        if pos_m_pnl.sum() > 0:
+            metrics['top1_month_pnl_ratio'] = float(pos_m_pnl.max() / pos_m_pnl.sum())
+            metrics['top3_months_pnl_ratio'] = float(
+                pos_m_pnl.nlargest(min(3, len(pos_m_pnl))).sum() / pos_m_pnl.sum()
+            )
+        else:
+            metrics['top1_month_pnl_ratio'] = np.nan
+            metrics['top3_months_pnl_ratio'] = np.nan
+    else:
+        metrics['monthly_positive_ratio'] = 0.0
+        metrics['max_consecutive_losing_months'] = 0
+        metrics['monthly_return_mean'] = 0.0
+        metrics['monthly_return_std'] = 0.0
+        metrics['top1_month_pnl_ratio'] = np.nan
+        metrics['top3_months_pnl_ratio'] = np.nan
+
+    # 年度统计
+    annual_records = []
+    for year in sorted(set(curve_df.index.year)):
+        yd = curve_df[curve_df.index.year == year]
+        if len(yd) > 1:
+            se_, ee_ = float(yd['equity'].iloc[0]), float(yd['equity'].iloc[-1])
+            yr = (ee_ - se_) / se_ if se_ > 0 else 0.0
+            ycm = yd['equity'].cummax()
+            ydd = float(((yd['equity'] - ycm) / ycm).min())
+            yrr = yd['equity'].pct_change().dropna()
+            ys = (yrr.mean() / yrr.std() * np.sqrt(bars_per_year)) if len(yrr) > 0 and yrr.std() > 0 else 0.0
+            yds = yrr[yrr < 0]
+            yo = (yrr.mean() / yds.std() * np.sqrt(bars_per_year)) if len(yds) > 1 and yds.std() > 0 else 0.0
+            yc = (yr / abs(ydd)) if ydd < 0 else (float('inf') if yr > 0 else 0.0)
+            annual_records.append({
+                'year': int(year), 'return': yr, 'max_dd': ydd,
+                'sharpe': ys, 'sortino': yo, 'calmar': yc
+            })
+
+    if annual_records:
+        adf = pd.DataFrame(annual_records)
+        metrics['annual_return_mean'] = float(adf['return'].mean())
+        metrics['annual_return_std'] = float(adf['return'].std()) if len(adf) > 1 else 0.0
+        metrics['annual_dd_mean'] = float(adf['max_dd'].mean())
+        metrics['annual_dd_worst'] = float(adf['max_dd'].min())
+
+        finite_sortino = adf['sortino'][np.isfinite(adf['sortino'])]
+        metrics['annual_sortino_mean'] = float(finite_sortino.mean()) if len(finite_sortino) > 0 else 0.0
+        metrics['annual_sortino_std'] = float(finite_sortino.std()) if len(finite_sortino) > 1 else 0.0
+
+        finite_calmar = adf['calmar'][np.isfinite(adf['calmar'])]
+        metrics['annual_calmar_mean'] = float(finite_calmar.mean()) if len(finite_calmar) > 0 else 0.0
+
+        metrics['profitable_years'] = int((adf['return'] > 0).sum())
+        metrics['total_years'] = int(len(adf))
+        metrics['profitable_years_ratio'] = metrics['profitable_years'] / metrics['total_years']
+
+        for _, row in adf.iterrows():
+            y = int(row['year'])
+            metrics[f'year_{y}_return'] = float(row['return'])
+            metrics[f'year_{y}_max_dd'] = float(row['max_dd'])
+            metrics[f'year_{y}_sortino'] = float(row['sortino']) if np.isfinite(row['sortino']) else np.nan
+    else:
+        for k in ['annual_return_mean', 'annual_return_std', 'annual_dd_mean', 'annual_dd_worst',
+                  'annual_sortino_mean', 'annual_sortino_std', 'annual_calmar_mean',
+                  'profitable_years_ratio']:
+            metrics[k] = 0.0
+        metrics['profitable_years'] = 0
+        metrics['total_years'] = 0
+
+    # 子样本一致性 (上半段 vs 下半段)
+    mid = len(curve_df) // 2
+    if mid > 10 and len(curve_df) - mid > 10:
+        fh = curve_df.iloc[:mid]
+        sh = curve_df.iloc[mid:]
+        fhs, fhe = float(fh['equity'].iloc[0]), float(fh['equity'].iloc[-1])
+        shs, she = float(sh['equity'].iloc[0]), float(sh['equity'].iloc[-1])
+        metrics['first_half_return'] = (fhe - fhs) / fhs if fhs > 0 else 0.0
+        metrics['second_half_return'] = (she - shs) / shs if shs > 0 else 0.0
+        metrics['half_return_diff'] = metrics['second_half_return'] - metrics['first_half_return']
+        metrics['first_half_max_dd'] = float(((fh['equity'] - fh['equity'].cummax()) / fh['equity'].cummax()).min())
+        metrics['second_half_max_dd'] = float(((sh['equity'] - sh['equity'].cummax()) / sh['equity'].cummax()).min())
+    else:
+        for k in ['first_half_return', 'second_half_return', 'half_return_diff',
+                  'first_half_max_dd', 'second_half_max_dd']:
+            metrics[k] = np.nan
+
+    # 不同 regime 下的收益拆分 (使用 BTC 趋势作为 regime 代理)
+    if 'BTC' in price_df.columns and 'BTC_TREND_WINDOW' in custom_params:
+        btw = custom_params['BTC_TREND_WINDOW']
+        btc_ma = price_df['BTC'].rolling(window=btw).mean()
+        btc_on = (price_df['BTC'] > btc_ma).reindex(curve_df.index).fillna(False)
+        btc_on_lag = btc_on.shift(1).fillna(False)
+
+        bull_mask = btc_on_lag.reindex(rets_4h.index).fillna(False)
+        bull_rets = rets_4h[bull_mask]
+        bear_rets = rets_4h[~bull_mask]
+
+        if len(bull_rets) > 0:
+            metrics['bull_regime_total_return'] = float((1 + bull_rets).prod() - 1)
+            metrics['bull_regime_bars'] = int(len(bull_rets))
+            metrics['bull_regime_sharpe'] = float(
+                bull_rets.mean() / bull_rets.std() * np.sqrt(bars_per_year)) if bull_rets.std() > 0 else 0.0
+        else:
+            metrics['bull_regime_total_return'] = 0.0
+            metrics['bull_regime_bars'] = 0
+            metrics['bull_regime_sharpe'] = 0.0
+
+        if len(bear_rets) > 0:
+            metrics['bear_regime_total_return'] = float((1 + bear_rets).prod() - 1)
+            metrics['bear_regime_bars'] = int(len(bear_rets))
+            metrics['bear_regime_sharpe'] = float(
+                bear_rets.mean() / bear_rets.std() * np.sqrt(bars_per_year)) if bear_rets.std() > 0 else 0.0
+        else:
+            metrics['bear_regime_total_return'] = 0.0
+            metrics['bear_regime_bars'] = 0
+            metrics['bear_regime_sharpe'] = 0.0
+
+    # =============== F. 鲁棒性 (成本敏感性曲线) ===============
+    if logs_df is not None and not logs_df.empty:
+        bv = float(logs_df[logs_df['action'] == 'SHORT']['value'].sum())
+        sv = float(logs_df[logs_df['action'] == 'COVER']['value'].sum())
+        total_vol = bv + sv
+        ofe = final_equity
+
+        for tf in [0.0010, 0.0020, 0.0030]:
+            ef = max(0, tf - fee_rate)
+            el = total_vol * ef
+            seq = ofe - el
+            sret = (seq - initial_capital) / initial_capital
+            sann = ((seq / initial_capital) ** (365 / days_passed) - 1) if days_passed > 0 and seq > 0 else -1.0
+            metrics[f'cost_stress_{int(tf * 10000)}bps_return'] = float(sret)
+            metrics[f'cost_stress_{int(tf * 10000)}bps_annual'] = float(sann)
+
+        metrics['total_trading_volume'] = total_vol
+        metrics['total_fee_paid'] = float(logs_df['fee'].sum())
+        metrics['fee_to_pnl_ratio'] = (
+            float(metrics['total_fee_paid'] / abs(total_pnl_all))
+            if abs(total_pnl_all) > 0 else np.nan
+        )
+    else:
+        for tf in [10, 20, 30]:
+            metrics[f'cost_stress_{tf}bps_return'] = np.nan
+            metrics[f'cost_stress_{tf}bps_annual'] = np.nan
+        metrics['total_trading_volume'] = 0.0
+        metrics['total_fee_paid'] = 0.0
+        metrics['fee_to_pnl_ratio'] = np.nan
+
+    return metrics
+
+
+def _print_comprehensive_panel(metrics, param_name=""):
+    """打印完整指标面板 (按方案的 A/B/C/D/E/F 分维度展示)"""
+    print("\n" + "═" * 78)
+    print(f"📊 【完整评价指标面板】: {param_name}")
+    print("═" * 78)
+
+    g = metrics.get
+
+    def _fmt_inf(v, fmt="{:>+8.3f}", inf_str="    +inf"):
+        if v == float('inf'):
+            return inf_str
+        if v == float('-inf'):
+            return "    -inf"
+        if isinstance(v, float) and (np.isnan(v) or not np.isfinite(v)):
+            return "     N/A"
+        return fmt.format(v)
+
+    # A. 资金曲线
+    print("\n[A. 资金曲线 & 回撤]")
+    print(f"  初始/最终资金:         ${g('initial_capital', 0):>12,.2f}  →  ${g('final_equity', 0):>12,.2f}")
+    print(f"  总收益率/年化收益率:   {g('total_return', 0) * 100:>+8.2f}%  /  {g('annual_return', 0) * 100:>+8.2f}%")
+    print(f"  Max DD / Avg DD:       {g('max_drawdown', 0) * 100:>+8.2f}%  /  {g('avg_drawdown', 0) * 100:>+8.2f}%")
+    print(f"  Ulcer Index:           {g('ulcer_index', 0):>8.3f}")
+    print(f"  Pain Index:            {g('pain_index', 0):>8.3f}")
+    print(f"  最长水下时长:          {g('max_time_under_water_days', 0):>8.1f} 天")
+    print(f"  平均回撤恢复时长:      {g('avg_recovery_time_days', 0):>8.1f} 天")
+    print(f"  log(equity) R²:        {g('log_equity_r2', 0):>8.4f}")
+    print(f"  Time in Market:        {g('time_in_market_pct', 0) * 100:>8.2f}%")
+
+    # E. 风险调整
+    print("\n[E. 风险调整收益]")
+    print(f"  Sharpe / Sortino:      {g('sharpe_ratio', 0):>+8.3f}  /  {g('sortino_ratio', 0):>+8.3f}")
+    print(f"  Calmar / Omega:        {_fmt_inf(g('calmar_ratio', 0))}  /  {_fmt_inf(g('omega_ratio', 0))}")
+    print(f"  Tail Ratio (95/5):     {_fmt_inf(g('tail_ratio', np.nan))}")
+    rs_m = g('rolling_12m_sharpe_mean', np.nan)
+    if not (isinstance(rs_m, float) and np.isnan(rs_m)):
+        rs_cv = g('rolling_12m_sharpe_cv', np.nan)
+        print(f"  滚动12M Sharpe (均值/CV):  {rs_m:>+7.3f}  /  {_fmt_inf(rs_cv, '{:>7.3f}', '   N/A')}")
+        ro_m = g('rolling_12m_sortino_mean', np.nan)
+        ro_cv = g('rolling_12m_sortino_cv', np.nan)
+        print(f"  滚动12M Sortino (均值/CV): {ro_m:>+7.3f}  /  {_fmt_inf(ro_cv, '{:>7.3f}', '   N/A')}")
+    else:
+        print(f"  滚动12M Sharpe/Sortino:    N/A (样本不足12个月)")
+
+    # B. 交易层面
+    print("\n[B. 交易层面]")
+    print(f"  总动作 / 平仓笔数:     {g('total_actions', 0):>5d}  /  {g('total_closed_trades', 0):>5d}")
+    if g('total_closed_trades', 0) > 0:
+        print(
+            f"  胜率 / 盈亏比:         {g('win_rate', 0) * 100:>6.2f}%  /  {_fmt_inf(g('profit_loss_ratio', 0), '{:>6.2f}', '   inf')}")
+        print(f"  平均盈/亏:             ${g('avg_win', 0):>+9.2f}  /  ${g('avg_loss', 0):>9.2f}")
+        print(f"  Expectancy:            ${g('expectancy', 0):>+9.2f}")
+        print(f"  Expectancy 95% CI:     [${g('expectancy_ci_low', 0):>+8.2f}, ${g('expectancy_ci_high', 0):>+8.2f}]")
+        bp = g('bootstrap_positive_prob', np.nan)
+        if not np.isnan(bp):
+            print(f"  Bootstrap 正期望概率:  {bp * 100:>6.2f}%")
+        print(f"  PnL Mean / Std:        ${g('pnl_mean', 0):>+9.2f}  /  ${g('pnl_std', 0):>9.2f}")
+        print(f"  PnL Skew / Kurt:       {g('pnl_skew', 0):>+8.3f}  /  {g('pnl_kurtosis', 0):>+8.3f}")
+        print(f"  PnL Gini系数:          {g('pnl_gini', 0):>8.4f}")
+
+        t1 = g('top1_pnl_ratio', np.nan)
+        if not (isinstance(t1, float) and np.isnan(t1)):
+            print(f"  Top-1/3/5 利润占比:    "
+                  f"{t1 * 100:>5.1f}% / {g('top3_pnl_ratio', 0) * 100:>5.1f}% / {g('top5_pnl_ratio', 0) * 100:>5.1f}%")
+        print(f"  Drop-Top1/3/5 衰减:    "
+              f"{g('drop_top1_pnl_decay', 0) * 100:>5.1f}% / "
+              f"{g('drop_top3_pnl_decay', 0) * 100:>5.1f}% / "
+              f"{g('drop_top5_pnl_decay', 0) * 100:>5.1f}%")
+
+        mae_m = g('mae_pct_mean', np.nan)
+        if not (isinstance(mae_m, float) and np.isnan(mae_m)):
+            print(f"  MAE 平均/最差:         {mae_m * 100:>+6.2f}%  /  {g('mae_pct_worst', 0) * 100:>+6.2f}%")
+            print(
+                f"  MFE 平均/最佳:         {g('mfe_pct_mean', 0) * 100:>+6.2f}%  /  {g('mfe_pct_best', 0) * 100:>+6.2f}%")
+        print(f"  平均/中位持仓时长:     {g('avg_holding_hours', 0):>6.1f}h  /  {g('median_holding_hours', 0):>6.1f}h")
+
+    # C. 标的集中度
+    print("\n[C. 标的集中度]")
+    print(f"  活跃标的 / 负期望标的: {g('active_assets', 0)} / {g('negative_expectancy_assets', 0)}")
+    hhi = g('asset_hhi', np.nan)
+    if not (isinstance(hhi, float) and np.isnan(hhi)):
+        print(f"  Asset HHI:             {hhi:>8.4f}")
+        print(f"  Top-1 标的利润占比:    {g('asset_top1_share', 0) * 100:>6.2f}%")
+
+    asset_keys = sorted([k for k in metrics.keys() if k.startswith('asset_') and k.endswith('_trades')])
+    coins_in_metrics = [k[len('asset_'):-len('_trades')] for k in asset_keys]
+    if coins_in_metrics:
+        print("  各标的明细:")
+        print(f"    {'Coin':<6} {'Trades':>6} {'WinRate':>8} {'P/L':>7} {'Expect':>10} {'NetPnL':>11} {'Share':>8}")
+        for c in coins_in_metrics:
+            tr_n = g(f'asset_{c}_trades', 0)
+            if tr_n > 0:
+                pl = g(f'asset_{c}_profit_loss_ratio', 0)
+                pl_s = "  inf" if pl == float('inf') else f"{pl:>5.2f}"
+                print(f"    {c:<6} {tr_n:>6d} {g(f'asset_{c}_win_rate', 0) * 100:>7.2f}% "
+                      f"{pl_s:>7} {g(f'asset_{c}_expectancy', 0):>+10.2f} "
+                      f"{g(f'asset_{c}_net_pnl', 0):>+11.2f} {g(f'asset_{c}_pnl_share', 0) * 100:>+7.2f}%")
+            else:
+                print(f"    {c:<6} {0:>6d} {'--':>8} {'--':>7} {'--':>10} {'--':>11} {'--':>8}")
+
+    # D. 时间稳定性
+    print("\n[D. 时间稳定性]")
+    print(f"  月度正收益占比:        {g('monthly_positive_ratio', 0) * 100:>6.2f}%")
+    print(f"  最长连续亏损月:        {g('max_consecutive_losing_months', 0):>2d} 个月")
+    t1m = g('top1_month_pnl_ratio', np.nan)
+    if not (isinstance(t1m, float) and np.isnan(t1m)):
+        print(f"  Top-1/Top-3 月利润占比: {t1m * 100:>5.1f}% / {g('top3_months_pnl_ratio', 0) * 100:>5.1f}%")
+    print(
+        f"  盈利年份占比:          {g('profitable_years_ratio', 0) * 100:>6.2f}%  ({g('profitable_years', 0)}/{g('total_years', 0)})")
+    print(
+        f"  年度回撤(均值/最差):   {g('annual_dd_mean', 0) * 100:>+7.2f}%  /  {g('annual_dd_worst', 0) * 100:>+7.2f}%")
+    fh_r = g('first_half_return', np.nan)
+    if not (isinstance(fh_r, float) and np.isnan(fh_r)):
+        print(f"  上半段/下半段 收益:    {fh_r * 100:>+7.2f}%  /  {g('second_half_return', 0) * 100:>+7.2f}%")
+        print(
+            f"  上半段/下半段 Max DD:  {g('first_half_max_dd', 0) * 100:>+7.2f}%  /  {g('second_half_max_dd', 0) * 100:>+7.2f}%")
+
+    # F. 鲁棒性
+    print("\n[F. 鲁棒性 - 成本敏感性曲线]")
+    print(f"  原始 5bps (基准年化):  {g('annual_return', 0) * 100:>+7.2f}%")
+    for fee in [10, 20, 30]:
+        ann = g(f'cost_stress_{fee}bps_annual', np.nan)
+        if not (isinstance(ann, float) and np.isnan(ann)):
+            status = "✅ 存活" if ann > 0 else "💀 破产"
+            print(f"  压力 {fee:>2d}bps 年化:        {ann * 100:>+7.2f}%  {status}")
+
+    if 'bull_regime_total_return' in metrics:
+        bull_r = g('bull_regime_total_return', 0)
+        bull_b = g('bull_regime_bars', 0)
+        bear_r = g('bear_regime_total_return', 0)
+        bear_b = g('bear_regime_bars', 0)
+        print(f"  Bull市表现 (BTC>MA):   收益={bull_r * 100:>+7.2f}%  Bar数={bull_b}")
+        print(f"  Bear市表现 (BTC≤MA):   收益={bear_r * 100:>+7.2f}%  Bar数={bear_b}")
+
+    print(f"  总交易额:              ${g('total_trading_volume', 0):>11,.0f}")
+    print(f"  总手续费:              ${g('total_fee_paid', 0):>11,.2f}")
+    f2p = g('fee_to_pnl_ratio', np.nan)
+    if not (isinstance(f2p, float) and np.isnan(f2p)):
+        print(f"  手续费/PnL 比率:       {f2p * 100:>6.2f}%")
+
+    print("═" * 78)
+
+
 def run_backtest(df, param_name="默认基准参数", custom_params=None, verbose=True):
     if custom_params is None:
         custom_params = {
@@ -136,7 +819,7 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None, verbos
     MAX_WEIGHT = custom_params['MAX_WEIGHT']
 
     if verbose:
-        print(f"\n🚀 启动截面做空动量回测引擎 (验证：信号驱动二元进出)... [{param_name}]")
+        print(f"\n🚀 启动截面动量做空回测引擎 (验证：信号驱动二元进空)... [{param_name}]")
         print(
             f"   ⚙️ 参数配置: MOM_WIN={MOM_WINDOW}, VOL_WIN={VOL_WINDOW}, BTC_TREND={BTC_TREND_WINDOW}, MAX_WT={MAX_WEIGHT}")
 
@@ -170,28 +853,17 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None, verbos
     atr = tr_df.rolling(window=VOL_WINDOW).mean()
     atr_pct = atr / df_close  # 归一化为百分比形式
 
-    # 【新增归因日志统计计算】：计算原版 std 波动率以对比
     log_returns = np.log(df_close / df_close.shift(1))
     old_volatility = log_returns.rolling(window=VOL_WINDOW).std() * np.sqrt(365 * 6)
     old_adj_mom = returns / (old_volatility + 1e-8)
 
     # 新版截面动量
     adj_mom = returns / (atr_pct + 1e-8)
-
-    # 将 volatility 变量指向 atr_pct，保证后续仓位控制(inv_vol)同样基于 ATR 进行反向加权
     volatility = atr_pct
 
-    # 打印归因验证统计日志
-    if verbose:
-        print(f"   [归因验证] 动量计算分母已从 原标准差(Std) 替换为 ATR_pct !")
-        rank_corr = old_adj_mom.rank(axis=1).corrwith(adj_mom.rank(axis=1), axis=1).mean()
-        print(f"             -> 截面排序平均相关系数 (Rank Corr): {rank_corr:.4f} (越低说明优化影响越大)")
-        print(
-            f"             -> 均值对比 | ATR_pct: {atr_pct.mean().mean():.4f}  vs  原波动率: {old_volatility.mean().mean():.4f}")
-
+    # 宏观开关：做空逻辑，BTC需在均线之下
     btc_ma = df['BTC'].rolling(window=BTC_TREND_WINDOW).mean()
-    # ⚠️ 做空逻辑：BTC跌破均线时开启做空趋势
-    btc_trend_on = df['BTC'] < btc_ma
+    btc_trend_off = df['BTC'] < btc_ma
 
     cash = INITIAL_CAPITAL
     positions = {coin: 0.0 for coin in coins}
@@ -204,40 +876,41 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None, verbos
         current_time = df.index[i]
         prices = df.iloc[i]
 
+        # 核心：无论多空，权益 = 现金余额 + 持仓市值
+        # 做空时 positions[c] 为负数，现金流会增加，总权益等于初始减去手续费和浮亏
         current_equity = cash + sum(positions[c] * prices[c] for c in coins)
         equity_curve.append({'time': current_time, 'equity': current_equity})
 
         top_coins = []
 
-        # 1. 截面动量打分（计算当前信号）
-        if btc_trend_on.iloc[i]:
+        # 1. 截面动量打分（做空：筛选跌得最狠的）
+        if btc_trend_off.iloc[i]:
             current_mom = adj_mom.iloc[i].dropna()
-            # ⚠️ 做空逻辑：寻找动量为负的标的，并取跌幅最深的 TOP_K
             negative_mom = current_mom[current_mom < 0]
             if not negative_mom.empty:
+                # 寻找跌幅最深的 Top K 标的
                 top_coins = negative_mom.nsmallest(TOP_K).index.tolist()
 
-        # [平空] 只要持仓标的触发了平空信号（不再属于 top_coins，或宏观做空关闭） -> 直接全仓平空
+        # [平空/COVER] 只要空仓标的不再符合条件（不属于跌得最惨的 top_coins，或 BTC 返回多头均线以上） -> 直接全仓平空
         for c in coins:
-            # ⚠️ 做空逻辑：空头仓位表现为负数，因此判断 < 0
-            if positions[c] < 0:
+            if positions[c] < 0:  # < 0 意味着持有空头仓位
                 if c not in top_coins:
                     cover_amount = abs(positions[c])
                     actual_cover_val = cover_amount * prices[c]
                     fee = actual_cover_val * FEE_RATE
 
-                    positions[c] += cover_amount  # 清零
-                    cash -= (actual_cover_val + fee)
+                    positions[c] += cover_amount  # 仓位清零
+                    cash -= (actual_cover_val + fee)  # 平空需要花钱买回，并扣手续费
 
                     trade_logs.append({
                         "time": current_time, "action": "COVER", "coin": c,
                         "price": prices[c], "amount": cover_amount, "value": actual_cover_val,
-                        "fee": fee, "reason": "Signal Exit (Not in Top Shorts / Trend Off)"
+                        "fee": fee, "reason": "Signal Exit (Not in Bottom K / Trend On)"
                     })
 
-        # [开空] 如果目前有入场信号，并且当前空仓 -> 才分配资金开空。死拿不补仓、不减仓。
+        # [做空/SHORT] 如果目前有入场信号，并且当前空仓 -> 才分配资金做空。
         if top_coins:
-            # 仅为计算初始买入权重提供参考
+            # 仅为计算初始做空权重提供参考
             inv_vol = {}
             for c in top_coins:
                 c_vol = volatility[c].iloc[i]
@@ -245,33 +918,39 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None, verbos
 
             total_inv_vol = sum(inv_vol.values())
 
+            # 计算已经使用的保证金（空头持仓的绝对值市值）
+            used_margin = sum(abs(positions[c]) * prices[c] for c in coins)
+
             for c in top_coins:
-                # 🔴 关键核心：只有完全空仓时，才进行开空。一旦开空，无论涨跌不再微调
+                # 🔴 关键核心：只有完全空仓时，才进行做空
                 if positions[c] == 0:
                     if total_inv_vol > 0:
                         raw_weight = inv_vol[c] / total_inv_vol
                         target_weight = min(raw_weight, MAX_WEIGHT)
-                        # 基于当前净值分配空头仓位价值
                         target_val = current_equity * target_weight
 
-                        # ⚠️ 做空逻辑：直接按目标价值开空，因为开空会增加现金，消耗的是保证金(净值)
-                        short_val = target_val
-                        fee = short_val * FEE_RATE
-                        short_amount = short_val / prices[c]
+                        # 可用做空空间受限于剩余自由保证金
+                        free_margin = current_equity - used_margin
+                        available_to_short = min(target_val, free_margin) / (1 + FEE_RATE)
 
-                        positions[c] -= short_amount  # 仓位变负
-                        cash += (short_val - fee)     # 获得卖空现金，扣除手续费
+                        if available_to_short > 1.0:
+                            short_val = available_to_short
+                            fee = short_val * FEE_RATE
+                            short_amount = short_val / prices[c]
 
-                        trade_logs.append({
-                            "time": current_time, "action": "SHORT", "coin": c,
-                            "price": prices[c], "amount": short_amount, "value": short_val,
-                            "fee": fee, "reason": "Signal Entry (Top Shorts)"
-                        })
+                            positions[c] -= short_amount  # 空头仓位用负数表示
+                            cash += (short_val - fee)  # 卖空获得现金，并扣除开仓手续费
+                            used_margin += short_val  # 更新已用保证金
+
+                            trade_logs.append({
+                                "time": current_time, "action": "SHORT", "coin": c,
+                                "price": prices[c], "amount": short_amount, "value": short_val,
+                                "fee": fee, "reason": "Signal Entry (Bottom K)"
+                            })
 
     # ==========================================
-    # 🔴 核心指标与高级统计计算 (保持完全不变)
+    # 🔴 核心指标与高级统计计算 (对称改写为做空逻辑)
     # ==========================================
-    # 注意：这里的计算对负仓位天然完美兼容，因为负仓位 * 最终价格 就是负债的精确抵扣
     final_equity = cash + sum(positions[c] * df.iloc[-1][c] for c in coins)
     total_return = (final_equity - INITIAL_CAPITAL) / INITIAL_CAPITAL
 
@@ -292,6 +971,7 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None, verbos
     win_trades, loss_trades = 0, 0
     total_profit, total_loss = 0.0, 0.0
     holding_times = []
+    # 状态字典依然保持 qty 为正，方便复用乘除逻辑
     coin_states = {c: {'qty': 0.0, 'cost': 0.0, 'entry_time': None} for c in coins}
 
     for log in trade_logs:
@@ -302,7 +982,8 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None, verbos
             old_qty, old_cost = coin_states[c]['qty'], coin_states[c]['cost']
             new_qty = old_qty + amt
             if new_qty > 0:
-                coin_states[c]['cost'] = (old_qty * old_cost + amt * price) / new_qty
+                # 🛠️ 做空时，支付的手续费会“压低”你的建仓均价（使回本更难，完美对称多头的逻辑）
+                coin_states[c]['cost'] = (old_qty * old_cost + amt * price - fee) / new_qty
             coin_states[c]['qty'] = new_qty
             if coin_states[c]['entry_time'] is None:
                 coin_states[c]['entry_time'] = time
@@ -310,7 +991,7 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None, verbos
         elif action == 'COVER':
             cost_price = coin_states[c]['cost']
             if cost_price > 0:
-                # ⚠️ 做空逻辑盈亏计算反转：开仓均价 - 当前平仓价
+                # 做空的盈亏 = 数量 * (建仓价 - 平仓价) - 平仓手续费
                 pnl = amt * (cost_price - price) - fee
                 log['pnl'] = pnl
 
@@ -361,51 +1042,44 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None, verbos
             print("  (无有效平仓记录)")
         print("=" * 45)
 
-    # 构造返回的统计结果字典 (扫描时使用)
-    stats = {
-        'param_name': param_name,
-        'MOM_WINDOW': MOM_WINDOW,
-        'VOL_WINDOW': VOL_WINDOW,
-        'BTC_TREND_WINDOW': BTC_TREND_WINDOW,
-        'MAX_WEIGHT': MAX_WEIGHT,
-        'final_equity': round(final_equity, 2),
-        'total_return': round(total_return, 4),
-        'annual_return': round(annual_return, 4),
-        'max_drawdown': round(max_drawdown, 4),
-        'sharpe_ratio': round(sharpe_ratio, 3),
-        'calmar_ratio': round(calmar_ratio if not np.isinf(calmar_ratio) else 999.0, 3),
-        'total_actions': len(trade_logs),
-        'closed_trades': total_closed_trades,
-        'win_rate': round(win_rate, 4),
-        'profit_loss_ratio': round(profit_loss_ratio if not np.isinf(profit_loss_ratio) else 999.0, 3),
-        'avg_profit': round(avg_profit, 2),
-        'avg_loss': round(avg_loss, 2),
-        'avg_holding_days': round(avg_holding_time.total_seconds() / 86400 if avg_holding_time else 0, 2),
-    }
+    # ==========================================
+    # 🆕 完整评价指标计算 + 返回 metrics_df 用于参数搜索聚合
+    # ==========================================
+    logs_df = pd.DataFrame(trade_logs)
 
-    return pd.DataFrame(trade_logs), curve_df, stats
+    metrics = calculate_comprehensive_metrics(
+        logs_df=logs_df,
+        curve_df=curve_df,
+        price_df=df,
+        custom_params=custom_params,
+        param_name=param_name,
+        initial_capital=INITIAL_CAPITAL,
+        fee_rate=FEE_RATE,
+        final_equity_override=final_equity  # 与简易面板的 final_equity 保持一致
+    )
+
+    if verbose:
+        _print_comprehensive_panel(metrics, param_name=param_name)
+
+    metrics_df = pd.DataFrame([metrics])
+
+    return logs_df, curve_df, metrics_df
 
 
 # ==========================================
 # 🔴 升级版：深度验证分析模块 (包含年度 Beta 对齐)
 # ==========================================
-def deep_robustness_check(logs_df, curve_df, price_df, param_name="", verbose=True):
-    if verbose:
-        print("\n" + "🔥" * 20)
-        print(f"🕵️ 【深度鲁棒性检验报告】: {param_name}")
-        print("🔥" * 20)
-
-    yearly_results = {}
-    stress_results = {}
+def deep_robustness_check(logs_df, curve_df, price_df, param_name=""):
+    print("\n" + "🔥" * 20)
+    print(f"🕵️ 【深度鲁棒性检验报告(做空版)】: {param_name}")
+    print("🔥" * 20)
 
     if curve_df.empty or logs_df.empty:
-        if verbose:
-            print("无交易数据，无法分析。")
-        return yearly_results, stress_results
+        print("无交易数据，无法分析。")
+        return
 
     # --- 1. 分年度/分季度绩效拆解 (Alpha vs Beta) ---
-    if verbose:
-        print("\n📅 [年度绩效拆解] (策略表现 vs 同期市场基准):")
+    print("\n📅 [年度绩效拆解] (策略表现 vs 同期市场基准):")
     curve_df['year'] = curve_df.index.year
 
     if 'time' in logs_df.columns:
@@ -413,11 +1087,8 @@ def deep_robustness_check(logs_df, curve_df, price_df, param_name="", verbose=Tr
     else:
         logs_df['year'] = pd.to_datetime(logs_df['time']).dt.year
 
-    if 'pnl' in logs_df.columns:
-        # ⚠️ 做空逻辑：原为 SELL 记录利润，现为 COVER 记录利润
-        sell_logs = logs_df[(logs_df['action'] == 'COVER') & (logs_df['pnl'].notna())]
-    else:
-        sell_logs = pd.DataFrame()
+    # 取出所有平空单作为交易记录
+    cover_logs = logs_df[(logs_df['action'] == 'COVER') & (logs_df['pnl'].notna())]
 
     # 过滤衍生OHLC列，计算大盘时仅看Close价格
     coins = [c for c in price_df.columns if not any(sub in c for sub in ['_open', '_high', '_low'])]
@@ -440,53 +1111,70 @@ def deep_robustness_check(logs_df, curve_df, price_df, param_name="", verbose=Tr
         else:
             avg_beta = 0.0
 
-        y_sells = sell_logs[sell_logs['year'] == year] if not sell_logs.empty else pd.DataFrame()
-        trades_cnt = len(y_sells)
-        if trades_cnt > 0 and 'pnl' in y_sells.columns:
-            y_win = (y_sells['pnl'] > 0).sum()
+        y_covers = cover_logs[cover_logs['year'] == year]
+        trades_cnt = len(y_covers)
+        if trades_cnt > 0:
+            y_win = (y_covers['pnl'] > 0).sum()
             y_win_rate = y_win / trades_cnt * 100
 
-            sum_win = y_sells[y_sells['pnl'] > 0]['pnl'].sum()
+            sum_win = y_covers[y_covers['pnl'] > 0]['pnl'].sum()
             avg_win = sum_win / y_win if y_win > 0 else 0.0
 
             y_loss_cnt = trades_cnt - y_win
-            sum_loss = abs(y_sells[y_sells['pnl'] <= 0]['pnl'].sum())
-            avg_loss_y = sum_loss / y_loss_cnt if y_loss_cnt > 0 else 0.0
+            sum_loss = abs(y_covers[y_covers['pnl'] <= 0]['pnl'].sum())
+            avg_loss = sum_loss / y_loss_cnt if y_loss_cnt > 0 else 0.0
 
-            y_pl_ratio = avg_win / avg_loss_y if avg_loss_y > 0 else 0.0
+            y_pl_ratio = avg_win / avg_loss if avg_loss > 0 else float('inf')
 
-            trade_stats = f"{trades_cnt:>3d} 笔平仓 | 胜率: {y_win_rate:>5.1f}% | 盈亏比: {y_pl_ratio:>4.2f}"
+            trade_stats = f"{trades_cnt:>3d} 笔平空 | 胜率: {y_win_rate:>5.1f}% | 盈亏比: {y_pl_ratio:>4.2f}"
         else:
-            y_win_rate = 0.0
-            y_pl_ratio = 0.0
-            trade_stats = "  0 笔平仓"
+            trade_stats = "  0 笔平空"
 
         excess_ret = y_ret - avg_beta
 
-        yearly_results[year] = {
-            'return': round(y_ret, 2),
-            'drawdown': round(y_mdd, 2),
-            'beta': round(avg_beta, 2),
-            'excess': round(excess_ret, 2),
-            'trades': trades_cnt,
-            'win_rate': round(y_win_rate, 2),
-            'pl_ratio': round(y_pl_ratio, 2)
-        }
+        print(
+            f"   ► 【{year}年】 策略收益: {y_ret:>+7.2f}% (最大回撤 {y_mdd:>7.2f}%) | 等权大盘: {avg_beta:>+7.2f}% | 超额: {excess_ret:>+7.2f}%")
+        print(f"            交易统计: {trade_stats}")
 
-        if verbose:
-            print(
-                f"   ► 【{year}年】 策略收益: {y_ret:>+7.2f}% (最大回撤 {y_mdd:>7.2f}%) | 等权大盘: {avg_beta:>+7.2f}% | 超额: {excess_ret:>+7.2f}%")
-            print(f"            交易统计: {trade_stats}")
-            print("-" * 50)
+        print(f"            ↳ [各标的归因明细]")
+        for c in coins:
+            if not year_prices.empty and c in year_prices.columns:
+                c_start = year_prices[c].iloc[0]
+                c_end = year_prices[c].iloc[-1]
+                c_beta = (c_end - c_start) / c_start * 100
+            else:
+                c_beta = 0.0
+
+            c_covers_year = y_covers[y_covers['coin'] == c]
+            c_trades_cnt = len(c_covers_year)
+
+            if c_trades_cnt > 0:
+                c_win = (c_covers_year['pnl'] > 0).sum()
+                c_win_rate = c_win / c_trades_cnt * 100
+
+                c_sum_win = c_covers_year[c_covers_year['pnl'] > 0]['pnl'].sum()
+                c_avg_win = c_sum_win / c_win if c_win > 0 else 0.0
+
+                c_loss_cnt = c_trades_cnt - c_win
+                c_sum_loss = abs(c_covers_year[c_covers_year['pnl'] <= 0]['pnl'].sum())
+                c_avg_loss = c_sum_loss / c_loss_cnt if c_loss_cnt > 0 else 0.0
+
+                c_pl_ratio = c_avg_win / c_avg_loss if c_avg_loss > 0 else float('inf')
+                c_net_pnl = c_covers_year['pnl'].sum()
+
+                print(
+                    f"              - {c:4s}: 策略净盈亏 ${c_net_pnl:>+8.2f} | 基准: {c_beta:>+7.2f}% | 平空: {c_trades_cnt:>3d}笔 | 胜率: {c_win_rate:>5.1f}% | 盈亏比: {c_pl_ratio:>4.2f}")
+            else:
+                print(f"              - {c:4s}: 策略净盈亏 $   +0.00 | 基准: {c_beta:>+7.2f}% | 平空:   0笔")
+
+        print("-" * 50)
 
     # --- 2. 摩擦成本极限压力测试 (Transaction Cost Stress Test) ---
-    if verbose:
-        print("\n🌪️[滑点与手续费压力测试] (检验低胜率策略的生存力):")
+    print("\n🌪️[滑点与手续费压力测试] (检验低胜率策略的生存力):")
     stress_fees = [0.0005, 0.0010, 0.0020, 0.0030]  # 万5, 千1, 千2, 千3
     base_fee_rate = 0.0005
 
     for test_fee in stress_fees:
-        # ⚠️ 做空逻辑：动作标签对应修改
         buy_volume = logs_df[logs_df['action'] == 'SHORT']['value'].sum()
         sell_volume = logs_df[logs_df['action'] == 'COVER']['value'].sum()
         total_trading_volume = buy_volume + sell_volume
@@ -498,625 +1186,132 @@ def deep_robustness_check(logs_df, curve_df, price_df, param_name="", verbose=Tr
         stressed_equity = original_final_equity - extra_friction_loss
         stressed_return = (stressed_equity - 10000) / 10000
 
-        bps_key = int(test_fee * 10000)
-        stress_results[bps_key] = round(stressed_return * 100, 2)
+        status = "✅ 存活" if stressed_return > 0 else "💀 破产"
+        print(f"   - 单边综合成本 {test_fee * 10000:>2.0f} bps: 最终收益率 {stressed_return * 100:>8.2f}%[{status}]")
 
-        if verbose:
-            status = "✅ 存活" if stressed_return > 0 else "💀 破产"
-            print(f"   - 单边综合成本 {test_fee * 10000:>2.0f} bps: 最终收益率 {stressed_return * 100:>8.2f}%[{status}]")
-
-    if verbose:
-        print("=" * 60)
-
-    return yearly_results, stress_results
+    print("=" * 60)
 
 
-# ==========================================
-# 🆕 多进程支持: 全局变量 + worker (必须在模块顶层，否则无法 pickle)
-# ==========================================
-_GLOBAL_DF = None
-
-
-def _init_worker(df):
-    """子进程初始化函数：将大 DataFrame 设为全局，避免每次任务重复序列化"""
-    global _GLOBAL_DF
-    _GLOBAL_DF = df
-
-
-def _worker_run_backtest(task):
-    """子进程任务函数"""
-    idx, params = task
-    df = _GLOBAL_DF
-
-    if df is None:
-        return {'idx': idx, 'success': False, 'result': None,
-                'error': '_GLOBAL_DF is None (worker init failed)'}
-
-    param_name = (f"P{idx + 1:05d}_M{params['MOM_WINDOW']}_V{params['VOL_WINDOW']}"
-                  f"_T{params['BTC_TREND_WINDOW']}_W{int(params['MAX_WEIGHT'] * 100)}")
-
+def _parallel_worker_task(i, params, df_4h):
+    param_name = f"Grid_No.{i + 1}"
     try:
-        logs_df, curve_df, stats = run_backtest(
-            df, param_name=param_name, custom_params=params, verbose=False
+        _, _, metrics_df = run_backtest(
+            df_4h,
+            param_name=param_name,
+            custom_params=params,
+            verbose=False
         )
-        yearly_results, stress_results = deep_robustness_check(
-            logs_df, curve_df, df, param_name=param_name, verbose=False
-        )
-
-        full_result = dict(stats)
-        for year, ydata in yearly_results.items():
-            full_result[f'Y{year}_return'] = ydata['return']
-            full_result[f'Y{year}_drawdown'] = ydata['drawdown']
-            full_result[f'Y{year}_beta'] = ydata['beta']
-            full_result[f'Y{year}_excess'] = ydata['excess']
-            full_result[f'Y{year}_trades'] = ydata['trades']
-            full_result[f'Y{year}_win_rate'] = ydata['win_rate']
-            full_result[f'Y{year}_pl_ratio'] = ydata['pl_ratio']
-
-        for fee_bps, ret in stress_results.items():
-            full_result[f'stress_{fee_bps}_return'] = ret
-            full_result[f'stress_{fee_bps}_survive'] = 1 if ret > 0 else 0
-
-        return {'idx': idx, 'success': True, 'result': full_result, 'error': None}
+        return True, metrics_df, params, param_name, None
     except Exception as e:
-        return {'idx': idx, 'success': False, 'result': None,
-                'error': f"{e}\n{traceback.format_exc()}"}
+        return False, None, params, param_name, str(e)
 
 
-# ==========================================
-# 🆕 综合评分函数 (多维度归一化加权)
-# ==========================================
-def compute_composite_scores(df):
-    df = df.copy()
-
-    # 1. 年度收益相关指标
-    year_cols = [c for c in df.columns if c.startswith('Y') and c.endswith('_return')]
-    if year_cols:
-        df['worst_year_return'] = df[year_cols].min(axis=1, skipna=True)
-        df['best_year_return'] = df[year_cols].max(axis=1, skipna=True)
-        df['mean_year_return'] = df[year_cols].mean(axis=1, skipna=True)
-        df['std_year_return'] = df[year_cols].std(axis=1, skipna=True).fillna(0)
-        df['positive_years'] = (df[year_cols] > 0).sum(axis=1)
-        df['annual_consistency'] = df['mean_year_return'] / (df['std_year_return'] + 1e-8)
-
-    # 2. 滑点存活档位
-    stress_pct_cols = [c for c in df.columns if c.startswith('stress_') and c.endswith('_return')]
-    if stress_pct_cols:
-        df['stress_survival_count'] = (df[stress_pct_cols] > 0).sum(axis=1)
-    else:
-        df['stress_survival_count'] = 0
-
-    # 3. 期望值
-    df['expectancy'] = df['win_rate'] * df['avg_profit'] - (1 - df['win_rate']) * df['avg_loss']
-
-    # 4. 硬性筛选 (推荐参数必须全通过)
-    hard_conditions = (
-        (df['total_return'] > 0) &
-        (df['max_drawdown'] > -0.40) &
-        (df['closed_trades'] >= 50)
-    )
-    if 'worst_year_return' in df.columns:
-        hard_conditions = hard_conditions & (df['worst_year_return'] > -25)
-    if 'stress_5_return' in df.columns:
-        hard_conditions = hard_conditions & (df['stress_5_return'] > 0)
-    df['pass_hard_filter'] = hard_conditions.astype(int)
-
-    # 5. 归一化函数 (min-max)
-    def normalize(s, lo=None, hi=None):
-        s = s.copy()
-        if lo is not None:
-            s = s.clip(lower=lo)
-        if hi is not None:
-            s = s.clip(upper=hi)
-        s_min, s_max = s.min(), s.max()
-        if s_max == s_min:
-            return pd.Series([0.5] * len(s), index=s.index)
-        return (s - s_min) / (s_max - s_min)
-
-    # 6. 各维度评分 (0~1)
-    df['score_calmar'] = normalize(df['calmar_ratio'], lo=-5, hi=10)
-    df['score_annual_return'] = normalize(df['annual_return'], lo=-1, hi=5)
-    df['score_max_dd'] = normalize(df['max_drawdown'])  # 已是负值，越大越好
-    df['score_pl_ratio'] = normalize(df['profit_loss_ratio'], lo=0, hi=5)
-
-    if 'worst_year_return' in df.columns:
-        df['score_worst_year'] = normalize(df['worst_year_return'])
-    else:
-        df['score_worst_year'] = 0.5
-
-    if 'annual_consistency' in df.columns:
-        df['score_consistency'] = normalize(df['annual_consistency'], lo=-5, hi=5)
-    else:
-        df['score_consistency'] = 0.5
-
-    df['score_stress'] = normalize(df['stress_survival_count'])
-
-    # 7. 加权综合评分
-    df['composite_score'] = (
-        df['score_calmar'] * 0.25 +
-        df['score_annual_return'] * 0.15 +
-        df['score_max_dd'] * 0.15 +
-        df['score_worst_year'] * 0.20 +
-        df['score_consistency'] * 0.10 +
-        df['score_stress'] * 0.10 +
-        df['score_pl_ratio'] * 0.05
-    )
-
-    # 通过硬筛选的额外加分 0.1 (强烈推荐项)
-    df['composite_score'] = (df['composite_score'] + df['pass_hard_filter'] * 0.1).round(4)
-
-    return df
-
-
-# ==========================================
-# 🆕 参数邻域稳定性分析 (识别参数高原 vs 尖峰)
-# ==========================================
-def compute_parameter_stability(results_df_sorted, top_n=50, neighbor_radius=1):
+def run_grid_search(max_workers=10):
     """
-    对 Top N 参数计算其参数空间相邻邻居的平均得分
-    高原参数(周围都好)优先于尖峰参数(独苗一个高分)
+    执行参数网格搜索并自动持久化保存结果
+    （全内置、零参数、零全局变量依赖，真正的高内聚闭环）
     """
-    if 'composite_score' not in results_df_sorted.columns or results_df_sorted.empty:
-        return pd.DataFrame()
+    # ==========================================
+    # 1. 内部固定：数据源与加载逻辑
+    # ==========================================
+    print("\n" + "═" * 70)
+    print(f"🚀 启动参数暴力搜索引擎 (做空独立闭环版 - 并行加速)")
+    print("═" * 70)
 
-    keys = ['MOM_WINDOW', 'VOL_WINDOW', 'BTC_TREND_WINDOW', 'MAX_WEIGHT']
-
-    # 全部参数组合 -> 得分映射表
-    param_to_score = {}
-    for _, row in results_df_sorted.iterrows():
-        key = tuple(row[k] for k in keys)
-        param_to_score[key] = row['composite_score']
-
-    # 各维度的去重排序值列表
-    unique_values = {}
-    for i, k in enumerate(keys):
-        unique_values[k] = sorted(set(p[i] for p in param_to_score.keys()))
-
-    stability_records = []
-    for _, row in results_df_sorted.head(top_n).iterrows():
-        key = tuple(row[k] for k in keys)
-        own_score = row['composite_score']
-
-        neighbor_scores = []
-        for i, k in enumerate(keys):
-            vals = unique_values[k]
-            try:
-                cur_idx = vals.index(key[i])
-            except ValueError:
-                continue
-
-            for offset in range(-neighbor_radius, neighbor_radius + 1):
-                if offset == 0:
-                    continue
-                nb_idx = cur_idx + offset
-                if 0 <= nb_idx < len(vals):
-                    nb_key = list(key)
-                    nb_key[i] = vals[nb_idx]
-                    nb_key = tuple(nb_key)
-                    if nb_key in param_to_score:
-                        neighbor_scores.append(param_to_score[nb_key])
-
-        if neighbor_scores:
-            avg_neighbor = float(np.mean(neighbor_scores))
-            min_neighbor = float(np.min(neighbor_scores))
-            # 稳定性得分: 自身分数 + 邻居均分 各占一半，再扣除一些"邻居最差跌幅"
-            stability_score = (own_score + avg_neighbor) / 2 - max(0, own_score - min_neighbor) * 0.3
-        else:
-            avg_neighbor = own_score
-            min_neighbor = own_score
-            stability_score = own_score * 0.7  # 没邻居的扣分
-
-        rec = dict(row)
-        rec['neighbor_count'] = len(neighbor_scores)
-        rec['neighbor_avg_score'] = round(avg_neighbor, 4)
-        rec['neighbor_min_score'] = round(min_neighbor, 4)
-        rec['stability_score'] = round(stability_score, 4)
-        stability_records.append(rec)
-
-    stability_df = pd.DataFrame(stability_records).sort_values(
-        'stability_score', ascending=False).reset_index(drop=True)
-    return stability_df
-
-
-# ==========================================
-# 🆕 参数网格搜索主函数 (多进程并行 + 断点续传)
-# ==========================================
-def parameter_grid_search(df, param_grid, output_dir="./param_search_results",
-                          top_n=30, use_parallel=True, n_workers=None,
-                          checkpoint_interval=50, resume_from=None):
-    keys = list(param_grid.keys())
-    values = [param_grid[k] for k in keys]
-    combinations = list(product(*values))
-    total_combos = len(combinations)
-
-    print("\n" + "=" * 70)
-    print(f"🔬 启动参数网格搜索")
-    print(f"📊 参数空间:")
-    for k, v in param_grid.items():
-        print(f"     - {k}: {v}")
-    print(f"📊 总组合数: {total_combos}")
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    # === 断点续传：尝试从 checkpoint 恢复 ===
-    completed_results = []
-    completed_idx_set = set()
-    if resume_from and os.path.exists(resume_from):
-        try:
-            with open(resume_from, 'rb') as f:
-                completed_results = pickle.load(f)
-            completed_idx_set = {r['idx'] for r in completed_results if r.get('success')}
-            print(f"♻️  从 checkpoint 恢复: 已完成 {len(completed_idx_set)} 组")
-        except Exception as e:
-            print(f"⚠️  加载 checkpoint 失败: {e}")
-            completed_results = []
-            completed_idx_set = set()
-
-    # 准备待执行任务 (跳过已完成的 idx)
-    tasks = []
-    for idx, combo in enumerate(combinations):
-        if idx in completed_idx_set:
-            continue
-        params = dict(zip(keys, combo))
-        tasks.append((idx, params))
-
-    print(f"📊 待执行任务: {len(tasks)} 组 (跳过已完成 {len(completed_idx_set)} 组)")
-
-    # 并行配置
-    cpu_count = mp.cpu_count()
-    if use_parallel and len(tasks) > 0:
-        if n_workers is None:
-            n_workers = max(1, cpu_count - 1)
-        n_workers = min(n_workers, len(tasks), cpu_count)
-        print(f"🚀 模式: 多进程并行 ({n_workers}/{cpu_count} cores)")
-    else:
-        print(f"🐢 模式: 单进程顺序")
-    print("=" * 70)
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    checkpoint_path = os.path.join(output_dir, f"checkpoint_{timestamp}.pkl")
-
-    all_results = list(completed_results)
-    new_completed = 0
-    start_time = time_module.time()
-
-    def _save_checkpoint():
-        try:
-            with open(checkpoint_path, 'wb') as f:
-                pickle.dump(all_results, f)
-        except Exception as e:
-            print(f"⚠️  保存 checkpoint 失败: {e}")
-
-    def _print_progress(completed_count, result):
-        elapsed = time_module.time() - start_time
-        avg_time = elapsed / max(1, new_completed)
-        remaining_tasks = len(tasks) - new_completed
-        eta_min = (avg_time * remaining_tasks) / 60
-
-        if result['success']:
-            r = result['result']
-            print(f"  [{completed_count:>5d}/{total_combos}] "
-                  f"M={r['MOM_WINDOW']:>3d} V={r['VOL_WINDOW']:>3d} "
-                  f"T={r['BTC_TREND_WINDOW']:>4d} W={r['MAX_WEIGHT']:.2f} | "
-                  f"Ret:{r['total_return'] * 100:>+7.1f}% "
-                  f"DD:{r['max_drawdown'] * 100:>6.1f}% "
-                  f"Cal:{r['calmar_ratio']:>5.2f} "
-                  f"Trd:{r['closed_trades']:>3d} | "
-                  f"ETA:{eta_min:>5.1f}m")
-        else:
-            print(f"  [{completed_count:>5d}/{total_combos}] ❌ idx={result['idx']} 失败")
-
-    # === 执行任务 ===
-    if len(tasks) > 0:
-        try:
-            if use_parallel:
-                with mp.Pool(processes=n_workers, initializer=_init_worker, initargs=(df,)) as pool:
-                    for result in pool.imap_unordered(_worker_run_backtest, tasks):
-                        all_results.append(result)
-                        new_completed += 1
-                        completed_count = len(all_results)
-                        _print_progress(completed_count, result)
-
-                        if new_completed % checkpoint_interval == 0:
-                            _save_checkpoint()
-            else:
-                global _GLOBAL_DF
-                _GLOBAL_DF = df
-                for task in tasks:
-                    result = _worker_run_backtest(task)
-                    all_results.append(result)
-                    new_completed += 1
-                    completed_count = len(all_results)
-                    _print_progress(completed_count, result)
-
-                    if new_completed % checkpoint_interval == 0:
-                        _save_checkpoint()
-        except KeyboardInterrupt:
-            print("\n⚠️  用户中断，正在保存 checkpoint...")
-            _save_checkpoint()
-            print(f"💾 已保存到: {checkpoint_path}")
-            print(f"   下次启动设置 resume_from='{checkpoint_path}' 即可续跑")
-            raise
-
-    # 最终保存 checkpoint
-    _save_checkpoint()
-    print(f"\n💾 Checkpoint: {checkpoint_path}")
-
-    # === 后处理 ===
-    success_results = [r['result'] for r in all_results if r.get('success')]
-    failed_count = len(all_results) - len(success_results)
-    print(f"✅ 成功: {len(success_results)} 组 | ❌ 失败: {failed_count} 组")
-
-    if not success_results:
-        print("❌ 无任何成功结果。")
-        return None
-
-    results_df = pd.DataFrame(success_results)
-    results_df = compute_composite_scores(results_df)
-    results_df_sorted = results_df.sort_values('composite_score', ascending=False).reset_index(drop=True)
-
-    # 计算参数邻域稳定性
-    stability_df = compute_parameter_stability(results_df_sorted, top_n=max(top_n * 2, 50), neighbor_radius=1)
-
-    # === 保存 CSV (完整) ===
-    full_csv = os.path.join(output_dir, f"full_results_{timestamp}.csv")
-    results_df_sorted.to_csv(full_csv, index=False, encoding='utf-8-sig')
-    print(f"💾 完整结果 CSV: {full_csv}")
-
-    # === 保存稳定性分析 CSV ===
-    if not stability_df.empty:
-        stability_csv = os.path.join(output_dir, f"stability_{timestamp}.csv")
-        stability_df.to_csv(stability_csv, index=False, encoding='utf-8-sig')
-        print(f"💾 邻域稳定性 CSV: {stability_csv}")
-
-    # === Excel 多维度排行榜 ===
-    try:
-        excel_path = os.path.join(output_dir, f"rankings_{timestamp}.xlsx")
-        with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
-            results_df_sorted.head(top_n).to_excel(writer, sheet_name='综合评分Top', index=False)
-            results_df.sort_values('calmar_ratio', ascending=False).head(top_n).to_excel(
-                writer, sheet_name='卡玛比率Top', index=False)
-            results_df.sort_values('total_return', ascending=False).head(top_n).to_excel(
-                writer, sheet_name='总收益Top', index=False)
-            results_df.sort_values('max_drawdown', ascending=False).head(top_n).to_excel(
-                writer, sheet_name='最小回撤Top', index=False)
-            results_df.sort_values('sharpe_ratio', ascending=False).head(top_n).to_excel(
-                writer, sheet_name='夏普比率Top', index=False)
-
-            if 'worst_year_return' in results_df.columns:
-                results_df.sort_values('worst_year_return', ascending=False).head(top_n).to_excel(
-                    writer, sheet_name='最差年度Top', index=False)
-            if 'annual_consistency' in results_df.columns:
-                results_df.sort_values('annual_consistency', ascending=False).head(top_n).to_excel(
-                    writer, sheet_name='年度稳定性Top', index=False)
-            if 'stress_survival_count' in results_df.columns:
-                results_df.sort_values(['stress_survival_count', 'composite_score'],
-                                       ascending=[False, False]).head(top_n).to_excel(
-                    writer, sheet_name='抗滑点Top', index=False)
-
-            passed = results_df[results_df['pass_hard_filter'] == 1].sort_values(
-                'composite_score', ascending=False)
-            if not passed.empty:
-                passed.to_excel(writer, sheet_name='通过硬筛选', index=False)
-
-            if not stability_df.empty:
-                stability_df.head(top_n).to_excel(writer, sheet_name='参数邻域稳定性Top', index=False)
-
-        print(f"💾 多维度 Excel:  {excel_path}")
-    except ImportError:
-        print("⚠️  未安装 openpyxl，跳过 Excel 导出。可执行: pip install openpyxl")
-    except Exception as e:
-        print(f"⚠️  Excel 导出失败: {e}")
-
-    print_top_results(results_df_sorted, stability_df, top_n=10)
-
-    return results_df_sorted
-
-
-# ==========================================
-# 🆕 终端友好打印 Top 结果
-# ==========================================
-def print_top_results(results_df, stability_df=None, top_n=10):
-    print("\n" + "=" * 110)
-    print(f"🏆 综合评分 Top {top_n} 参数组合")
-    print("=" * 110)
-
-    cols_to_show = [
-        'MOM_WINDOW', 'VOL_WINDOW', 'BTC_TREND_WINDOW', 'MAX_WEIGHT',
-        'total_return', 'annual_return', 'max_drawdown', 'calmar_ratio',
-        'closed_trades', 'win_rate', 'profit_loss_ratio',
-        'worst_year_return', 'stress_survival_count', 'pass_hard_filter', 'composite_score'
-    ]
-    cols_exist = [c for c in cols_to_show if c in results_df.columns]
-    top_view = results_df.head(top_n)[cols_exist].copy()
-
-    if 'total_return' in top_view.columns:
-        top_view['total_return'] = (top_view['total_return'] * 100).round(2).astype(str) + '%'
-    if 'annual_return' in top_view.columns:
-        top_view['annual_return'] = (top_view['annual_return'] * 100).round(2).astype(str) + '%'
-    if 'max_drawdown' in top_view.columns:
-        top_view['max_drawdown'] = (top_view['max_drawdown'] * 100).round(2).astype(str) + '%'
-    if 'win_rate' in top_view.columns:
-        top_view['win_rate'] = (top_view['win_rate'] * 100).round(2).astype(str) + '%'
-
-    print(top_view.to_string(index=False))
-
-    if not results_df.empty:
-        best = results_df.iloc[0]
-        print(f"\n🥇 综合评分最优参数:")
-        print(f"   MOM_WINDOW       = {int(best['MOM_WINDOW'])}")
-        print(f"   VOL_WINDOW       = {int(best['VOL_WINDOW'])}")
-        print(f"   BTC_TREND_WINDOW = {int(best['BTC_TREND_WINDOW'])}")
-        print(f"   MAX_WEIGHT       = {best['MAX_WEIGHT']:.2f}")
-        print(f"   ----")
-        print(f"   总收益率         = {best['total_return'] * 100:+.2f}%")
-        print(f"   年化收益率       = {best['annual_return'] * 100:+.2f}%")
-        print(f"   最大回撤         = {best['max_drawdown'] * 100:.2f}%")
-        print(f"   卡玛比率         = {best['calmar_ratio']:.2f}")
-        print(f"   是否通过硬筛选   = {'✅ 是' if best['pass_hard_filter'] == 1 else '❌ 否'}")
-        print(f"   综合评分         = {best['composite_score']:.4f}")
-
-        passed = results_df[results_df['pass_hard_filter'] == 1]
-        if not passed.empty and (best['pass_hard_filter'] != 1):
-            best_passed = passed.iloc[0]
-            print(f"\n🔒 [硬筛选过滤后] 推荐参数 (满足全部稳健性条件):")
-            print(f"   MOM={int(best_passed['MOM_WINDOW'])} VOL={int(best_passed['VOL_WINDOW'])} "
-                  f"T={int(best_passed['BTC_TREND_WINDOW'])} W={best_passed['MAX_WEIGHT']:.2f} | "
-                  f"Ret:{best_passed['total_return'] * 100:+.2f}% "
-                  f"Cal:{best_passed['calmar_ratio']:.2f} "
-                  f"Score:{best_passed['composite_score']:.4f}")
-
-    # === 邻域稳定性 Top 输出 ===
-    if stability_df is not None and not stability_df.empty:
-        print("\n" + "=" * 110)
-        print(f"🌄 【参数邻域稳定性】Top 10 (高原参数：周围一圈都好，强烈推荐)")
-        print("=" * 110)
-        stab_cols = ['MOM_WINDOW', 'VOL_WINDOW', 'BTC_TREND_WINDOW', 'MAX_WEIGHT',
-                     'total_return', 'max_drawdown', 'calmar_ratio',
-                     'composite_score', 'neighbor_avg_score', 'neighbor_min_score',
-                     'neighbor_count', 'stability_score']
-        stab_cols_exist = [c for c in stab_cols if c in stability_df.columns]
-        stab_view = stability_df.head(10)[stab_cols_exist].copy()
-        if 'total_return' in stab_view.columns:
-            stab_view['total_return'] = (stab_view['total_return'] * 100).round(2).astype(str) + '%'
-        if 'max_drawdown' in stab_view.columns:
-            stab_view['max_drawdown'] = (stab_view['max_drawdown'] * 100).round(2).astype(str) + '%'
-        print(stab_view.to_string(index=False))
-
-        best_stab = stability_df.iloc[0]
-        print(f"\n🌟 [邻域稳定性最优] 推荐参数 (建议优先选这个！):")
-        print(f"   MOM_WINDOW       = {int(best_stab['MOM_WINDOW'])}")
-        print(f"   VOL_WINDOW       = {int(best_stab['VOL_WINDOW'])}")
-        print(f"   BTC_TREND_WINDOW = {int(best_stab['BTC_TREND_WINDOW'])}")
-        print(f"   MAX_WEIGHT       = {best_stab['MAX_WEIGHT']:.2f}")
-        print(f"   总收益率: {best_stab['total_return'] * 100:+.2f}% | "
-              f"卡玛: {best_stab['calmar_ratio']:.2f} | "
-              f"自身评分: {best_stab['composite_score']:.4f} | "
-              f"邻居均分: {best_stab['neighbor_avg_score']:.4f}")
-    print("=" * 110)
-
-
-# ==========================================
-# 主程序执行入口
-# ==========================================
-if __name__ == "__main__":
     file_list = ["kline_data/BTC_ETH_1m.csv", "kline_data/DOGE_SOL_1m.csv", "kline_data/TON_XRP_1m.csv"]
+
+    # ==========================================
+    # 2. 内部固定：搜索空间与保存路径
+    # ==========================================
+    param_grid = {
+        'MOM_WINDOW': [24, 36, 48, 60, 72, 90, 120, 150, 180, 210, 240, 300, 360],
+        'VOL_WINDOW': [24, 36, 48, 60, 90, 120, 150, 180, 240, 360],
+        'BTC_TREND_WINDOW': [90, 180, 270, 360, 540, 720, 1080],
+        'MAX_WEIGHT': [0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50]
+    }
+
+    save_dir = r'W:\project\python_project\oke_auto_trade\param_search_results'
+
+    # ==========================================
+    # 3. 解析参数空间
+    # ==========================================
+    keys, values = zip(*param_grid.items())
+    param_combinations = [dict(zip(keys, v)) for v in itertools.product(*values)]
+    total_combos = len(param_combinations)
+    filename = f"grid_search_short_{total_combos}.csv"
+    save_path = os.path.join(save_dir, filename)
+    if os.path.exists(save_path):
+        result_df = pd.read_csv(save_path)
+    print(f"\n   ► 参数维度: {len(keys)} 维 ({', '.join(keys)})")
+    print(f"   ► 总搜索量: {total_combos} 组组合")
+    print(f"   ► 存储路径: {save_dir}")
+    print(f"   ► 并行进程: {max_workers} 个")
+    print("═" * 70)
     df_4h = load_and_preprocess_data(file_list)
 
-    # ============================================================
-    # 🎛️ 模式选择: "scan" = 参数扫描 / "test" = 原 4 组测试
-    # ============================================================
-    MODE = "scan"
+    # 4. 确保输出目录存在
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+        print(f"📁 已自动创建输出目录: {save_dir}")
 
-    if MODE == "test":
-        test_scenarios = [
-            {"name": "基准参数",
-             "params": {'MOM_WINDOW': 20 * 6, 'VOL_WINDOW': 20 * 6, 'BTC_TREND_WINDOW': 60 * 6, 'MAX_WEIGHT': 0.30}},
-            {"name": "挑战组 1 (短期)",
-             "params": {'MOM_WINDOW': 10 * 6, 'VOL_WINDOW': 10 * 6, 'BTC_TREND_WINDOW': 30 * 6, 'MAX_WEIGHT': 0.30}},
-            {"name": "挑战组 2 (长期)",
-             "params": {'MOM_WINDOW': 30 * 6, 'VOL_WINDOW': 30 * 6, 'BTC_TREND_WINDOW': 90 * 6, 'MAX_WEIGHT': 0.30}},
-            {"name": "挑战组 3 (低仓)",
-             "params": {'MOM_WINDOW': 20 * 6, 'VOL_WINDOW': 20 * 6, 'BTC_TREND_WINDOW': 60 * 6, 'MAX_WEIGHT': 0.15}}
-        ]
-        for scenario in test_scenarios:
-            logs_df, curve_df, _ = run_backtest(df_4h, param_name=scenario["name"], custom_params=scenario["params"])
-            deep_robustness_check(logs_df, curve_df, df_4h, param_name=scenario["name"])
-        print("\n✅ 所有参数组敏感性及深度检验执行完毕。")
+    all_metrics_df = []
+    start_time = time.time()
 
-    elif MODE == "scan":
-        # ============================================================
-        # 📐 参数空间预设 (基于 4h K线，每天 6 根)
-        # ============================================================
+    # ==========================================
+    # 5. 开始并行回测
+    # ==========================================
+    completed_count = 0
 
-        # 🚀 MICRO (~12 组)：调试用
-        PARAM_GRID_MICRO = {
-            'MOM_WINDOW': [60, 120, 180],
-            'VOL_WINDOW': [120],
-            'BTC_TREND_WINDOW': [360],
-            'MAX_WEIGHT': [0.15, 0.20, 0.25, 0.30]
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        future_to_task = {
+            executor.submit(_parallel_worker_task, i, params, df_4h): (i, params)
+            for i, params in enumerate(param_combinations)
         }
 
-        # ⚡ LIGHT (~36 组)
-        PARAM_GRID_LIGHT = {
-            'MOM_WINDOW': [60, 120, 180],
-            'VOL_WINDOW': [120],
-            'BTC_TREND_WINDOW': [180, 360, 540],
-            'MAX_WEIGHT': [0.15, 0.20, 0.25, 0.30]
-        }
+        for future in as_completed(future_to_task):
+            i, params = future_to_task[future]
+            success, metrics_df, res_params, param_name, err_msg = future.result()
 
-        # 🔥 STANDARD (~180 组)
-        PARAM_GRID_STANDARD = {
-            'MOM_WINDOW': [60, 90, 120, 150, 180],
-            'VOL_WINDOW': [60, 120, 180],
-            'BTC_TREND_WINDOW': [180, 360, 540],
-            'MAX_WEIGHT': [0.15, 0.20, 0.25, 0.30]
-        }
+            completed_count += 1
 
-        # 💪 LARGE (~720 组，8核约 1.5h)
-        # MOM 7.5~40天 / VOL 10~30天 / TREND 30~120天 / 仓位 15%~50%
-        PARAM_GRID_LARGE = {
-            'MOM_WINDOW': [60, 90, 120, 150, 180, 240],            # 10/15/20/25/30/40 天
-            'VOL_WINDOW': [60, 90, 120, 180],                       # 10/15/20/30 天
-            'BTC_TREND_WINDOW': [180, 270, 360, 540, 720],          # 30/45/60/90/120 天
-            'MAX_WEIGHT': [0.15, 0.20, 0.25, 0.30, 0.40, 0.50]
-        }
-        # 6 × 4 × 5 × 6 = 720
+            progress_pct = completed_count / total_combos * 100
+            elapsed = time.time() - start_time
+            avg_time = elapsed / completed_count if completed_count > 0 else 0
+            eta = avg_time * (total_combos - completed_count)
 
-        # 🌌 ULTRA (~1728 组，8核约 3.5h) ✅ 推荐
-        # MOM 7.5~50天 / VOL 7.5~40天 / TREND 15~120天 / 仓位 10%~40%
-        PARAM_GRID_ULTRA = {
-            'MOM_WINDOW': [45, 60, 90, 120, 150, 180, 240, 300],    # 7.5/10/15/20/25/30/40/50 天
-            'VOL_WINDOW': [45, 60, 90, 120, 180, 240],              # 7.5/10/15/20/30/40 天
-            'BTC_TREND_WINDOW': [90, 180, 270, 360, 540, 720],      # 15/30/45/60/90/120 天
-            'MAX_WEIGHT': [0.10, 0.15, 0.20, 0.25, 0.30, 0.40]
-        }
-        # 8 × 6 × 6 × 6 = 1728
+            print(f"\r⏳ 进度: [{completed_count}/{total_combos}] {progress_pct:5.1f}% | "
+                  f"耗时: {elapsed:.1f}s | 预估剩余: {eta:.1f}s | 刚完成测算: {res_params}", end="")
 
-        # 💀 INSANE (~3360 组，8核约 7h)
-        # MOM 5~60天 / VOL 5~40天 / TREND 15~180天 / 仓位 10%~40%
-        PARAM_GRID_INSANE = {
-            'MOM_WINDOW': [30, 45, 60, 90, 120, 150, 180, 240, 300, 360],  # 5~60 天
-            'VOL_WINDOW': [30, 45, 60, 90, 120, 150, 180, 240],            # 5~40 天
-            'BTC_TREND_WINDOW': [90, 180, 270, 360, 540, 720, 1080],       # 15~180 天
-            'MAX_WEIGHT': [0.10, 0.15, 0.20, 0.25, 0.30, 0.40]
-        }
-        # 10 × 8 × 7 × 6 = 3360
+            if success:
+                all_metrics_df.append(metrics_df)
+            else:
+                print(f"\n❌ [异常捕获] {param_name} 测试失败: {res_params} | 错误信息: {err_msg}")
 
-        # 🔥💀 EXTREME (~6370 组，8核约 13h)：彻底覆盖
-        PARAM_GRID_EXTREME = {
-            'MOM_WINDOW': [24, 36, 48, 60, 72, 90, 120, 150, 180, 210, 240, 300, 360],  # 4~60天 13个
-            'VOL_WINDOW': [24, 36, 48, 60, 90, 120, 150, 180, 240, 360],                # 4~60天 10个
-            'BTC_TREND_WINDOW': [90, 180, 270, 360, 540, 720, 1080],                    # 7个
-            'MAX_WEIGHT': [0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50]                    # 7个
-        }
-        # 13 × 10 × 7 × 7 = 6370
+    # ==========================================
+    # 6. 聚合与保存
+    # ==========================================
+    print("\n\n✅ 搜索任务执行完毕！正在聚合保存数据...")
 
-        # ============================================================
-        # 👇 选择参数空间 (推荐 ULTRA 起步)
-        # ============================================================
-        param_grid = PARAM_GRID_EXTREME
-        # param_grid = PARAM_GRID_LARGE
-        # param_grid = PARAM_GRID_INSANE
-        # param_grid = PARAM_GRID_EXTREME
+    if not all_metrics_df:
+        print("⚠️ 未生成任何有效评价数据。")
+        return pd.DataFrame()
 
-        # ============================================================
-        # 并行 & 断点续传配置
-        # ============================================================
-        USE_PARALLEL = True       # True=多进程并行 (强烈推荐)
-        N_WORKERS = None          # None = 自动 (CPU核数-1)；可手动设 4/8/16 等
-        CHECKPOINT_INTERVAL = 50  # 每完成多少组保存一次中间结果
-        RESUME_FROM = None        # 中断后续跑：填入之前的 checkpoint_xxx.pkl 完整路径
+    aggregated_df = pd.concat(all_metrics_df, ignore_index=True)
 
-        results_df = parameter_grid_search(
-            df_4h,
-            param_grid,
-            output_dir="./param_search_results_short",
-            top_n=30,
-            use_parallel=USE_PARALLEL,
-            n_workers=N_WORKERS,
-            checkpoint_interval=CHECKPOINT_INTERVAL,
-            resume_from=RESUME_FROM
-        )
+    aggregated_df.to_csv(save_path, index=False, encoding='utf-8-sig')
 
-        print("\n✅ 参数扫描全部完成。请查看 ./param_search_results/ 目录下的 CSV 和 Excel 文件。")
+    total_time = time.time() - start_time
+    print("═" * 70)
+    print(f"🎉 搜索圆满结束！")
+    print(f"⏱️ 总耗时: {total_time / 60:.2f} 分钟")
+    print(f"💾 结果已保存至:\n   {save_path}")
+    print("═" * 70)
+
+    return aggregated_df
+
+
+# ==========================================
+# 实际调用示例
+# ==========================================
+if __name__ == "__main__":
+    run_grid_search()
