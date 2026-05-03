@@ -791,9 +791,6 @@ def _print_comprehensive_panel(metrics, param_name=""):
     print("═" * 78)
 
 
-# ==========================================
-# 核心：策略引擎与回测逻辑 (二元进出测试版)
-# ==========================================
 def run_backtest(df, param_name="默认基准参数", custom_params=None, verbose=True):
     if custom_params is None:
         custom_params = {
@@ -975,7 +972,8 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None, verbos
             old_qty, old_cost = coin_states[c]['qty'], coin_states[c]['cost']
             new_qty = old_qty + amt
             if new_qty > 0:
-                coin_states[c]['cost'] = (old_qty * old_cost + amt * price) / new_qty
+                # 🛠️ 唯一修改点：将开仓的手续费 (fee) 摊销合并到持仓总成本中
+                coin_states[c]['cost'] = (old_qty * old_cost + amt * price + fee) / new_qty
             coin_states[c]['qty'] = new_qty
             if coin_states[c]['entry_time'] is None:
                 coin_states[c]['entry_time'] = time

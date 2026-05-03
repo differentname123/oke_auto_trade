@@ -137,23 +137,28 @@ def layer1_health_filter(df, filters):
 # ═══════════════════════════════════════════════════════════════════════════
 # Layer 2: 多目标 Pareto 前沿
 # ═══════════════════════════════════════════════════════════════════════════
-def layer2_pareto_frontier(df, objectives):
+def layer2_pareto_frontier(df, objectives, max_fronts=3):
+    """
+    升级版 Pareto 过滤：支持 Pareto Rank (前沿层级)
+    max_fronts: 保留前 N 层 Pareto 前沿。设置为 1 则与原版严格 Pareto 完全一致。
+                建议设置为 3~5，以保留“优秀的厚前沿带”，配合 L4 的平原分析。
+    """
     out = df.copy()
     out['L2_PARETO'] = False
+    out['PARETO_RANK'] = np.nan  # 记录它在第几层前沿
 
     cands = out[out['L1_PASS']].copy()
     if len(cands) == 0:
         print("⚠️ Layer 2: 没有通过 Layer 1 的候选")
         return out
 
-    # 把所有目标统一转为 maximize 形式
+    # 1. 整理矩阵 (统一转为 maximize)
     matrix, idx_list = [], cands.index.tolist()
     for col, direction in objectives.items():
         if col not in cands.columns:
             print(f"⚠️ Pareto 目标列缺失: {col}, 已跳过")
             continue
         v = cands[col].values.astype(float)
-        # NaN 视为最差
         worst_fill = -np.inf if direction == 'maximize' else np.inf
         v = np.where(np.isnan(v), worst_fill, v)
         if direction == 'minimize':
@@ -165,21 +170,47 @@ def layer2_pareto_frontier(df, objectives):
 
     M = np.array(matrix).T  # shape: (n, k)
     n = len(M)
-    is_pareto = np.ones(n, dtype=bool)
 
-    for i in range(n):
-        for j in range(n):
-            if i == j:
-                continue
-            # j 支配 i: 所有维度 ≥ 且至少一维 >
-            if np.all(M[j] >= M[i]) and np.any(M[j] > M[i]):
-                is_pareto[i] = False
-                break
+    # 2. 分层寻找 Pareto 前沿 (非支配排序逻辑)
+    remaining_indices = set(range(n))
+    current_front_rank = 1
+    pareto_pass_global_idx = []
 
-    pareto_idx = [idx_list[i] for i in range(n) if is_pareto[i]]
-    out.loc[pareto_idx, 'L2_PARETO'] = True
+    while remaining_indices and current_front_rank <= max_fronts:
+        current_front = []
+        rem_list = list(remaining_indices)
+
+        # 在当前剩余点中找 Pareto 前沿
+        for i in rem_list:
+            is_dominated = False
+            for j in rem_list:
+                if i == j:
+                    continue
+                # j 支配 i
+                if np.all(M[j] >= M[i]) and np.any(M[j] > M[i]):
+                    is_dominated = True
+                    break
+            if not is_dominated:
+                current_front.append(i)
+
+        # 记录当前层的点
+        for idx in current_front:
+            real_idx = idx_list[idx]
+            out.loc[real_idx, 'PARETO_RANK'] = current_front_rank
+            pareto_pass_global_idx.append(real_idx)
+            remaining_indices.remove(idx)
+
+        current_front_rank += 1
+
+    # 3. 标记最终通过 L2 的候选
+    out.loc[pareto_pass_global_idx, 'L2_PARETO'] = True
+
+    # [可选输出] 打印各层级数量，方便观察
+    # print(f"  [Pareto 分层统计] 保留至前 {max_fronts} 层:")
+    # for r in range(1, current_front_rank):
+    #     print(f"    - 第 {r} 层前沿: {(out['PARETO_RANK'] == r).sum()} 组")
+
     return out
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Layer 3: 约束式偏好筛选
