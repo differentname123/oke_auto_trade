@@ -1,7 +1,7 @@
 import itertools
 import os
 import time
-
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import pandas as pd
 import numpy as np
 from datetime import timedelta, datetime
@@ -1186,9 +1186,22 @@ def deep_robustness_check(logs_df, curve_df, price_df, param_name=""):
 
 
 
+def _parallel_worker_task(i, params, df_4h):
+    param_name = f"Grid_No.{i + 1}"
+    try:
+        # 这里的 run_backtest 需要在全局作用域可访问
+        _, _, metrics_df = run_backtest(
+            df_4h,
+            param_name=param_name,
+            custom_params=params,
+            verbose=False
+        )
+        return True, metrics_df, params, param_name, None
+    except Exception as e:
+        return False, None, params, param_name, str(e)
 
 
-def run_grid_search():
+def run_grid_search(max_workers=10):
     """
     执行参数网格搜索并自动持久化保存结果
     （全内置、零参数、零全局变量依赖，真正的高内聚闭环）
@@ -1197,7 +1210,7 @@ def run_grid_search():
     # 1. 内部固定：数据源与加载逻辑
     # ==========================================
     print("\n" + "═" * 70)
-    print(f"🚀 启动参数暴力搜索引擎 (完全独立闭环版)")
+    print(f"🚀 启动参数暴力搜索引擎 (完全独立闭环版 - 并行加速)")
     print("═" * 70)
 
     # 彻底告别全局变量：把 file_list 和数据处理直接写在函数内部
@@ -1207,11 +1220,11 @@ def run_grid_search():
     # 2. 内部固定：搜索空间与保存路径
     # ==========================================
     param_grid = {
-        'MOM_WINDOW': [60, 120, 180],
-        'VOL_WINDOW': [120],
-        'BTC_TREND_WINDOW': [360],
-        'MAX_WEIGHT': [0.15, 0.20, 0.25, 0.30]
-    }
+            'MOM_WINDOW': [24, 36, 48, 60, 72, 90, 120, 150, 180, 210, 240, 300, 360],  # 4~60天 13个
+            'VOL_WINDOW': [24, 36, 48, 60, 90, 120, 150, 180, 240, 360],                # 4~60天 10个
+            'BTC_TREND_WINDOW': [90, 180, 270, 360, 540, 720, 1080],                    # 7个
+            'MAX_WEIGHT': [0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50]                    # 7个
+        }
 
     save_dir = r'W:\project\python_project\oke_auto_trade\param_search_results'
 
@@ -1228,6 +1241,7 @@ def run_grid_search():
     print(f"\n   ► 参数维度: {len(keys)} 维 ({', '.join(keys)})")
     print(f"   ► 总搜索量: {total_combos} 组组合")
     print(f"   ► 存储路径: {save_dir}")
+    print(f"   ► 并行进程: {max_workers} 个")
     print("═" * 70)
     df_4h = load_and_preprocess_data(file_list)
 
@@ -1239,34 +1253,45 @@ def run_grid_search():
     all_metrics_df = []
     start_time = time.time()
 
-    # 5. 开始循环回测
-    for i, params in enumerate(param_combinations):
-        param_name = f"Grid_No.{i + 1}"
+    # ==========================================
+    # 5. 开始并行回测 (已改造)
+    # ==========================================
+    completed_count = 0
 
-        # 实时打印进度 (覆盖上一行)
-        progress_pct = (i + 1) / total_combos * 100
-        elapsed = time.time() - start_time
-        avg_time = elapsed / (i + 1) if i > 0 else 0
-        eta = avg_time * (total_combos - i - 1)
+    # 启动进程池
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # 提交所有任务，并将 future 映射到对应的任务信息上
+        future_to_task = {
+            executor.submit(_parallel_worker_task, i, params, df_4h): (i, params)
+            for i, params in enumerate(param_combinations)
+        }
 
-        print(f"\r⏳ 进度: [{i + 1}/{total_combos}] {progress_pct:5.1f}% | "
-              f"耗时: {elapsed:.1f}s | 预估剩余: {eta:.1f}s | 当前测算: {params}", end="")
+        # as_completed 会在任务完成时立刻 yield
+        for future in as_completed(future_to_task):
+            i, params = future_to_task[future]
+            success, metrics_df, res_params, param_name, err_msg = future.result()
 
-        try:
-            # 这里的 df_4h 来自函数第一步的局部变量，彻底隔离
-            _, _, metrics_df = run_backtest(
-                df_4h,
-                param_name=param_name,
-                custom_params=params,
-                verbose=False
-            )
-            all_metrics_df.append(metrics_df)
+            completed_count += 1
 
-        except Exception as e:
-            # 容错机制：跳过报错的异常参数
-            print(f"\n❌ [异常捕获] {param_name} 测试失败: {params} | 错误信息: {e}")
+            # 实时打印进度 (覆盖上一行)
+            progress_pct = completed_count / total_combos * 100
+            elapsed = time.time() - start_time
+            avg_time = elapsed / completed_count if completed_count > 0 else 0
+            eta = avg_time * (total_combos - completed_count)
 
-    # 6. 聚合与保存
+            # 注意结尾使用 end="" 实现同行刷新
+            print(f"\r⏳ 进度: [{completed_count}/{total_combos}] {progress_pct:5.1f}% | "
+                  f"耗时: {elapsed:.1f}s | 预估剩余: {eta:.1f}s | 刚完成测算: {res_params}", end="")
+
+            if success:
+                all_metrics_df.append(metrics_df)
+            else:
+                # 容错机制：跳过报错的异常参数，保持同行打印不被破坏需换行
+                print(f"\n❌ [异常捕获] {param_name} 测试失败: {res_params} | 错误信息: {err_msg}")
+
+    # ==========================================
+    # 6. 聚合与保存 (严格保持原样)
+    # ==========================================
     print("\n\n✅ 搜索任务执行完毕！正在聚合保存数据...")
 
     if not all_metrics_df:
@@ -1274,8 +1299,6 @@ def run_grid_search():
         return pd.DataFrame()
 
     aggregated_df = pd.concat(all_metrics_df, ignore_index=True)
-
-
 
     # 导出到指定目录
     aggregated_df.to_csv(save_path, index=False, encoding='utf-8-sig')
@@ -1288,7 +1311,6 @@ def run_grid_search():
     print("═" * 70)
 
     return aggregated_df
-
 
 # ==========================================
 # 实际调用示例 (极简到极致)
