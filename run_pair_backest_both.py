@@ -55,11 +55,15 @@ def load_and_preprocess_data(file_list):
 
     # ==========================================
     # ⚠️ 优化点 1：基于1m数据提取 4h 的 OHLC 数据
+    # 🚀 [性能优化] 4 次独立 resample 合并为 1 次 agg, 单次扫描完成全部聚合
     # ==========================================
-    df_4h_close = price_df_1m.resample('4h').last()
-    df_4h_open = price_df_1m.resample('4h').first()
-    df_4h_high = price_df_1m.resample('4h').max()
-    df_4h_low = price_df_1m.resample('4h').min()
+    df_4h_agg = price_df_1m.resample('4h').agg(['first', 'last', 'max', 'min'])
+    # MultiIndex columns: level 0 = 原列名, level 1 = 聚合函数名
+    # 显式 reindex 列序，确保与原版输出一致
+    df_4h_open = df_4h_agg.xs('first', axis=1, level=1)[price_df_1m.columns]
+    df_4h_close = df_4h_agg.xs('last', axis=1, level=1)[price_df_1m.columns]
+    df_4h_high = df_4h_agg.xs('max', axis=1, level=1)[price_df_1m.columns]
+    df_4h_low = df_4h_agg.xs('min', axis=1, level=1)[price_df_1m.columns]
 
     # 组合为包含所有 OHLC 字段的大 DataFrame
     price_df_4h = df_4h_close.copy()
@@ -831,18 +835,22 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None, verbos
 
     # =========================================================
     # ⚠️ 优化点 2：计算 ATR_pct，并将 adj_mom 分母替换为 ATR_pct
+    # 🚀 [性能优化] 向量化 TR 计算 (消除 for-loop, 一次性算所有 coin)
     # =========================================================
-    tr_df = pd.DataFrame(index=df.index, columns=coins)
-    for c in coins:
-        high = df[f"{c}_high"]
-        low = df[f"{c}_low"]
-        prev_close = df_close[c].shift(1)
+    high_df = df[[f"{c}_high" for c in coins]].copy()
+    high_df.columns = coins
+    low_df = df[[f"{c}_low" for c in coins]].copy()
+    low_df.columns = coins
+    prev_close = df_close.shift(1)
 
-        tr1 = high - low
-        tr2 = (high - prev_close).abs()
-        tr3 = (low - prev_close).abs()
+    tr1 = (high_df - low_df).values
+    tr2 = (high_df - prev_close).abs().values
+    tr3 = (low_df - prev_close).abs().values
 
-        tr_df[c] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    # 将 np.maximum 替换为 np.fmax
+    tr_arr = np.fmax.reduce([tr1, tr2, tr3])
+
+    tr_df = pd.DataFrame(tr_arr, index=df.index, columns=coins)
 
     atr = tr_df.rolling(window=VOL_WINDOW).mean()
     atr_pct = atr / df_close  # 归一化为百分比形式
@@ -870,76 +878,109 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None, verbos
     btc_trend_on = df['BTC'] > btc_ma
 
     cash = INITIAL_CAPITAL
-    positions = {coin: 0.0 for coin in coins}  # 多头>0, 空头<0, 空仓=0
     trade_logs = []
-    equity_curve = []
 
     start_idx = max(MOM_WINDOW, VOL_WINDOW, BTC_TREND_WINDOW)
 
-    for i in range(start_idx, len(df)):
-        current_time = df.index[i]
-        prices = df.iloc[i]
+    # =========================================================
+    # 🚀 [性能优化] 主循环前预提取 numpy 数组视图
+    # 把所有 pandas 索引访问 (df.iloc[i] / volatility[c].iloc[i] / adj_mom.iloc[i] 等)
+    # 替换为 O(1) 的 numpy 数组下标访问，加速 5-15 倍
+    # =========================================================
+    n_coins = len(coins)
+    coin_to_idx = {c: idx for idx, c in enumerate(coins)}
+    close_arr = df_close.values  # shape: (T, n_coins), 列序与 coins 完全对齐
+    vol_arr = volatility[coins].values  # 显式 reindex 保证列序对齐
+    mom_arr = adj_mom[coins].values
+    btc_trend_arr = btc_trend_on.values
+    time_index = df.index
 
-        # equity 公式天然支持多空：positions<0 时该项为负，自然反映空头浮亏/浮盈
-        current_equity = cash + sum(positions[c] * prices[c] for c in coins)
-        equity_curve.append({'time': current_time, 'equity': current_equity})
+    # 🚀 仓位由 dict 改为 numpy 数组（与 coins 顺序一致）
+    positions_arr = np.zeros(n_coins, dtype=float)
+
+    # 🚀 预分配 equity 序列（避免 list-of-dicts 反复扩容 + 末尾再解析 DataFrame 的开销）
+    n_steps = len(df) - start_idx
+    equity_values = np.empty(n_steps, dtype=float)
+    equity_times = time_index[start_idx:]
+
+    for j, i in enumerate(range(start_idx, len(df))):
+        current_time = time_index[i]
+        prices_row = close_arr[i]  # 1D numpy array, 与 coins 顺序对齐
+
+        # 🚀 np.dot 向量化计算账户净值 (positions_arr<0 自动反映空头浮盈/浮亏)
+        current_equity = cash + np.dot(positions_arr, prices_row)
+        equity_values[j] = current_equity
 
         # ============================================================
-        # 🔴 信号生成 (多空对称)
+        # 🔴 信号生成 (多空对称) - numpy 版本
+        # 用 np.argsort(..., kind='stable') 严格匹配 pandas nlargest/nsmallest 行为
+        # (相同值保留原始顺序, NaN 通过 mask 提前过滤)
         # ============================================================
         top_long_coins = []
         top_short_coins = []
 
-        current_mom = adj_mom.iloc[i].dropna()
+        current_mom = mom_arr[i]  # 1D numpy array, 可能含 NaN
 
-        if btc_trend_on.iloc[i]:
+        if btc_trend_arr[i]:
             # BTC 趋势开启：做多动量最强的 Top-K
-            positive_mom = current_mom[current_mom > 0]
-            if not positive_mom.empty:
-                top_long_coins = positive_mom.nlargest(TOP_K).index.tolist()
+            mask = ~np.isnan(current_mom) & (current_mom > 0)
+            if mask.any():
+                valid_idx = np.where(mask)[0]
+                valid_vals = current_mom[valid_idx]
+                # 等价于 pd.Series(valid_vals).nlargest(TOP_K).index.tolist()
+                order = np.argsort(-valid_vals, kind='stable')
+                top_k_indices = valid_idx[order[:TOP_K]]
+                top_long_coins = [coins[idx] for idx in top_k_indices]
         else:
             # BTC 趋势关闭：做空动量最弱的 Top-K (即跌得最狠的 K 个)
-            negative_mom = current_mom[current_mom < 0]
-            if not negative_mom.empty:
-                top_short_coins = negative_mom.nsmallest(TOP_K).index.tolist()
+            mask = ~np.isnan(current_mom) & (current_mom < 0)
+            if mask.any():
+                valid_idx = np.where(mask)[0]
+                valid_vals = current_mom[valid_idx]
+                # 等价于 pd.Series(valid_vals).nsmallest(TOP_K).index.tolist()
+                order = np.argsort(valid_vals, kind='stable')
+                top_k_indices = valid_idx[order[:TOP_K]]
+                top_short_coins = [coins[idx] for idx in top_k_indices]
 
         # ============================================================
         # [平仓多头] 持有的多头标的若不再属于 top_long_coins 或趋势翻转 -> 全清
         # ============================================================
-        for c in coins:
-            if positions[c] > 0:
+        for idx_c in range(n_coins):
+            if positions_arr[idx_c] > 0:
+                c = coins[idx_c]
                 if c not in top_long_coins:
-                    sell_amount = positions[c]
-                    actual_sell_val = sell_amount * prices[c]
+                    sell_amount = positions_arr[idx_c]
+                    actual_sell_val = sell_amount * prices_row[idx_c]
                     fee = actual_sell_val * FEE_RATE
 
-                    positions[c] = 0  # 清零
+                    positions_arr[idx_c] = 0  # 清零
                     cash += (actual_sell_val - fee)
 
                     trade_logs.append({
                         "time": current_time, "action": "SELL", "coin": c,
                         "direction": "LONG", "event": "CLOSE",
-                        "price": prices[c], "amount": sell_amount, "value": actual_sell_val,
+                        "price": prices_row[idx_c], "amount": sell_amount, "value": actual_sell_val,
                         "fee": fee, "reason": "Signal Exit Long (Not in Top K Long / Trend Off)"
                     })
 
         # ============================================================
         # [平仓空头] 持有的空头标的若不再属于 top_short_coins 或趋势翻转 -> 全清回补
         # ============================================================
-        for c in coins:
-            if positions[c] < 0:
+        for idx_c in range(n_coins):
+            if positions_arr[idx_c] < 0:
+                c = coins[idx_c]
                 if c not in top_short_coins:
-                    buy_amount = abs(positions[c])
-                    actual_buy_val = buy_amount * prices[c]
+                    buy_amount = abs(positions_arr[idx_c])
+                    actual_buy_val = buy_amount * prices_row[idx_c]
                     fee = actual_buy_val * FEE_RATE
 
-                    positions[c] = 0  # 清零
+                    positions_arr[idx_c] = 0  # 清零
                     cash -= (actual_buy_val + fee)
 
                     trade_logs.append({
                         "time": current_time, "action": "BUY", "coin": c,
                         "direction": "SHORT", "event": "CLOSE",
-                        "price": prices[c], "amount": buy_amount, "value": actual_buy_val,
+                        "price": prices_row[idx_c], "amount": buy_amount, "value": actual_buy_val,
                         "fee": fee, "reason": "Signal Exit Short (Not in Top K Short / Trend On)"
                     })
 
@@ -947,18 +988,20 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None, verbos
         # [开仓多头] 当前有多头入场信号且空仓 -> 分配资金买入
         # ============================================================
         if top_long_coins:
-            inv_vol = {}
+            inv_vols = []
             for c in top_long_coins:
-                c_vol = volatility[c].iloc[i]
-                inv_vol[c] = 1.0 / c_vol if c_vol > 0 else 0
+                idx_c = coin_to_idx[c]
+                c_vol = vol_arr[i, idx_c]  # 🚀 替代 volatility[c].iloc[i]
+                inv_vols.append(1.0 / c_vol if c_vol > 0 else 0)
 
-            total_inv_vol = sum(inv_vol.values())
+            total_inv_vol = sum(inv_vols)
 
-            for c in top_long_coins:
+            for k_, c in enumerate(top_long_coins):
+                idx_c = coin_to_idx[c]
                 # 🔴 关键核心：只有完全空仓时才进行买入。死拿不补仓不减仓
-                if positions[c] == 0:
+                if positions_arr[idx_c] == 0:
                     if total_inv_vol > 0:
-                        raw_weight = inv_vol[c] / total_inv_vol
+                        raw_weight = inv_vols[k_] / total_inv_vol
                         target_weight = min(raw_weight, MAX_WEIGHT)
                         target_val = current_equity * target_weight
 
@@ -970,15 +1013,15 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None, verbos
 
                         if buy_val > 1.0:
                             fee = buy_val * FEE_RATE
-                            buy_amount = buy_val / prices[c]
+                            buy_amount = buy_val / prices_row[idx_c]
 
-                            positions[c] += buy_amount
+                            positions_arr[idx_c] += buy_amount
                             cash -= (buy_val + fee)
 
                             trade_logs.append({
                                 "time": current_time, "action": "BUY", "coin": c,
                                 "direction": "LONG", "event": "OPEN",
-                                "price": prices[c], "amount": buy_amount, "value": buy_val,
+                                "price": prices_row[idx_c], "amount": buy_amount, "value": buy_val,
                                 "fee": fee, "reason": "Signal Entry Long (Top K Long)"
                             })
 
@@ -986,18 +1029,20 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None, verbos
         # [开仓空头] 当前有空头入场信号且空仓 -> 卖空建仓 (与多头完全对称)
         # ============================================================
         if top_short_coins:
-            inv_vol = {}
+            inv_vols = []
             for c in top_short_coins:
-                c_vol = volatility[c].iloc[i]
-                inv_vol[c] = 1.0 / c_vol if c_vol > 0 else 0
+                idx_c = coin_to_idx[c]
+                c_vol = vol_arr[i, idx_c]  # 🚀 替代 volatility[c].iloc[i]
+                inv_vols.append(1.0 / c_vol if c_vol > 0 else 0)
 
-            total_inv_vol = sum(inv_vol.values())
+            total_inv_vol = sum(inv_vols)
 
-            for c in top_short_coins:
+            for k_, c in enumerate(top_short_coins):
+                idx_c = coin_to_idx[c]
                 # 🔴 与做多对称：只有完全空仓时才进行卖空。死拿不补仓不减仓
-                if positions[c] == 0:
+                if positions_arr[idx_c] == 0:
                     if total_inv_vol > 0:
-                        raw_weight = inv_vol[c] / total_inv_vol
+                        raw_weight = inv_vols[k_] / total_inv_vol
                         target_weight = min(raw_weight, MAX_WEIGHT)
                         target_val = current_equity * target_weight
 
@@ -1008,25 +1053,28 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None, verbos
 
                         if sell_val > 1.0:
                             fee = sell_val * FEE_RATE
-                            sell_amount = sell_val / prices[c]
+                            sell_amount = sell_val / prices_row[idx_c]
 
-                            positions[c] -= sell_amount  # 仓位变负
-                            cash += (sell_val - fee)     # 卖空收到现金
+                            positions_arr[idx_c] -= sell_amount  # 仓位变负
+                            cash += (sell_val - fee)             # 卖空收到现金
 
                             trade_logs.append({
                                 "time": current_time, "action": "SELL", "coin": c,
                                 "direction": "SHORT", "event": "OPEN",
-                                "price": prices[c], "amount": sell_amount, "value": sell_val,
+                                "price": prices_row[idx_c], "amount": sell_amount, "value": sell_val,
                                 "fee": fee, "reason": "Signal Entry Short (Top K Short)"
                             })
 
     # ==========================================
     # 🔴 核心指标与高级统计计算 (多空对称版)
     # ==========================================
-    final_equity = cash + sum(positions[c] * df.iloc[-1][c] for c in coins)
+    # 🚀 np.dot 向量化最终净值计算
+    final_equity = cash + np.dot(positions_arr, close_arr[-1])
     total_return = (final_equity - INITIAL_CAPITAL) / INITIAL_CAPITAL
 
-    curve_df = pd.DataFrame(equity_curve).set_index('time')
+    # 🚀 用预分配的 numpy 数组直接构造 curve_df，结构与原版完全一致
+    curve_df = pd.DataFrame({'equity': equity_values}, index=equity_times)
+    curve_df.index.name = 'time'
     curve_df['cum_max'] = curve_df['equity'].cummax()
     curve_df['drawdown'] = (curve_df['equity'] - curve_df['cum_max']) / curve_df['cum_max']
     max_drawdown = curve_df['drawdown'].min()

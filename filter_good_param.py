@@ -13,7 +13,7 @@ import pandas as pd
 # ═══════════════════════════════════════════════════════════════════════════
 # 配置区
 # ═══════════════════════════════════════════════════════════════════════════
-RESULTS_PATH = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_13608_long_short.csv'
+RESULTS_PATH = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_13608_both.csv'
 OUTPUT_DIR   = r'W:\project\python_project\oke_auto_trade\param_search_results\evaluation'
 
 # ---- Layer 1: 基础健康度过滤 (只淘汰反常，不筛选优秀) ----
@@ -26,7 +26,7 @@ HEALTH_FILTERS = {
     'max_top1_pnl_ratio':            0.45,    # 单笔最高利润 ≤45% (避免极端单点)
     'max_top1_month_pnl_ratio':      0.55,    # 单月最高利润 ≤55%
     'max_negative_assets_ratio':     0.5,     # 负期望标的不超过 50%
-    'max_time_under_water_days':     150,     # 🌟 新增：最长水下阈值
+    'max_time_under_water_days':     2500,     # 🌟 新增：最长水下阈值
 }
 
 # ---- Layer 2: Pareto 前沿目标 (4 个正交维度，避免重复) ----
@@ -265,7 +265,9 @@ def layer3_constraint_filter(df, constraints):
 # ═══════════════════════════════════════════════════════════════════════════
 def layer4_neighborhood(df, varying_params, primary_obj, config):
     out = df.copy()
+    out['L4_TARGET_NEIGHBOR_COUNT'] = 0
     out['L4_NEIGHBOR_COUNT'] = 0
+    out['L4_SURVIVING_NEIGHBOR_COUNT'] = 0
     out['L4_NEIGHBOR_HEALTH_RATE'] = np.nan
     out['L4_NEIGHBOR_OBJ_MEAN'] = np.nan
     out['L4_NEIGHBOR_OBJ_CV'] = np.nan
@@ -293,6 +295,7 @@ def layer4_neighborhood(df, varying_params, primary_obj, config):
             continue
 
         mask = pd.Series(True, index=out.index)
+        target_count = 1
 
         # 🌟 核心修正：仅在信号参数维度上寻找邻居，同时锁定当前的权重参数！
         # 也就是说，我们评估 MAX_WEIGHT=0.2 时的平原，只看周围同样是 0.2 权重的邻居
@@ -314,12 +317,16 @@ def layer4_neighborhood(df, varying_params, primary_obj, config):
                 end_idx = min(len(vals), pos + radius + 1)
                 allowed = vals[start_idx:end_idx]
                 mask &= out[col].isin(allowed)
+                target_count *= len(allowed)
 
         nbrs = out[mask]
 
-        # ----- 下方的统计代码完全保持不变 -----
+        out.at[idx, 'L4_TARGET_NEIGHBOR_COUNT'] = target_count
         out.at[idx, 'L4_NEIGHBOR_COUNT'] = len(nbrs)
+
         if 'L1_PASS' in out.columns and len(nbrs) > 0:
+            surviving_count = int(nbrs['L1_PASS'].fillna(False).sum())
+            out.at[idx, 'L4_SURVIVING_NEIGHBOR_COUNT'] = surviving_count
             out.at[idx, 'L4_NEIGHBOR_HEALTH_RATE'] = nbrs['L1_PASS'].mean()
 
         obj_vals = nbrs[primary_obj].dropna()
@@ -514,8 +521,14 @@ def print_top_candidates(df, primary_obj, varying_params, top_n=5):
 
         # 3. 🛡️ 平原与鲁棒性
         print("\n [🛡️ 参数平原与鲁棒性验证]")
+        target_nbrs = fmt_int(row.get('L4_TARGET_NEIGHBOR_COUNT', 0))
+        actual_nbrs = fmt_int(row.get('L4_NEIGHBOR_COUNT', 0))
+        survive_nbrs = fmt_int(row.get('L4_SURVIVING_NEIGHBOR_COUNT', 0))
+
         print(
-            f"   ├─ 平原稳定性: 邻居存活率: {fmt_pct_abs(row.get('L4_NEIGHBOR_HEALTH_RATE'), 0)} | 邻域主目标均值: {fmt_flt(row.get('L4_NEIGHBOR_OBJ_MEAN'))} | 邻域颠簸度CV: {fmt_flt(row.get('L4_NEIGHBOR_OBJ_CV'), 4)}")
+            f"   ├─ 平原稳定性: 邻居容量 [目标: {target_nbrs} | 实际: {actual_nbrs} | 存活: {survive_nbrs}] | 存活率: {fmt_pct_abs(row.get('L4_NEIGHBOR_HEALTH_RATE'), 0)}")
+        print(
+            f"   ├─ 邻域绩效评估: 主目标均值: {fmt_flt(row.get('L4_NEIGHBOR_OBJ_MEAN'))} | 颠簸度CV: {fmt_flt(row.get('L4_NEIGHBOR_OBJ_CV'), 4)}")
         print(f"   └─ 成本压力测: 增加20bps双边滑点后，年化收益变为 -> {fmt_pct(row.get('cost_stress_20bps_annual'))}")
 
         # 4. 📅 年度表现拆解
