@@ -13,7 +13,7 @@ import pandas as pd
 # ═══════════════════════════════════════════════════════════════════════════
 # 配置区
 # ═══════════════════════════════════════════════════════════════════════════
-RESULTS_PATH = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_6370.csv'
+RESULTS_PATH = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_13608_long_short.csv'
 OUTPUT_DIR   = r'W:\project\python_project\oke_auto_trade\param_search_results\evaluation'
 
 # ---- Layer 1: 基础健康度过滤 (只淘汰反常，不筛选优秀) ----
@@ -26,6 +26,7 @@ HEALTH_FILTERS = {
     'max_top1_pnl_ratio':            0.45,    # 单笔最高利润 ≤45% (避免极端单点)
     'max_top1_month_pnl_ratio':      0.55,    # 单月最高利润 ≤55%
     'max_negative_assets_ratio':     0.5,     # 负期望标的不超过 50%
+    'max_time_under_water_days':     150,     # 🌟 新增：最长水下阈值
 }
 
 # ---- Layer 2: Pareto 前沿目标 (4 个正交维度，避免重复) ----
@@ -130,7 +131,11 @@ def layer1_health_filter(df, filters):
         ratio = (out['negative_expectancy_assets'] / denom).fillna(0)
         reject(ratio > filters['max_negative_assets_ratio'],
                'too_many_negative_assets')
-
+    # 🌟 新增：过滤最长水下期
+    if 'max_time_under_water_days' in out.columns:
+        # fillna(9999) 确保缺失值也被视为不合格直接淘汰
+        reject(out['max_time_under_water_days'].fillna(9999) > filters['max_time_under_water_days'],
+               'under_water_too_long')
     return out
 
 
