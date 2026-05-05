@@ -6,6 +6,11 @@ import pandas as pd
 import numpy as np
 from datetime import timedelta, datetime
 
+# ==========================================
+# 🌐 全局交易模式控制
+# 支持三种模式: 'BOTH' (多空双做), 'LONG_ONLY' (只做多), 'SHORT_ONLY' (只做空)
+# ==========================================
+GLOBAL_TRADE_MODE = 'BOTH'
 
 def load_and_preprocess_data(file_list):
     print("⏳ 正在解析并合并数据...")
@@ -914,7 +919,6 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None, verbos
         # ============================================================
         # 🔴 信号生成 (多空对称) - numpy 版本
         # 用 np.argsort(..., kind='stable') 严格匹配 pandas nlargest/nsmallest 行为
-        # (相同值保留原始顺序, NaN 通过 mask 提前过滤)
         # ============================================================
         top_long_coins = []
         top_short_coins = []
@@ -923,24 +927,28 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None, verbos
 
         if btc_trend_arr[i]:
             # BTC 趋势开启：做多动量最强的 Top-K
-            mask = ~np.isnan(current_mom) & (current_mom > 0)
-            if mask.any():
-                valid_idx = np.where(mask)[0]
-                valid_vals = current_mom[valid_idx]
-                # 等价于 pd.Series(valid_vals).nlargest(TOP_K).index.tolist()
-                order = np.argsort(-valid_vals, kind='stable')
-                top_k_indices = valid_idx[order[:TOP_K]]
-                top_long_coins = [coins[idx] for idx in top_k_indices]
+            # 🚀 引入全局控制：只有在 BOTH 或 LONG_ONLY 模式下允许生成多头信号
+            if GLOBAL_TRADE_MODE in ['BOTH', 'LONG_ONLY']:
+                mask = ~np.isnan(current_mom) & (current_mom > 0)
+                if mask.any():
+                    valid_idx = np.where(mask)[0]
+                    valid_vals = current_mom[valid_idx]
+                    # 等价于 pd.Series(valid_vals).nlargest(TOP_K).index.tolist()
+                    order = np.argsort(-valid_vals, kind='stable')
+                    top_k_indices = valid_idx[order[:TOP_K]]
+                    top_long_coins = [coins[idx] for idx in top_k_indices]
         else:
             # BTC 趋势关闭：做空动量最弱的 Top-K (即跌得最狠的 K 个)
-            mask = ~np.isnan(current_mom) & (current_mom < 0)
-            if mask.any():
-                valid_idx = np.where(mask)[0]
-                valid_vals = current_mom[valid_idx]
-                # 等价于 pd.Series(valid_vals).nsmallest(TOP_K).index.tolist()
-                order = np.argsort(valid_vals, kind='stable')
-                top_k_indices = valid_idx[order[:TOP_K]]
-                top_short_coins = [coins[idx] for idx in top_k_indices]
+            # 🚀 引入全局控制：只有在 BOTH 或 SHORT_ONLY 模式下允许生成空头信号
+            if GLOBAL_TRADE_MODE in ['BOTH', 'SHORT_ONLY']:
+                mask = ~np.isnan(current_mom) & (current_mom < 0)
+                if mask.any():
+                    valid_idx = np.where(mask)[0]
+                    valid_vals = current_mom[valid_idx]
+                    # 等价于 pd.Series(valid_vals).nsmallest(TOP_K).index.tolist()
+                    order = np.argsort(valid_vals, kind='stable')
+                    top_k_indices = valid_idx[order[:TOP_K]]
+                    top_short_coins = [coins[idx] for idx in top_k_indices]
 
         # ============================================================
         # [平仓多头] 持有的多头标的若不再属于 top_long_coins 或趋势翻转 -> 全清
@@ -1201,7 +1209,6 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None, verbos
 
     return logs_df, curve_df, metrics_df
 
-
 # ==========================================
 # 🔴 升级版：深度验证分析模块 (包含年度 Beta 对齐)
 # ==========================================
@@ -1453,7 +1460,7 @@ def run_grid_search(max_workers=10):
     keys = list(param_combinations[0].keys())  # 后续打印用
 
     # 文件名也相应改一下
-    filename = f"grid_search_{total_combos}_clean.csv"
+    filename = f"grid_search_{total_combos}_{GLOBAL_TRADE_MODE}.csv"
     save_path = os.path.join(save_dir, filename)
     if os.path.exists(save_path):
         result_df = pd.read_csv(save_path)
