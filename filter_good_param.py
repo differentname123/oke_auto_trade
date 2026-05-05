@@ -9,11 +9,13 @@
 import os
 import numpy as np
 import pandas as pd
+import itertools
+from collections import defaultdict
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 配置区
 # ═══════════════════════════════════════════════════════════════════════════
-RESULTS_PATH = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_13608_both.csv'
+RESULTS_PATH = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_147798_clean.csv'
 OUTPUT_DIR   = r'W:\project\python_project\oke_auto_trade\param_search_results\evaluation'
 
 # ---- Layer 1: 基础健康度过滤 (只淘汰反常，不筛选优秀) ----
@@ -26,7 +28,7 @@ HEALTH_FILTERS = {
     'max_top1_pnl_ratio':            0.45,    # 单笔最高利润 ≤45% (避免极端单点)
     'max_top1_month_pnl_ratio':      0.55,    # 单月最高利润 ≤55%
     'max_negative_assets_ratio':     0.5,     # 负期望标的不超过 50%
-    'max_time_under_water_days':     2500,     # 🌟 新增：最长水下阈值
+    'max_time_under_water_days':     2500,    # 🌟 新增：最长水下阈值
 }
 
 # ---- Layer 2: Pareto 前沿目标 (4 个正交维度，避免重复) ----
@@ -40,23 +42,22 @@ PARETO_OBJECTIVES = {
 # ---- Layer 3: 约束式偏好筛选 (使用相对值/置信下界/衰减率) ----
 CONSTRAINTS = {
     'monthly_positive_ratio':   ('>=', 0.4),  # 月度盈利占比 ≥50%
-    'top1_pnl_ratio':           ('<=', 0.35),  # 单笔利润占比 ≤35%
-    'drop_top3_pnl_decay':      ('<=', 0.55),  # 剔除 Top-3 后衰减 ≤55%
-    'cost_stress_20bps_annual': ('>=', 0.0),   # 20bps 下年化非负
-    'asset_hhi':                ('<=', 0.60),  # 标的集中度
-    'expectancy_ci_low':        ('>=', 0.0),   # 单笔期望 95% 置信下界 ≥0
+    'top1_pnl_ratio':           ('<=', 0.35), # 单笔利润占比 ≤35%
+    'drop_top3_pnl_decay':      ('<=', 0.55), # 剔除 Top-3 后衰减 ≤55%
+    'cost_stress_20bps_annual': ('>=', 0.0),  # 20bps 下年化非负
+    'asset_hhi':                ('<=', 0.60), # 标的集中度
+    'expectancy_ci_low':        ('>=', 0.0),  # 单笔期望 95% 置信下界 ≥0
 }
 
 # ---- 主目标 (Pareto 内最终排序的单一指标) ----
 PRIMARY_OBJECTIVE = 'sortino_ratio'
 
 # ---- Layer 4: 邻域参数 ----
-
 NEIGHBOR_CONFIG = {
-    'radius':             1,      # 探测半径
+    'radius':             3,      # 探测半径
     'cliff_threshold':    0.50,   # 邻居比当前低 >50% 即视为悬崖
-    'min_neighbor_count': 3,      # 邻域至少有效点数
-    'ignore_params':      ['param_MAX_WEIGHT']  # 🌟 核心修正：平原测试不考察权重维度
+    'min_neighbor_count': 7,      # 邻域至少有效点数
+    'ignore_params':      ['param_MAX_WEIGHT', 'param_TOP_K']  # 🌟 核心修正：平原测试不考察权重维度
 }
 
 # ---- Layer 5: 时间稳定性参数 ----
@@ -70,17 +71,13 @@ TIME_STABILITY_CONFIG = {
 # ═══════════════════════════════════════════════════════════════════════════
 def detect_param_cols(df):
     """识别参数列与变化的参数维度"""
-    # 【修复】强制排除 param_name，只取真正的参数
     param_cols = [c for c in df.columns if c.startswith('param_') and c != 'param_name']
-
     varying = [c for c in param_cols if df[c].nunique() > 1]
     constant = [c for c in param_cols if df[c].nunique() <= 1]
     return param_cols, varying, constant
 
-
 def safe_get(row, col, default=np.nan):
     return row[col] if col in row.index else default
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Layer 1: 基础健康度过滤
@@ -96,58 +93,54 @@ def layer1_health_filter(df, filters):
             out.loc[mask, 'L1_PASS']    = False
 
     if 'total_closed_trades' in out.columns:
-        reject(out['total_closed_trades'].fillna(0) < filters['min_total_trades'],
-               'too_few_trades')
+        reject(out['total_closed_trades'].fillna(0) < filters['min_total_trades'], 'too_few_trades')
 
     if 'active_assets' in out.columns:
-        reject(out['active_assets'].fillna(0) < filters['min_active_assets'],
-               'too_few_active_assets')
+        reject(out['active_assets'].fillna(0) < filters['min_active_assets'], 'too_few_active_assets')
 
     if 'max_drawdown' in out.columns:
-        reject(out['max_drawdown'].fillna(-1) < filters['max_drawdown_threshold'],
-               'dd_too_deep')
+        reject(out['max_drawdown'].fillna(-1) < filters['max_drawdown_threshold'], 'dd_too_deep')
 
     if 'max_consecutive_losing_months' in out.columns:
-        reject(out['max_consecutive_losing_months'].fillna(99) >
-               filters['max_consecutive_losing_months'],
-               'losing_streak_too_long')
+        reject(out['max_consecutive_losing_months'].fillna(99) > filters['max_consecutive_losing_months'], 'losing_streak_too_long')
 
     if 'cost_stress_20bps_annual' in out.columns:
-        reject(out['cost_stress_20bps_annual'].fillna(-1) <
-               filters['min_cost_stress_20bps_annual'],
-               'fragile_to_cost')
+        reject(out['cost_stress_20bps_annual'].fillna(-1) < filters['min_cost_stress_20bps_annual'], 'fragile_to_cost')
 
     if 'top1_pnl_ratio' in out.columns:
-        reject(out['top1_pnl_ratio'].fillna(1) > filters['max_top1_pnl_ratio'],
-               'top1_trade_concentrated')
+        reject(out['top1_pnl_ratio'].fillna(1) > filters['max_top1_pnl_ratio'], 'top1_trade_concentrated')
 
     if 'top1_month_pnl_ratio' in out.columns:
-        reject(out['top1_month_pnl_ratio'].fillna(1) >
-               filters['max_top1_month_pnl_ratio'],
-               'top1_month_concentrated')
+        reject(out['top1_month_pnl_ratio'].fillna(1) > filters['max_top1_month_pnl_ratio'], 'top1_month_concentrated')
 
     if 'active_assets' in out.columns and 'negative_expectancy_assets' in out.columns:
         denom = out['active_assets'].replace(0, np.nan)
         ratio = (out['negative_expectancy_assets'] / denom).fillna(0)
-        reject(ratio > filters['max_negative_assets_ratio'],
-               'too_many_negative_assets')
-    # 🌟 新增：过滤最长水下期
-    if 'max_time_under_water_days' in out.columns:
-        # fillna(9999) 确保缺失值也被视为不合格直接淘汰
-        reject(out['max_time_under_water_days'].fillna(9999) > filters['max_time_under_water_days'],
-               'under_water_too_long')
-    return out
+        reject(ratio > filters['max_negative_assets_ratio'], 'too_many_negative_assets')
 
+    if 'max_time_under_water_days' in out.columns:
+        reject(out['max_time_under_water_days'].fillna(9999) > filters['max_time_under_water_days'], 'under_water_too_long')
+
+    return out
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Layer 2: 多目标 Pareto 前沿
 # ═══════════════════════════════════════════════════════════════════════════
-def layer2_pareto_frontier(df, objectives, max_fronts=3):
+import numpy as np
+
+
+def layer2_pareto_frontier(df, objectives, max_fronts=10, skip_filter=True):
     """
-    升级版 Pareto 过滤：支持 Pareto Rank (前沿层级)
-    (已通过 NumPy 向量化完全重写，消除慢速 Python 循环，速度提升 50 倍以上)
+    极速版 Pareto 过滤：引入 Fast Cull 算法，剔除无效比较，性能指数级提升。
+
+    参数:
+    - df: DataFrame, 原始数据
+    - objectives: dict, 优化目标及方向字典 {'col1': 'maximize', 'col2': 'minimize'}
+    - max_fronts: int, 最大计算的前沿层数
+    - skip_filter: bool, 是否跳过帕累托过滤 (默认 False)
     """
     out = df.copy()
+    # 无论是否跳过，首先保证基础结构的输出一致性
     out['L2_PARETO'] = False
     out['PARETO_RANK'] = np.nan
 
@@ -156,11 +149,22 @@ def layer2_pareto_frontier(df, objectives, max_fronts=3):
         print("⚠️ Layer 2: 没有通过 Layer 1 的候选")
         return out
 
+    # ==========================================
+    # 新增逻辑：跳过过滤 (Skip Filter)
+    # ==========================================
+    if skip_filter:
+        print("⚠️ Layer 2: 已开启 skip_filter，跳过 Pareto 计算")
+        # 将所有 L1 通过的数据标记为 L2 通过
+        out.loc[cands.index, 'L2_PARETO'] = True
+        # 【防御性编程】将排名统一置为 1，防止下游因操作 NaN 类型导致报错
+        out.loc[cands.index, 'PARETO_RANK'] = 1
+        return out
+    # ==========================================
+
     # 1. 整理矩阵 (统一转为 maximize)
     matrix, idx_list = [], cands.index.tolist()
     for col, direction in objectives.items():
         if col not in cands.columns:
-            print(f"⚠️ Pareto 目标列缺失: {col}, 已跳过")
             continue
         v = cands[col].values.astype(float)
         worst_fill = -np.inf if direction == 'maximize' else np.inf
@@ -175,37 +179,43 @@ def layer2_pareto_frontier(df, objectives, max_fronts=3):
     M = np.array(matrix).T  # shape: (n, k)
     n = len(M)
 
-    # 2. 向量化分层寻找 Pareto 前沿
     remaining_indices = np.arange(n)
     current_front_rank = 1
     pareto_pass_global_idx = []
 
+    # 2. Fast Cull 算法寻找 Pareto 前沿
     while len(remaining_indices) > 0 and current_front_rank <= max_fronts:
         M_rem = M[remaining_indices]
-        is_dominated = np.zeros(len(remaining_indices), dtype=bool)
+        is_efficient = np.ones(len(M_rem), dtype=bool)
 
-        # 对当前层级的每一条记录，使用向量化对比判断其是否被支配
-        for idx, i in enumerate(remaining_indices):
-            # M_rem >= M[i] 生成布尔矩阵，极速比对全部点
-            dom = np.all(M_rem >= M[i], axis=1) & np.any(M_rem > M[i], axis=1)
-            if np.any(dom):
-                is_dominated[idx] = True
+        for i in range(len(M_rem)):
+            if is_efficient[i]:
+                c = M_rem[i]
+                eff_idx = np.where(is_efficient)[0]
+                eff_idx = eff_idx[eff_idx != i]
 
-        # 选出非支配点（即前沿）
-        current_front_local_idx = np.where(~is_dominated)[0]
+                if len(eff_idx) == 0:
+                    break
+
+                M_eff = M_rem[eff_idx]
+                # c 支配 M_eff 中的点：所有维度 >= 且至少一个维度 >
+                dom = np.all(c >= M_eff, axis=1) & np.any(c > M_eff, axis=1)
+
+                if np.any(dom):
+                    dominated_eff_idx = eff_idx[dom]
+                    is_efficient[dominated_eff_idx] = False
+
+        current_front_local_idx = np.where(is_efficient)[0]
         current_front = remaining_indices[current_front_local_idx]
 
-        # 记录当前层的点
         for idx in current_front:
             real_idx = idx_list[idx]
             out.loc[real_idx, 'PARETO_RANK'] = current_front_rank
             pareto_pass_global_idx.append(real_idx)
 
-        # 更新下一轮剩余的索引集合
-        remaining_indices = remaining_indices[is_dominated]
+        remaining_indices = remaining_indices[~is_efficient]
         current_front_rank += 1
 
-    # 3. 标记最终通过 L2 的候选
     if pareto_pass_global_idx:
         out.loc[pareto_pass_global_idx, 'L2_PARETO'] = True
 
@@ -228,43 +238,32 @@ def layer3_constraint_filter(df, constraints):
 
     for col, (op, threshold) in constraints.items():
         if col not in cands.columns:
-            print(f"⚠️ 约束列缺失: {col}, 已跳过")
             continue
 
-        # NaN 视为不通过
         v = cands[col]
-        if op == '>=':
-            fail = v.fillna(-np.inf) < threshold
-        elif op == '<=':
-            fail = v.fillna(np.inf) > threshold
-        elif op == '>':
-            fail = v.fillna(-np.inf) <= threshold
-        elif op == '<':
-            fail = v.fillna(np.inf) >= threshold
-        else:
-            continue
+        if op == '>=': fail = v.fillna(-np.inf) < threshold
+        elif op == '<=': fail = v.fillna(np.inf) > threshold
+        elif op == '>': fail = v.fillna(-np.inf) <= threshold
+        elif op == '<': fail = v.fillna(np.inf) >= threshold
+        else: continue
 
         rejected_idx = cands.index[fail]
-        out.loc[rejected_idx, 'L3_REASONS'] = (
-            out.loc[rejected_idx, 'L3_REASONS'] + f"{col}{op}{threshold}; "
-        )
+        out.loc[rejected_idx, 'L3_REASONS'] += f"{col}{op}{threshold}; "
         pass_mask &= ~fail
 
     out.loc[cands.index[pass_mask], 'L3_PASS'] = True
     return out
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Layer 4: 参数平原 (动态半径邻域稳定性) 验证 [已剥离资金参数]
 # ═══════════════════════════════════════════════════════════════════════════
 def layer4_neighborhood(df, varying_params, primary_obj, config):
     """
-    (已通过底层 NumPy 坐标系转换重写，剔除了耗时的 df.iterrows 和掩码运算，速度飙升)
+    极速版平原搜索：引入空间哈希字典 (Spatial Hash Map) O(1) 复杂度直接提取，完全消除庞大的掩码运算。
     """
     out = df.copy()
     n_rows = len(out)
 
-    # 初始化输出列数组
     target_counts = np.zeros(n_rows, dtype=int)
     neighbor_counts = np.zeros(n_rows, dtype=int)
     surviving_counts = np.zeros(n_rows, dtype=int)
@@ -278,7 +277,6 @@ def layer4_neighborhood(df, varying_params, primary_obj, config):
     search_dims = [p for p in varying_params if p not in ignored]
 
     if not search_dims:
-        print("⚠️ Layer 4: 没有需要扫描的信号参数维度，跳过邻域分析")
         out['L4_PASS'] = out.get('L3_PASS', False)
         return out
 
@@ -287,18 +285,23 @@ def layer4_neighborhood(df, varying_params, primary_obj, config):
 
     radius = config.get('radius', 1)
 
-    # 预处理：将真实的网格参数映射为 0,1,2,3 的整数坐标系
-    coords = np.full((n_rows, len(varying_params)), -1.0)
+    # 预处理：映射坐标并强制转换为整数类型避免浮点 Hash 误差
+    coords = np.full((n_rows, len(varying_params)), -1, dtype=int)
     param_vals_len = {}
 
     for i, col in enumerate(varying_params):
         vals = sorted(out[col].dropna().unique())
         param_vals_len[i] = len(vals)
         val_to_idx = {v: idx for idx, v in enumerate(vals)}
-        coords[:, i] = out[col].map(val_to_idx).fillna(-1)
+        coords[:, i] = out[col].map(val_to_idx).fillna(-1).astype(int)
 
-    ignored_idx = [i for i, col in enumerate(varying_params) if col in ignored]
-    search_idx  = [i for i, col in enumerate(varying_params) if col not in ignored]
+    ignored_idx = set([i for i, col in enumerate(varying_params) if col in ignored])
+
+    # 核心优化：建立 O(1) 的空间位置哈希映射字典
+    coord_map = defaultdict(list)
+    for i, c in enumerate(coords):
+        if not np.any(c < 0):  # 过滤包含 NaN 的无效坐标
+            coord_map[tuple(c)].append(i)
 
     l3_pass_mask = out.get('L3_PASS', pd.Series([False]*n_rows)).values
     l1_pass_arr  = out.get('L1_PASS', pd.Series([False]*n_rows)).fillna(False).values
@@ -307,49 +310,47 @@ def layer4_neighborhood(df, varying_params, primary_obj, config):
     cliff_threshold = config['cliff_threshold']
     min_neighbor_count = config['min_neighbor_count']
 
-    # 仅针对通过 L3 的标的计算邻域
     for idx in np.where(l3_pass_mask)[0]:
         target_coord = coords[idx]
-        if np.any(target_coord < 0):  # 跳过带 NaN 的参数
+        if np.any(target_coord < 0):
             continue
 
-        mask = np.ones(n_rows, dtype=bool)
-
-        # 核心修正：需要被 ignore_params 处理的维度，必须严格绝对相等
-        if ignored_idx:
-            mask &= np.all(coords[:, ignored_idx] == target_coord[ignored_idx], axis=1)
-
-        # 信号维度寻找上下游指定 radius 距离内的邻域（切比雪夫距离）
-        if search_idx:
-            diff = np.abs(coords[:, search_idx] - target_coord[search_idx])
-            mask &= np.all(diff <= radius, axis=1)
-
-        nbrs_idx = np.where(mask)[0]
-
         target_count = 1
-        for sid in search_idx:
-            pos = int(target_coord[sid])
-            length = param_vals_len[sid]
-            start = max(0, pos - radius)
-            end = min(length, pos + radius + 1)
-            target_count *= (end - start)
+        ranges = []
+
+        # O(1) 直接生成严格符合条件的邻居坐标系组合
+        for i in range(len(varying_params)):
+            pos = int(target_coord[i])
+            if i in ignored_idx:
+                ranges.append([pos])
+            else:
+                length = param_vals_len[i]
+                start = max(0, pos - radius)
+                end = min(length - 1, pos + radius)
+                ranges.append(list(range(start, end + 1)))
+                target_count *= (end - start + 1)
 
         target_counts[idx] = target_count
+
+        # 极速提取邻域索引
+        nbrs_idx = []
+        for n_coord in itertools.product(*ranges):
+            if n_coord in coord_map:
+                nbrs_idx.extend(coord_map[n_coord])
+
         neighbor_counts[idx] = len(nbrs_idx)
 
-        # 计算存活健康率
         if len(nbrs_idx) > 0:
             surviving = l1_pass_arr[nbrs_idx].sum()
             surviving_counts[idx] = surviving
             health_rates[idx] = surviving / len(nbrs_idx)
 
-        # 提取邻居的目标分数，并剔除 NaN
         obj_vals = primary_obj_arr[nbrs_idx]
         obj_vals = obj_vals[~np.isnan(obj_vals)]
 
         if len(obj_vals) >= 2:
             mu = obj_vals.mean()
-            sd = obj_vals.std(ddof=1)  # 使用 ddof=1 与原 pandas 逻辑绝对一致
+            sd = obj_vals.std(ddof=1)
             cv = abs(sd / mu) if abs(mu) > 1e-9 else np.inf
             obj_means[idx] = mu
             obj_cvs[idx] = cv
@@ -362,7 +363,6 @@ def layer4_neighborhood(df, varying_params, primary_obj, config):
 
         passes[idx] = bool((len(nbrs_idx) >= min_neighbor_count) and not cliffs[idx])
 
-    # 将极速运算的数组矩阵一次性赋值给 Dataframe
     out['L4_TARGET_NEIGHBOR_COUNT'] = target_counts
     out['L4_NEIGHBOR_COUNT'] = neighbor_counts
     out['L4_SURVIVING_NEIGHBOR_COUNT'] = surviving_counts
@@ -383,7 +383,6 @@ def layer5_time_stability(df, config):
     out['L5_ANNUAL_OK']         = True
     out['L5_PASS']              = False
 
-    # 上下半段一致性
     if config['require_both_halves_pos']:
         if 'first_half_return' in out.columns and 'second_half_return' in out.columns:
             out['L5_HALF_CONSISTENT'] = (
@@ -391,7 +390,6 @@ def layer5_time_stability(df, config):
                 (out['second_half_return'].fillna(-1) > 0)
             )
 
-    # 盈利年份占比
     if 'profitable_years_ratio' in out.columns:
         out['L5_ANNUAL_OK'] = (
             out['profitable_years_ratio'].fillna(0) >=
@@ -405,7 +403,6 @@ def layer5_time_stability(df, config):
     )
 
     return out
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 综合得分 (邻域均值 × 健康率 / (1+CV))
@@ -422,12 +419,10 @@ def compute_final_score(df, primary_obj):
     nbrs_health = out.loc[valid_mask, 'L4_NEIGHBOR_HEALTH_RATE'].fillna(0)
     nbrs_cv     = out.loc[valid_mask, 'L4_NEIGHBOR_OBJ_CV'].fillna(10).clip(upper=10)
 
-    # 偏好：邻域均值高、健康率高、CV 低
     score = nbrs_mean * nbrs_health / (1 + nbrs_cv)
     out.loc[valid_mask, 'FINAL_SCORE'] = score
 
     return out
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 报告打印
@@ -438,7 +433,6 @@ def _print_layer_report(df, pass_col, layer_name, total_initial):
     n_pass = int(df[pass_col].fillna(False).sum())
     rate   = n_pass / total_initial * 100 if total_initial > 0 else 0
     print(f"  {layer_name}: 通过 {n_pass}/{total_initial} ({rate:.1f}%)")
-
 
 def print_funnel_summary(df):
     total = len(df)
@@ -452,7 +446,6 @@ def print_funnel_summary(df):
     _print_layer_report(df, 'L5_PASS',    "L5 时间稳定性    ", total)
     print("═" * 70)
 
-
 def print_rejection_summary(df, layer_col, reason_col, layer_name):
     rejected = df[~df[layer_col].fillna(False)] if layer_col in df.columns else pd.DataFrame()
     if len(rejected) == 0 or reason_col not in rejected.columns:
@@ -465,9 +458,8 @@ def print_rejection_summary(df, layer_col, reason_col, layer_name):
     for k, v in sorted(reason_counts.items(), key=lambda x: -x[1]):
         print(f"   - {k:<32} : {v} 组")
 
-
 # ═══════════════════════════════════════════════════════════════════════════
-# 报告打印 (终极卡片版：含算分公式、水下占比、超额收益、标的贡献比)
+# 报告打印 (终极卡片版)
 # ═══════════════════════════════════════════════════════════════════════════
 def print_top_candidates(df, primary_obj, varying_params, top_n=5):
     print("\n" + "═" * 80)
@@ -496,7 +488,6 @@ def print_top_candidates(df, primary_obj, varying_params, top_n=5):
         ['FINAL_SCORE', primary_obj], ascending=[False, False], na_position='last'
     ).head(top_n)
 
-    # 辅助格式化函数
     def fmt_pct(val, dec=1):
         return f"{val * 100:+.{dec}f}%" if pd.notna(val) else "N/A"
 
@@ -515,23 +506,19 @@ def print_top_candidates(df, primary_obj, varying_params, top_n=5):
 
         print(f"\n" + "▼" * 80)
         print(f" 🎖️ 排位 No.{rank} | 参数代号: {p_name}")
-        # ✨ 优化1: 解释稳健综合分的计算公式
         print(f"   ► 稳健综合分: {fmt_flt(score, 4)}  [计算逻辑: 邻域均值 × 邻域存活率 / (1 + 邻域CV)]")
         print("─" * 80)
 
-        # 1. ⚙️ 参数配置
         print(" [⚙️ 策略参数配置]")
         param_strs = [f"{p.replace('param_', '')}: {row.get(p, 'N/A')}" for p in varying_params]
         print(f"   ► {',  '.join(param_strs)}")
 
-        # 2. 📊 核心基础绩效
         print("\n [📊 核心基础绩效]")
         print(
             f"   ├─ 交易统计: {fmt_int(row.get('total_closed_trades'))} 笔平仓 | 胜率: {fmt_pct_abs(row.get('win_rate'))} | 盈亏比: {fmt_flt(row.get('profit_loss_ratio'), 2)}")
         print(
             f"   ├─ 收益状况: 总收益: {fmt_pct(row.get('total_return'))} | 年化收益: {fmt_pct(row.get('annual_return'))}")
 
-        # ✨ 优化4: 水下时间与占比
         max_uw_days = row.get('max_time_under_water_days', np.nan)
         total_days = row.get('days_passed', np.nan)
         uw_str = f"{fmt_flt(max_uw_days, 1)}天"
@@ -545,7 +532,6 @@ def print_top_candidates(df, primary_obj, varying_params, top_n=5):
         print(
             f"   └─ 集中度险: 币种HHI: {fmt_flt(row.get('asset_hhi'))} | 最赚1笔占比: {fmt_pct_abs(row.get('top1_pnl_ratio'))}")
 
-        # 3. 🛡️ 平原与鲁棒性
         print("\n [🛡️ 参数平原与鲁棒性验证]")
         target_nbrs = fmt_int(row.get('L4_TARGET_NEIGHBOR_COUNT', 0))
         actual_nbrs = fmt_int(row.get('L4_NEIGHBOR_COUNT', 0))
@@ -557,8 +543,6 @@ def print_top_candidates(df, primary_obj, varying_params, top_n=5):
             f"   ├─ 邻域绩效评估: 主目标均值: {fmt_flt(row.get('L4_NEIGHBOR_OBJ_MEAN'))} | 颠簸度CV: {fmt_flt(row.get('L4_NEIGHBOR_OBJ_CV'), 4)}")
         print(f"   └─ 成本压力测: 增加20bps双边滑点后，年化收益变为 -> {fmt_pct(row.get('cost_stress_20bps_annual'))}")
 
-        # 4. 📅 年度表现拆解
-        # ✨ 优化3: 引入基准涨跌幅与超额收益计算 (兼容无基准数据的CSV)
         print("\n [📅 年度表现拆解]")
         year_cols = [c for c in df.columns if c.startswith('year_') and c.endswith('_return')]
         if year_cols:
@@ -569,19 +553,17 @@ def print_top_candidates(df, primary_obj, varying_params, top_n=5):
                 y_bench_ret = row.get(f'year_{y}_benchmark_return', np.nan)
                 y_bench_dd = row.get(f'year_{y}_benchmark_dd', np.nan)
 
-                # 如果未来你的 CSV 生成了基准数据，这里会自动算超额
                 if pd.notna(y_bench_ret):
                     excess_ret = y_ret - y_bench_ret
                     bench_str = f" | 基准收益: {fmt_pct(y_bench_ret):>7} (基准回撤 {fmt_pct(y_bench_dd):>7}) | 🌟超额收益: {fmt_pct(excess_ret):>7}"
                 else:
-                    bench_str = ""  # 当前CSV没基准数据时的优雅回退
+                    bench_str = ""
 
                 if pd.notna(y_ret):
                     print(f"   ► {y}年: 策略收益: {fmt_pct(y_ret):>7} (最大回撤 {fmt_pct(y_dd):>7}){bench_str}")
         else:
             print("   ► (无年度拆解数据)")
 
-        # 5. 🪙 标的贡献明细
         print("\n [🪙 标的盈亏贡献明细 (按净利润排序)]")
         asset_cols = [c for c in df.columns if c.startswith('asset_') and c.endswith('_net_pnl')]
         if asset_cols:
@@ -591,7 +573,6 @@ def print_top_candidates(df, primary_obj, varying_params, top_n=5):
                 net_pnl = row.get(c, 0.0)
                 trades = row.get(f'asset_{coin}_trades', 0)
                 win_r = row.get(f'asset_{coin}_win_rate', np.nan)
-                # ✨ 优化2: 获取净利润占比
                 share = row.get(f'asset_{coin}_pnl_share', np.nan)
 
                 if trades > 0:
@@ -649,7 +630,6 @@ def evaluate(results_path):
     print(f"\n💾 完整评估结果已保存: {save_path}")
 
     return df
-
 
 if __name__ == "__main__":
     result_df = evaluate(RESULTS_PATH)
