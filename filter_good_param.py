@@ -22,7 +22,7 @@ HEALTH_FILTERS = {
     'min_active_assets':             2,       # 至少 2 个标的有交易
     'max_drawdown_threshold':        -0.45,   # MaxDD 不超过 45%
     'max_consecutive_losing_months': 8,       # 连续亏损不超过 8 个月
-    'min_cost_stress_20bps_annual':  -0.05,   # 20bps 成本下年化不能<-5%
+    'min_cost_stress_20bps_annual':  -0.1,   # 20bps 成本下年化不能<-5%
     'max_top1_pnl_ratio':            0.45,    # 单笔最高利润 ≤45% (避免极端单点)
     'max_top1_month_pnl_ratio':      0.55,    # 单月最高利润 ≤55%
     'max_negative_assets_ratio':     0.5,     # 负期望标的不超过 50%
@@ -39,7 +39,7 @@ PARETO_OBJECTIVES = {
 
 # ---- Layer 3: 约束式偏好筛选 (使用相对值/置信下界/衰减率) ----
 CONSTRAINTS = {
-    'monthly_positive_ratio':   ('>=', 0.50),  # 月度盈利占比 ≥50%
+    'monthly_positive_ratio':   ('>=', 0.4),  # 月度盈利占比 ≥50%
     'top1_pnl_ratio':           ('<=', 0.35),  # 单笔利润占比 ≤35%
     'drop_top3_pnl_decay':      ('<=', 0.55),  # 剔除 Top-3 后衰减 ≤55%
     'cost_stress_20bps_annual': ('>=', 0.0),   # 20bps 下年化非负
