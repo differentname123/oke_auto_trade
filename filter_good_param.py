@@ -129,7 +129,7 @@ def layer1_health_filter(df, filters):
 import numpy as np
 
 
-def layer2_pareto_frontier(df, objectives, max_fronts=10, skip_filter=True):
+def layer2_pareto_frontier(df, objectives, max_fronts=10, skip_filter=False):
     """
     极速版 Pareto 过滤：引入 Fast Cull 算法，剔除无效比较，性能指数级提升。
 
@@ -407,6 +407,9 @@ def layer5_time_stability(df, config):
 # ═══════════════════════════════════════════════════════════════════════════
 # 综合得分 (邻域均值 × 健康率 / (1+CV))
 # ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
+# 综合得分 (邻域均值 × 健康率 / (1+CV))
+# ═══════════════════════════════════════════════════════════════════════════
 def compute_final_score(df, primary_obj):
     out = df.copy()
     out['FINAL_SCORE'] = np.nan
@@ -415,15 +418,22 @@ def compute_final_score(df, primary_obj):
     if not valid_mask.any():
         return out
 
-    nbrs_mean   = out.loc[valid_mask, 'L4_NEIGHBOR_OBJ_MEAN'].fillna(0)
+    nbrs_mean = out.loc[valid_mask, 'L4_NEIGHBOR_OBJ_MEAN'].fillna(0)
     nbrs_health = out.loc[valid_mask, 'L4_NEIGHBOR_HEALTH_RATE'].fillna(0)
-    nbrs_cv     = out.loc[valid_mask, 'L4_NEIGHBOR_OBJ_CV'].fillna(10).clip(upper=10)
+    nbrs_cv = out.loc[valid_mask, 'L4_NEIGHBOR_OBJ_CV'].fillna(10).clip(upper=10)
 
-    score = nbrs_mean * nbrs_health / (1 + nbrs_cv)
+    # 🌟 修复点：消除负均值/零均值下的公式畸变与 CV 爆炸
+    # 如果平原均值 > 0，正常计算稳健得分加成；
+    # 如果平原均值 <= 0，剥离 health 和 CV 导致的乘数扭曲，直接保留负均值使其合理垫底。
+    score = np.where(
+        nbrs_mean > 0,
+        nbrs_mean * nbrs_health / (1 + nbrs_cv),
+        nbrs_mean
+    )
+
     out.loc[valid_mask, 'FINAL_SCORE'] = score
 
     return out
-
 # ═══════════════════════════════════════════════════════════════════════════
 # 报告打印
 # ═══════════════════════════════════════════════════════════════════════════
