@@ -15,7 +15,7 @@ from collections import defaultdict
 # ═══════════════════════════════════════════════════════════════════════════
 # 配置区
 # ═══════════════════════════════════════════════════════════════════════════
-RESULTS_PATH = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_147798_clean.csv'
+RESULTS_PATH = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_147798_BOTH.csv'
 OUTPUT_DIR   = r'W:\project\python_project\oke_auto_trade\param_search_results\evaluation'
 
 # ---- Layer 1: 基础健康度过滤 (只淘汰反常，不筛选优秀) ----

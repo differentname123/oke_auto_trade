@@ -10,7 +10,7 @@ from datetime import timedelta, datetime
 # 🌐 全局交易模式控制
 # 支持三种模式: 'BOTH' (多空双做), 'LONG_ONLY' (只做多), 'SHORT_ONLY' (只做空)
 # ==========================================
-GLOBAL_TRADE_MODE = 'BOTH'
+GLOBAL_TRADE_MODE = 'SHORT_ONLY'
 
 def load_and_preprocess_data(file_list):
     print("⏳ 正在解析并合并数据...")
@@ -1421,7 +1421,7 @@ def build_clean_param_grid(df_len):
     return clean_combos
 
 
-def run_grid_search(max_workers=10):
+def run_grid_search(max_workers=15):
     """
     执行参数网格搜索并自动持久化保存结果
     （全内置、零参数、零全局变量依赖，真正的高内聚闭环）
