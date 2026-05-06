@@ -54,9 +54,9 @@ PRIMARY_OBJECTIVE = 'sortino_ratio'
 
 # ---- Layer 4: 邻域参数 ----
 NEIGHBOR_CONFIG = {
-    'radius':             3,      # 探测半径
+    'radius_pct':         0.35,   # 🌟 核心修正：基于参数真实值的语义半径 (±35%)
     'cliff_threshold':    0.50,   # 邻居比当前低 >50% 即视为悬崖
-    'min_neighbor_count': 7,      # 邻域至少有效点数
+    'min_neighbor_count': 4,      # 🌟 修正：语义距离比盲目取索引更严苛，适当下调必需点数
     'ignore_params':      ['param_MAX_WEIGHT', 'param_TOP_K']  # 🌟 核心修正：平原测试不考察权重维度
 }
 
@@ -126,21 +126,11 @@ def layer1_health_filter(df, filters):
 # ═══════════════════════════════════════════════════════════════════════════
 # Layer 2: 多目标 Pareto 前沿
 # ═══════════════════════════════════════════════════════════════════════════
-import numpy as np
-
-
 def layer2_pareto_frontier(df, objectives, max_fronts=10, skip_filter=False):
     """
     极速版 Pareto 过滤：引入 Fast Cull 算法，剔除无效比较，性能指数级提升。
-
-    参数:
-    - df: DataFrame, 原始数据
-    - objectives: dict, 优化目标及方向字典 {'col1': 'maximize', 'col2': 'minimize'}
-    - max_fronts: int, 最大计算的前沿层数
-    - skip_filter: bool, 是否跳过帕累托过滤 (默认 False)
     """
     out = df.copy()
-    # 无论是否跳过，首先保证基础结构的输出一致性
     out['L2_PARETO'] = False
     out['PARETO_RANK'] = np.nan
 
@@ -149,19 +139,12 @@ def layer2_pareto_frontier(df, objectives, max_fronts=10, skip_filter=False):
         print("⚠️ Layer 2: 没有通过 Layer 1 的候选")
         return out
 
-    # ==========================================
-    # 新增逻辑：跳过过滤 (Skip Filter)
-    # ==========================================
     if skip_filter:
         print("⚠️ Layer 2: 已开启 skip_filter，跳过 Pareto 计算")
-        # 将所有 L1 通过的数据标记为 L2 通过
         out.loc[cands.index, 'L2_PARETO'] = True
-        # 【防御性编程】将排名统一置为 1，防止下游因操作 NaN 类型导致报错
         out.loc[cands.index, 'PARETO_RANK'] = 1
         return out
-    # ==========================================
 
-    # 1. 整理矩阵 (统一转为 maximize)
     matrix, idx_list = [], cands.index.tolist()
     for col, direction in objectives.items():
         if col not in cands.columns:
@@ -176,14 +159,13 @@ def layer2_pareto_frontier(df, objectives, max_fronts=10, skip_filter=False):
     if not matrix:
         return out
 
-    M = np.array(matrix).T  # shape: (n, k)
+    M = np.array(matrix).T
     n = len(M)
 
     remaining_indices = np.arange(n)
     current_front_rank = 1
     pareto_pass_global_idx = []
 
-    # 2. Fast Cull 算法寻找 Pareto 前沿
     while len(remaining_indices) > 0 and current_front_rank <= max_fronts:
         M_rem = M[remaining_indices]
         is_efficient = np.ones(len(M_rem), dtype=bool)
@@ -198,7 +180,6 @@ def layer2_pareto_frontier(df, objectives, max_fronts=10, skip_filter=False):
                     break
 
                 M_eff = M_rem[eff_idx]
-                # c 支配 M_eff 中的点：所有维度 >= 且至少一个维度 >
                 dom = np.all(c >= M_eff, axis=1) & np.any(c > M_eff, axis=1)
 
                 if np.any(dom):
@@ -255,11 +236,12 @@ def layer3_constraint_filter(df, constraints):
     return out
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Layer 4: 参数平原 (动态半径邻域稳定性) 验证 [已剥离资金参数]
+# Layer 4: 参数平原 (动态半径邻域稳定性) 验证 [基于参数语义逻辑]
 # ═══════════════════════════════════════════════════════════════════════════
 def layer4_neighborhood(df, varying_params, primary_obj, config):
     """
-    极速版平原搜索：引入空间哈希字典 (Spatial Hash Map) O(1) 复杂度直接提取，完全消除庞大的掩码运算。
+    极速版平原搜索 (语义距离版)：引入空间哈希字典 (Spatial Hash Map) O(1) 复杂度直接提取。
+    彻底摒弃基于索引的物理跳跃，改为基于参数真实数值的偏离度 (百分比) 来划定邻域。
     """
     out = df.copy()
     n_rows = len(out)
@@ -283,24 +265,40 @@ def layer4_neighborhood(df, varying_params, primary_obj, config):
     if primary_obj not in out.columns:
         return out
 
-    radius = config.get('radius', 1)
+    # 🌟 核心提取：语义半径 (如果未配置，默认±35%)
+    radius_pct = config.get('radius_pct', 0.35)
 
-    # 预处理：映射坐标并强制转换为整数类型避免浮点 Hash 误差
+    # 预处理：映射坐标，同时构建基于真实数值的语义邻接表
     coords = np.full((n_rows, len(varying_params)), -1, dtype=int)
-    param_vals_len = {}
+    semantic_adj = {}
 
     for i, col in enumerate(varying_params):
-        vals = sorted(out[col].dropna().unique())
-        param_vals_len[i] = len(vals)
+        vals = np.sort(out[col].dropna().unique())
         val_to_idx = {v: idx for idx, v in enumerate(vals)}
         coords[:, i] = out[col].map(val_to_idx).fillna(-1).astype(int)
 
+        # 🌟 核心修正：构建本维度的 O(1) 语义邻居索引表
+        adj = {}
+        for idx, val in enumerate(vals):
+            if col in ignored:
+                adj[idx] = [idx]
+            else:
+                # 语义距离界限：中心点真实值 ± radius_pct
+                lower_bound = val * (1.0 - radius_pct)
+                upper_bound = val * (1.0 + radius_pct)
+                valid_indices = [
+                    n_idx for n_idx, n_val in enumerate(vals)
+                    if lower_bound <= n_val <= upper_bound
+                ]
+                adj[idx] = valid_indices
+        semantic_adj[i] = adj
+
     ignored_idx = set([i for i, col in enumerate(varying_params) if col in ignored])
 
-    # 核心优化：建立 O(1) 的空间位置哈希映射字典
+    # 建立 O(1) 的空间位置哈希映射字典 (依然用 index 管理多维映射，安全高效)
     coord_map = defaultdict(list)
     for i, c in enumerate(coords):
-        if not np.any(c < 0):  # 过滤包含 NaN 的无效坐标
+        if not np.any(c < 0):
             coord_map[tuple(c)].append(i)
 
     l3_pass_mask = out.get('L3_PASS', pd.Series([False]*n_rows)).values
@@ -318,17 +316,12 @@ def layer4_neighborhood(df, varying_params, primary_obj, config):
         target_count = 1
         ranges = []
 
-        # O(1) 直接生成严格符合条件的邻居坐标系组合
+        # O(1) 直接生成严格符合"语义距离"条件的邻居坐标系组合
         for i in range(len(varying_params)):
             pos = int(target_coord[i])
-            if i in ignored_idx:
-                ranges.append([pos])
-            else:
-                length = param_vals_len[i]
-                start = max(0, pos - radius)
-                end = min(length - 1, pos + radius)
-                ranges.append(list(range(start, end + 1)))
-                target_count *= (end - start + 1)
+            valid_pos_list = semantic_adj[i][pos]
+            ranges.append(valid_pos_list)
+            target_count *= len(valid_pos_list)
 
         target_counts[idx] = target_count
 
@@ -360,8 +353,8 @@ def layer4_neighborhood(df, varying_params, primary_obj, config):
                 worst = obj_vals.min()
                 if (cur - worst) / cur > cliff_threshold:
                     cliffs[idx] = True
-
-        passes[idx] = bool((len(nbrs_idx) >= min_neighbor_count) and not cliffs[idx])
+        actual_required = min(min_neighbor_count, target_counts[idx])
+        passes[idx] = bool((len(nbrs_idx) >= actual_required) and not cliffs[idx])
 
     out['L4_TARGET_NEIGHBOR_COUNT'] = target_counts
     out['L4_NEIGHBOR_COUNT'] = neighbor_counts
@@ -407,9 +400,6 @@ def layer5_time_stability(df, config):
 # ═══════════════════════════════════════════════════════════════════════════
 # 综合得分 (邻域均值 × 健康率 / (1+CV))
 # ═══════════════════════════════════════════════════════════════════════════
-# ═══════════════════════════════════════════════════════════════════════════
-# 综合得分 (邻域均值 × 健康率 / (1+CV))
-# ═══════════════════════════════════════════════════════════════════════════
 def compute_final_score(df, primary_obj):
     out = df.copy()
     out['FINAL_SCORE'] = np.nan
@@ -423,8 +413,6 @@ def compute_final_score(df, primary_obj):
     nbrs_cv = out.loc[valid_mask, 'L4_NEIGHBOR_OBJ_CV'].fillna(10).clip(upper=10)
 
     # 🌟 修复点：消除负均值/零均值下的公式畸变与 CV 爆炸
-    # 如果平原均值 > 0，正常计算稳健得分加成；
-    # 如果平原均值 <= 0，剥离 health 和 CV 导致的乘数扭曲，直接保留负均值使其合理垫底。
     score = np.where(
         nbrs_mean > 0,
         nbrs_mean * nbrs_health / (1 + nbrs_cv),
@@ -434,6 +422,7 @@ def compute_final_score(df, primary_obj):
     out.loc[valid_mask, 'FINAL_SCORE'] = score
 
     return out
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 报告打印
 # ═══════════════════════════════════════════════════════════════════════════
@@ -548,7 +537,7 @@ def print_top_candidates(df, primary_obj, varying_params, top_n=5):
         survive_nbrs = fmt_int(row.get('L4_SURVIVING_NEIGHBOR_COUNT', 0))
 
         print(
-            f"   ├─ 平原稳定性: 邻居容量 [目标: {target_nbrs} | 实际: {actual_nbrs} | 存活: {survive_nbrs}] | 存活率: {fmt_pct_abs(row.get('L4_NEIGHBOR_HEALTH_RATE'), 0)}")
+            f"   ├─ 平原稳定性: 语义邻居容量 [目标: {target_nbrs} | 实际: {actual_nbrs} | 存活: {survive_nbrs}] | 存活率: {fmt_pct_abs(row.get('L4_NEIGHBOR_HEALTH_RATE'), 0)}")
         print(
             f"   ├─ 邻域绩效评估: 主目标均值: {fmt_flt(row.get('L4_NEIGHBOR_OBJ_MEAN'))} | 颠簸度CV: {fmt_flt(row.get('L4_NEIGHBOR_OBJ_CV'), 4)}")
         print(f"   └─ 成本压力测: 增加20bps双边滑点后，年化收益变为 -> {fmt_pct(row.get('cost_stress_20bps_annual'))}")
