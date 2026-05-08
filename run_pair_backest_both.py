@@ -12,72 +12,78 @@ from datetime import timedelta, datetime
 # ==========================================
 GLOBAL_TRADE_MODE = 'SHORT_ONLY'
 
-
 def load_and_preprocess_data_new(file_list):
-    print("⏳ 正在解析并合并数据...")
+    print("⏳ 正在极速解析并合并数据...")
     dfs = []
-    for file in file_list:
-        # 提取币种名并过滤掉 'USDT'，例如将 'ADAUSDT' 还原为 'ADA'
-        coin_name = os.path.basename(file).split('_')[0].replace('USDT', '')
-        df = pd.read_csv(file)
 
-        # ⚠️ 关键修正：截图中的 open_time 是 13位时间戳，必须指定 unit='ms'
+    for file in file_list:
+        # 1. 提取币种名并过滤掉 'USDT' (适配之前的兼容性修复)
+        coin_name = os.path.basename(file).split('_')[0].replace('USDT', '')
+
+        # 🚀 提速点 1 & 2：只读取 open_time 和 close 列，并使用 pyarrow 引擎提速
+        # (如果没有安装 pyarrow 可以把 engine='pyarrow' 删掉，但建议通过 pip install pyarrow 安装)
+        df = pd.read_csv(file, usecols=['open_time', 'close'], engine='pyarrow')
+
         df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
         df.set_index('open_time', inplace=True)
 
-        # 提取 close 列作为该币种的主力价格线，与旧代码逻辑保持一致
-        df_coin = df[['close']].rename(columns={'close': coin_name})
+        # 🚀 提速点 3：【核心算法翻新】在单币种 1m 层面提前完成 4H 降频！
+        # 几百万行的计算在单个序列上极快，降频后立马从几十万行变成几千行
+        df_4h_coin = df['close'].resample('4h').agg(
+            open='first',
+            high='max',
+            low='min',
+            close='last'
+        )
 
-        dfs.append(df_coin)
+        # 将列名重命名为你后续回测引擎需要的标准格式
+        df_4h_coin.rename(columns={
+            'open': f"{coin_name}_open",
+            'high': f"{coin_name}_high",
+            'low': f"{coin_name}_low",
+            'close': coin_name
+        }, inplace=True)
 
-    # 1. 基础合并
-    price_df_1m_raw = pd.concat(dfs, axis=1).sort_index()
-    price_df_1m_raw = price_df_1m_raw.loc[:, ~price_df_1m_raw.columns.duplicated()]
+        dfs.append(df_4h_coin)
+
+    print("🚀 正在合并 4H K线数据...")
+    # 此时 dfs 里面的 dataframe 只有几千行，合并几乎是 0 耗时
+    price_df_4h_raw = pd.concat(dfs, axis=1).sort_index()
+
+    # 提取基础的主力币种名称列表（不带_open, _high后缀的列）
+    main_coins = [c for c in price_df_4h_raw.columns if not any(x in c for x in ['_open', '_high', '_low'])]
 
     # ==========================================
-    # 🎯 核心修正：锁定全局共有区间 (Intersection)
+    # 🎯 锁定全局共有区间 (Intersection)
     # ==========================================
-    common_start = max([price_df_1m_raw[c].first_valid_index() for c in price_df_1m_raw.columns])
-    common_end = min([price_df_1m_raw[c].last_valid_index() for c in price_df_1m_raw.columns])
+    common_start = max([price_df_4h_raw[c].first_valid_index() for c in main_coins])
+    common_end = min([price_df_4h_raw[c].last_valid_index() for c in main_coins])
 
-    price_df_1m = price_df_1m_raw.loc[common_start:common_end].copy()
+    price_df_4h = price_df_4h_raw.loc[common_start:common_end].copy()
 
     print(f"✅ 成功锁定公共时间窗口: {common_start} 至 {common_end}")
 
     # ==========================================
     # 🛠️ 数据质量与填充统计 (共有区间内)
     # ==========================================
-    total_1m_rows = len(price_df_1m)
-    missing_counts = price_df_1m.isna().sum()
+    total_4h_rows = len(price_df_4h)
+    missing_counts = price_df_4h.isna().sum()
 
-    print(f"\n🔍 【数据质量检测：共有区间内填充统计】 (总 1m K线数: {total_1m_rows})")
-    for c in price_df_1m.columns:
+    print(f"\n🔍 【数据质量检测：共有区间内填充统计】 (总 4H K线数: {total_4h_rows})")
+    for c in main_coins:
         missing = missing_counts[c]
-        fill_ratio = (missing / total_1m_rows) * 100
+        fill_ratio = (missing / total_4h_rows) * 100
         alert_flag = " ⚠️[流动性差/频繁断档]" if fill_ratio > 5.0 else ""
         print(f"   - {c:8s}: 真实缺失/需填充 {missing:>8d} 条 | 填充率 {fill_ratio:>6.2f}%{alert_flag}")
     print("-" * 50)
 
-    price_df_1m = price_df_1m.ffill()
+    # 对 4H 数据进行前向填充补齐缺失的 K 线
+    price_df_4h = price_df_4h.ffill()
 
     # ==========================================
-    # ⚠️ 优化点 1：基于1m数据提取 4h 的 OHLC 数据
-    # 🚀 [性能优化] 4 次独立 resample 合并为 1 次 agg, 单次扫描完成全部聚合
+    # 📈 基准表现 (Buy & Hold) 计算
     # ==========================================
-    df_4h_agg = price_df_1m.resample('4h').agg(['first', 'last', 'max', 'min'])
-    # MultiIndex columns: level 0 = 原列名, level 1 = 聚合函数名
-    # 显式 reindex 列序，确保与原版输出一致
-    df_4h_open = df_4h_agg.xs('first', axis=1, level=1)[price_df_1m.columns]
-    df_4h_close = df_4h_agg.xs('last', axis=1, level=1)[price_df_1m.columns]
-    df_4h_high = df_4h_agg.xs('max', axis=1, level=1)[price_df_1m.columns]
-    df_4h_low = df_4h_agg.xs('min', axis=1, level=1)[price_df_1m.columns]
-
-    # 组合为包含所有 OHLC 字段的大 DataFrame
-    price_df_4h = df_4h_close.copy()
-    for c in df_4h_close.columns:
-        price_df_4h[f"{c}_open"] = df_4h_open[c]
-        price_df_4h[f"{c}_high"] = df_4h_high[c]
-        price_df_4h[f"{c}_low"] = df_4h_low[c]
+    df_4h_close = price_df_4h[main_coins]
 
     if not df_4h_close.empty:
         print(f"\n📈 【共有区间内各标的表现 (Buy & Hold)】:")
@@ -86,9 +92,9 @@ def load_and_preprocess_data_new(file_list):
         max_drawdowns_pct = drawdowns.min() * 100
 
         total_pct_change = 0.0
-        num_coins = len(df_4h_close.columns)
+        num_coins = len(main_coins)
 
-        for c in df_4h_close.columns:
+        for c in main_coins:
             start_price = df_4h_close[c].iloc[0]
             end_price = df_4h_close[c].iloc[-1]
             pct_change = (end_price - start_price) / start_price * 100
@@ -116,7 +122,6 @@ def load_and_preprocess_data_new(file_list):
         print("=" * 50)
 
     return price_df_4h
-
 def load_and_preprocess_data(file_list):
     print("⏳ 正在解析并合并数据...")
     dfs = []
@@ -1540,7 +1545,24 @@ def run_grid_search(max_workers=15):
 
     # 彻底告别全局变量：把 file_list 和数据处理直接写在函数内部
     file_list = ["kline_data/BTC_ETH_1m.csv", "kline_data/DOGE_SOL_1m.csv", "kline_data/TON_XRP_1m.csv"]
-    file_list_new = ["kline_data/DOGEUSDT_1m_merged.csv", "kline_data/SOLUSDT_1m_merged.csv", "kline_data/TONUSDT_1m_merged.csv"]
+    file_list_new = [
+        "kline_data/BTCUSDT_1m_merged.csv",
+        "kline_data/ETHUSDT_1m_merged.csv",
+        "kline_data/BNBUSDT_1m_merged.csv",
+        "kline_data/XRPUSDT_1m_merged.csv",
+        "kline_data/SOLUSDT_1m_merged.csv",
+        "kline_data/ADAUSDT_1m_merged.csv",
+        "kline_data/DOGEUSDT_1m_merged.csv",
+        "kline_data/MATICUSDT_1m_merged.csv",
+        "kline_data/DOTUSDT_1m_merged.csv",
+        "kline_data/LTCUSDT_1m_merged.csv",
+        "kline_data/LINKUSDT_1m_merged.csv",
+        "kline_data/AVAXUSDT_1m_merged.csv",
+        "kline_data/UNIUSDT_1m_merged.csv",
+        "kline_data/ATOMUSDT_1m_merged.csv",
+        "kline_data/NEARUSDT_1m_merged.csv"
+    ]
+
     # ==========================================
     # 2. 内部固定：搜索空间与保存路径
     # ==========================================
@@ -1558,9 +1580,9 @@ def run_grid_search(max_workers=15):
     'MAX_WEIGHT': [0.05, 0.10, 0.12, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50]                 # 8个
 }
     save_dir = r'W:\project\python_project\oke_auto_trade\param_search_results'
-    df_4h_new = load_and_preprocess_data_new(file_list_new)  # 预热数据，确保后续搜索时内存中已有数据，无需重复加载
+    df_4h = load_and_preprocess_data_new(file_list_new)  # 预热数据，确保后续搜索时内存中已有数据，无需重复加载
 
-    df_4h = load_and_preprocess_data(file_list)
+    # df_4h = load_and_preprocess_data(file_list)
 
     df_len = len(df_4h)
     param_combinations = build_clean_param_grid(df_len)
