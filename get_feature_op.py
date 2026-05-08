@@ -2016,19 +2016,23 @@ def download_data():
     backtest_path = 'kline_data'
     base_file_path = 'origin_data.csv'
     is_reload = True
-    inst_id_list = ['ARB-USDT-SWAP', 'OP-USDT-SWAP'
-
-        , 'MANA-USDT-SWAP', 'SAND-USDT-SWAP'
-        , 'STRK-USDT-SWAP', 'ZK-USDT-SWAP'
-        , 'RAY-USDT-SWAP', 'ORCA-USDT-SWAP'
-
-        , 'BTC-USDT-SWAP',
-                    'DOGE-USDT-SWAP',
-                    'ETH-USDT-SWAP',
-                    'SOL-USDT-SWAP',
-                    'TON-USDT-SWAP',
-                    'XRP-USDT-SWAP'
-                    ]
+    inst_id_list = [
+        'BTC-USDT-SWAP',
+        'ETH-USDT-SWAP',
+        'BNB-USDT-SWAP',
+        'XRP-USDT-SWAP',
+        'SOL-USDT-SWAP',
+        'ADA-USDT-SWAP',
+        'DOGE-USDT-SWAP',
+        'MATIC-USDT-SWAP',
+        'DOT-USDT-SWAP',
+        'LTC-USDT-SWAP',
+        'LINK-USDT-SWAP',
+        'AVAX-USDT-SWAP',
+        'UNI-USDT-SWAP',
+        'ATOM-USDT-SWAP',
+        'NEAR-USDT-SWAP'
+    ]
     if not os.path.exists(backtest_path):
         os.makedirs(backtest_path)
     bar_list = ['1m']
@@ -2036,7 +2040,7 @@ def download_data():
     now = datetime.datetime.now()
     # 转换为可读性格式
     readable_time = now.strftime("%Y-%m-%d")
-    max_candles_list = [24 * 60 * 30 * 6]
+    max_candles_list = [24 * 60 * 30 * 60]
 
     for max_candles in max_candles_list:
         for bar in bar_list:

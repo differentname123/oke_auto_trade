@@ -7,7 +7,24 @@ import zipfile  # <--- 新增这行导入，用于校验压缩包完整性
 # ================= 配置区域 =================
 TARGET_FILES = ["kline_data/BTC_ETH_1m.csv", "kline_data/DOGE_SOL_1m.csv", "kline_data/TON_XRP_1m.csv"]
 # 自动解析列表涉及到的币，并拼接成 USDT 交易对 (例如: BTCUSDT, ETHUSDT)
-SYMBOLS = ["TONUSDT"]  # 预先添加已知的 TON 和 XRP 交易对
+SYMBOLS = [
+    "BTCUSDT",
+    "ETHUSDT",
+    "BNBUSDT",
+    "XRPUSDT",
+    "SOLUSDT",
+    "ADAUSDT",
+    "DOGEUSDT",
+    "MATICUSDT",
+    "DOTUSDT",
+    "LTCUSDT",
+    "LINKUSDT",
+    "AVAXUSDT",
+    "UNIUSDT",
+    "ATOMUSDT",
+    "NEARUSDT"
+]
+
 # for f in TARGET_FILES:
 #     # 提取文件名如 'BTC_ETH_1m.csv' -> 'BTC_ETH' -> ['BTC', 'ETH']
 #     base_name = f.split('/')[-1].replace('_1m.csv', '')
