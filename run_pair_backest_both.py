@@ -10,13 +10,13 @@ from datetime import timedelta, datetime
 # 🌐 全局交易模式控制
 # 支持三种模式: 'BOTH' (多空双做), 'LONG_ONLY' (只做多), 'SHORT_ONLY' (只做空)
 # ==========================================
-GLOBAL_TRADE_MODE = 'SHORT_ONLY'
+GLOBAL_TRADE_MODE = 'BOTH'
 
 
 import os
 import pandas as pd
 
-def load_and_preprocess_data_new(file_list, start_year=2023, end_year=2027):
+def load_and_preprocess_data_new(file_list, start_year=2020, end_year=2027):
     print("⏳ 正在极速解析并合并数据...")
     dfs = []
 
@@ -1730,7 +1730,7 @@ def run_grid_search(max_workers=15):
         "kline_data/ETHUSDT_1m_merged.csv",
         "kline_data/BNBUSDT_1m_merged.csv",
         "kline_data/XRPUSDT_1m_merged.csv",
-        # "kline_data/SOLUSDT_1m_merged.csv",
+        "kline_data/SOLUSDT_1m_merged.csv",
         "kline_data/ADAUSDT_1m_merged.csv",
         "kline_data/DOGEUSDT_1m_merged.csv",
         # # "kline_data/MATICUSDT_1m_merged.csv",
@@ -1770,7 +1770,7 @@ def run_grid_search(max_workers=15):
     keys = list(param_combinations[0].keys())  # 后续打印用
 
     # 文件名也相应改一下
-    filename = f"grid_search_{total_combos}_{GLOBAL_TRADE_MODE}.csv"
+    filename = f"grid_search_{total_combos}_{GLOBAL_TRADE_MODE}_new_pool.csv"
     save_path = os.path.join(save_dir, filename)
     if os.path.exists(save_path):
         result_df = pd.read_csv(save_path)
