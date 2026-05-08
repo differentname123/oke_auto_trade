@@ -16,7 +16,7 @@ GLOBAL_TRADE_MODE = 'SHORT_ONLY'
 import os
 import pandas as pd
 
-def load_and_preprocess_data_new(file_list):
+def load_and_preprocess_data_new(file_list, start_year=2023, end_year=2027):
     print("⏳ 正在极速解析并合并数据...")
     dfs = []
 
@@ -73,9 +73,17 @@ def load_and_preprocess_data_new(file_list):
     common_start = max(coin_starts)
     common_end = min(coin_ends)
 
+    # 🎯 新增：应用用户指定的时间边界约束
+    user_start_limit = pd.to_datetime(f"{start_year}-01-01 00:00:00")
+    user_end_limit = pd.to_datetime(f"{end_year}-12-31 23:59:59")
+
+    # 取数据本身共有区间和用户参数限制区间的交集
+    common_start = max(common_start, user_start_limit)
+    common_end = min(common_end, user_end_limit)
+
     price_df_4h = price_df_4h_raw.loc[common_start:common_end].copy()
 
-    print(f"\n✅ 成功锁定公共时间窗口: {common_start} 至 {common_end}")
+    print(f"\n✅ 成功锁定公共及自定义约束时间窗口: {common_start} 至 {common_end}")
 
     # ==========================================
     # 🛠️ 数据质量与填充统计 (共有区间内)
@@ -136,7 +144,6 @@ def load_and_preprocess_data_new(file_list):
         print("=" * 50)
 
     return price_df_4h
-
 def load_and_preprocess_data(file_list):
     print("⏳ 正在解析并合并数据...")
     dfs = []
@@ -1546,6 +1553,164 @@ def build_clean_param_grid(df_len):
     return clean_combos
 
 
+def build_clean_param_grid1(df_len=None):
+    """
+    跳过全量网格搜索，直接返回漏斗系统筛选出的 Top 5 最优参数组合，用于精准测试。
+    保留了 df_len 参数以兼容原代码的调用方式。
+    """
+
+    best_combos = [
+        # 🎖️ 排位 No.1 | Grid_No.60734 | 稳健综合分: 1.3209
+        {
+            'MOM_WINDOW': 72,
+            'VOL_WINDOW': 60,
+            'BTC_TREND_WINDOW': 720,
+            'MAX_WEIGHT': 0.15,
+            'TOP_K': 2
+        },
+
+        # 🎖️ 排位 No.2 | Grid_No.60728 | 稳健综合分: 1.3188
+        {
+            'MOM_WINDOW': 72,
+            'VOL_WINDOW': 60,
+            'BTC_TREND_WINDOW': 720,
+            'MAX_WEIGHT': 0.10,
+            'TOP_K': 2
+        },
+
+        # 🎖️ 排位 No.3 | Grid_No.60131 | 稳健综合分: 1.3184
+        {
+            'MOM_WINDOW': 72,
+            'VOL_WINDOW': 48,
+            'BTC_TREND_WINDOW': 60,
+            'MAX_WEIGHT': 0.05,
+            'TOP_K': 2
+        },
+
+        # 🎖️ 排位 No.4 | Grid_No.61112 | 稳健综合分: 1.3169
+        {
+            'MOM_WINDOW': 72,
+            'VOL_WINDOW': 84,
+            'BTC_TREND_WINDOW': 720,
+            'MAX_WEIGHT': 0.15,
+            'TOP_K': 2
+        },
+
+        # 🎖️ 排位 No.5 | Grid_No.61109 | 稳健综合分: 1.3166
+        {
+            'MOM_WINDOW': 72,
+            'VOL_WINDOW': 84,
+            'BTC_TREND_WINDOW': 720,
+            'MAX_WEIGHT': 0.12,
+            'TOP_K': 2
+        }
+    ]
+
+    return best_combos
+
+
+def append_benchmarks_to_existing_csv(result_csv_path, file_list):
+    """
+    在不重新回测的情况下，将全局基准表现附加到已有的网格搜索CSV结果中，并打印新增字段清单。
+    """
+    print("\n" + "═" * 78)
+    print(f"🛠️ 启动后处理：向回测结果注入基准指标")
+    print("═" * 78)
+
+    if not os.path.exists(result_csv_path):
+        print(f"❌ 找不到指定的CSV文件: {result_csv_path}")
+        return
+
+    print(f"📥 1. 正在读取已有的回测结果...")
+    results_df = pd.read_csv(result_csv_path)
+
+    # 【新增记录】：记录注入前的所有列名
+    original_columns = set(results_df.columns)
+
+    print(f"📊 2. 正在加载K线数据计算大盘基准 (仅需执行1次)...")
+    price_df_4h = load_and_preprocess_data_new(file_list)
+
+    # 提取纯收盘价计算基准
+    coins = [c for c in price_df_4h.columns if not any(s in c for s in ['_open', '_high', '_low'])]
+    df_4h_close = price_df_4h[coins]
+
+    print(f"🧮 3. 正在计算全局和各年度基准...")
+    roll_max = df_4h_close.cummax()
+    drawdowns = (df_4h_close - roll_max) / roll_max
+    max_drawdowns = drawdowns.min()
+
+    start_prices = df_4h_close.iloc[0]
+    end_prices = df_4h_close.iloc[-1]
+    pct_changes = (end_prices - start_prices) / start_prices
+
+    avg_pct_change = pct_changes.mean()
+    avg_mdd = max_drawdowns.mean()
+
+    # 将全局表现写入 DF
+    for c in coins:
+        results_df[f'benchmark_{c}_return'] = pct_changes[c]
+        results_df[f'benchmark_{c}_max_dd'] = max_drawdowns[c]
+
+    results_df['benchmark_avg_return'] = avg_pct_change
+    results_df['benchmark_avg_max_dd'] = avg_mdd
+
+    annual_benchmarks = {}
+    for year, group in df_4h_close.groupby(df_4h_close.index.year):
+        ys = group.iloc[0]
+        ye = group.iloc[-1]
+        y_pct = (ye - ys) / ys
+        annual_benchmarks[int(year)] = y_pct.mean()
+        results_df[f'benchmark_year_{year}_return'] = y_pct.mean()
+
+    print(f"✨ 4. 正在计算超额收益 (Alpha)...")
+    if 'total_return' in results_df.columns:
+        results_df['excess_total_return'] = results_df['total_return'] - results_df['benchmark_avg_return']
+
+    for year, b_ret in annual_benchmarks.items():
+        strat_col = f'year_{year}_return'
+        excess_col = f'year_{year}_excess_return'
+        if strat_col in results_df.columns:
+            results_df[excess_col] = results_df[strat_col] - b_ret
+
+    # 【核心逻辑】：对比列名差异，提取并整理新增字段
+    new_columns = set(results_df.columns)
+    added_columns = sorted(list(new_columns - original_columns))
+
+    print("\n" + "-" * 50)
+    print("📋 【本次成功注入的新增字段清单】:")
+
+    # 分类打印，让结构更清晰
+    coin_benchmarks = [c for c in added_columns if
+                       c.startswith('benchmark_') and not c.startswith('benchmark_year') and not c.startswith(
+                           'benchmark_avg')]
+    global_benchmarks = [c for c in added_columns if c.startswith('benchmark_avg')]
+    year_benchmarks = [c for c in added_columns if c.startswith('benchmark_year')]
+    excess_returns = [c for c in added_columns if 'excess' in c]
+
+    if coin_benchmarks:
+        print("  🔸 各标的基准 (Buy & Hold):")
+        for col in coin_benchmarks: print(f"      - {col}")
+
+    if global_benchmarks:
+        print("  🔸 大盘等权基准:")
+        for col in global_benchmarks: print(f"      - {col}")
+
+    if year_benchmarks:
+        print("  🔸 各年度等权基准:")
+        for col in year_benchmarks: print(f"      - {col}")
+
+    if excess_returns:
+        print("  🏆 超额收益 (策略 vs 大盘基准):")
+        for col in excess_returns: print(f"      - {col}")
+    print("-" * 50 + "\n")
+
+    output_path = result_csv_path.replace('.csv', '_with_Benchmark.csv')
+    results_df.to_csv(output_path, index=False, encoding='utf-8-sig')
+
+    print(f"✅ 注入完成！共更新 {len(results_df)} 条参数记录，新增了 {len(added_columns)} 个分析字段。")
+    print(f"💾 新文件已保存至: {output_path}")
+    print("═" * 78)
+
 def run_grid_search(max_workers=15):
     """
     执行参数网格搜索并自动持久化保存结果
@@ -1565,17 +1730,17 @@ def run_grid_search(max_workers=15):
         "kline_data/ETHUSDT_1m_merged.csv",
         "kline_data/BNBUSDT_1m_merged.csv",
         "kline_data/XRPUSDT_1m_merged.csv",
-        "kline_data/SOLUSDT_1m_merged.csv",
+        # "kline_data/SOLUSDT_1m_merged.csv",
         "kline_data/ADAUSDT_1m_merged.csv",
         "kline_data/DOGEUSDT_1m_merged.csv",
-        # "kline_data/MATICUSDT_1m_merged.csv",
-        "kline_data/DOTUSDT_1m_merged.csv",
-        "kline_data/LTCUSDT_1m_merged.csv",
-        "kline_data/LINKUSDT_1m_merged.csv",
-        "kline_data/AVAXUSDT_1m_merged.csv",
-        "kline_data/UNIUSDT_1m_merged.csv",
-        "kline_data/ATOMUSDT_1m_merged.csv",
-        "kline_data/NEARUSDT_1m_merged.csv"
+        # # "kline_data/MATICUSDT_1m_merged.csv",
+        # "kline_data/DOTUSDT_1m_merged.csv",
+        # "kline_data/LTCUSDT_1m_merged.csv",
+        # "kline_data/LINKUSDT_1m_merged.csv",
+        # "kline_data/AVAXUSDT_1m_merged.csv",
+        # "kline_data/UNIUSDT_1m_merged.csv",
+        # "kline_data/ATOMUSDT_1m_merged.csv",
+        # "kline_data/NEARUSDT_1m_merged.csv"
     ]
 
     # ==========================================
@@ -1673,7 +1838,7 @@ def run_grid_search(max_workers=15):
 
     # 导出到指定目录
     aggregated_df.to_csv(save_path, index=False, encoding='utf-8-sig')
-
+    append_benchmarks_to_existing_csv(save_path, file_list_new)
     total_time = time.time() - start_time
     print("═" * 70)
     print(f"🎉 搜索圆满结束！")
