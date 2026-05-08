@@ -15,7 +15,7 @@ from collections import defaultdict
 # ═══════════════════════════════════════════════════════════════════════════
 # 配置区
 # ═══════════════════════════════════════════════════════════════════════════
-RESULTS_PATH = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_147798_BOTH.csv'
+RESULTS_PATH = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_147798_BOTH_with_Benchmark.csv'
 OUTPUT_DIR   = r'W:\project\python_project\oke_auto_trade\param_search_results\evaluation'
 
 # ---- Layer 1: 基础健康度过滤 (只淘汰反常，不筛选优秀) ----
@@ -471,6 +471,9 @@ def print_rejection_summary(df, layer_col, reason_col, layer_name):
 # ═══════════════════════════════════════════════════════════════════════════
 # 报告打印 (终极卡片版)
 # ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
+# 报告打印 (终极卡片版)
+# ═══════════════════════════════════════════════════════════════════════════
 def print_top_candidates(df, primary_obj, varying_params, top_n=5):
     print("\n" + "═" * 80)
     print(f"🏆 最终推荐候选 (按 稳健综合分 排序，仅展示完美通过候选)")
@@ -556,16 +559,21 @@ def print_top_candidates(df, primary_obj, varying_params, top_n=5):
         print("\n [📅 年度表现拆解]")
         year_cols = [c for c in df.columns if c.startswith('year_') and c.endswith('_return')]
         if year_cols:
-            years = sorted([int(c.split('_')[1]) for c in year_cols])
+            # 修改 1：增加 set() 去重，修复重复年份打印
+            years = sorted(list(set([int(c.split('_')[1]) for c in year_cols])))
             for y in years:
                 y_ret = row.get(f'year_{y}_return', np.nan)
                 y_dd = row.get(f'year_{y}_max_dd', np.nan)
-                y_bench_ret = row.get(f'year_{y}_benchmark_return', np.nan)
-                y_bench_dd = row.get(f'year_{y}_benchmark_dd', np.nan)
+
+                # 修改 2：修正基准字段名读取
+                y_bench_ret = row.get(f'benchmark_year_{y}_return', np.nan)
+
+                # 修改 3：直接读取现成的超额收益字段，而不是手动相减
+                excess_ret = row.get(f'year_{y}_excess_return', np.nan)
 
                 if pd.notna(y_bench_ret):
-                    excess_ret = y_ret - y_bench_ret
-                    bench_str = f" | 基准收益: {fmt_pct(y_bench_ret):>7} (基准回撤 {fmt_pct(y_bench_dd):>7}) | 🌟超额收益: {fmt_pct(excess_ret):>7}"
+                    # 修改 4：去除了不存在的基准回撤变量 y_bench_dd
+                    bench_str = f" | 基准收益: {fmt_pct(y_bench_ret):>7} | 🌟超额收益: {fmt_pct(excess_ret):>7}"
                 else:
                     bench_str = ""
 
@@ -596,7 +604,6 @@ def print_top_candidates(df, primary_obj, varying_params, top_n=5):
             print("   ► (无标的拆解数据)")
 
         print("▲" * 80 + "\n")
-
 # ═══════════════════════════════════════════════════════════════════════════
 # 主流程
 # ═══════════════════════════════════════════════════════════════════════════

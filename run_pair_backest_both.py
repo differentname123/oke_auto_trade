@@ -1538,9 +1538,119 @@ def run_grid_search(max_workers=15):
 
     return aggregated_df
 
-# ==========================================
-# 实际调用示例 (极简到极致)
-# ==========================================
+
+import pandas as pd
+import os
+
+
+def append_benchmarks_to_existing_csv(result_csv_path, file_list):
+    """
+    在不重新回测的情况下，将全局基准表现附加到已有的网格搜索CSV结果中，并打印新增字段清单。
+    """
+    print("\n" + "═" * 78)
+    print(f"🛠️ 启动后处理：向回测结果注入基准指标")
+    print("═" * 78)
+
+    if not os.path.exists(result_csv_path):
+        print(f"❌ 找不到指定的CSV文件: {result_csv_path}")
+        return
+
+    print(f"📥 1. 正在读取已有的回测结果...")
+    results_df = pd.read_csv(result_csv_path)
+
+    # 【新增记录】：记录注入前的所有列名
+    original_columns = set(results_df.columns)
+
+    print(f"📊 2. 正在加载K线数据计算大盘基准 (仅需执行1次)...")
+    price_df_4h = load_and_preprocess_data(file_list)
+
+    # 提取纯收盘价计算基准
+    coins = [c for c in price_df_4h.columns if not any(s in c for s in ['_open', '_high', '_low'])]
+    df_4h_close = price_df_4h[coins]
+
+    print(f"🧮 3. 正在计算全局和各年度基准...")
+    roll_max = df_4h_close.cummax()
+    drawdowns = (df_4h_close - roll_max) / roll_max
+    max_drawdowns = drawdowns.min()
+
+    start_prices = df_4h_close.iloc[0]
+    end_prices = df_4h_close.iloc[-1]
+    pct_changes = (end_prices - start_prices) / start_prices
+
+    avg_pct_change = pct_changes.mean()
+    avg_mdd = max_drawdowns.mean()
+
+    # 将全局表现写入 DF
+    for c in coins:
+        results_df[f'benchmark_{c}_return'] = pct_changes[c]
+        results_df[f'benchmark_{c}_max_dd'] = max_drawdowns[c]
+
+    results_df['benchmark_avg_return'] = avg_pct_change
+    results_df['benchmark_avg_max_dd'] = avg_mdd
+
+    annual_benchmarks = {}
+    for year, group in df_4h_close.groupby(df_4h_close.index.year):
+        ys = group.iloc[0]
+        ye = group.iloc[-1]
+        y_pct = (ye - ys) / ys
+        annual_benchmarks[int(year)] = y_pct.mean()
+        results_df[f'benchmark_year_{year}_return'] = y_pct.mean()
+
+    print(f"✨ 4. 正在计算超额收益 (Alpha)...")
+    if 'total_return' in results_df.columns:
+        results_df['excess_total_return'] = results_df['total_return'] - results_df['benchmark_avg_return']
+
+    for year, b_ret in annual_benchmarks.items():
+        strat_col = f'year_{year}_return'
+        excess_col = f'year_{year}_excess_return'
+        if strat_col in results_df.columns:
+            results_df[excess_col] = results_df[strat_col] - b_ret
+
+    # 【核心逻辑】：对比列名差异，提取并整理新增字段
+    new_columns = set(results_df.columns)
+    added_columns = sorted(list(new_columns - original_columns))
+
+    print("\n" + "-" * 50)
+    print("📋 【本次成功注入的新增字段清单】:")
+
+    # 分类打印，让结构更清晰
+    coin_benchmarks = [c for c in added_columns if
+                       c.startswith('benchmark_') and not c.startswith('benchmark_year') and not c.startswith(
+                           'benchmark_avg')]
+    global_benchmarks = [c for c in added_columns if c.startswith('benchmark_avg')]
+    year_benchmarks = [c for c in added_columns if c.startswith('benchmark_year')]
+    excess_returns = [c for c in added_columns if 'excess' in c]
+
+    if coin_benchmarks:
+        print("  🔸 各标的基准 (Buy & Hold):")
+        for col in coin_benchmarks: print(f"      - {col}")
+
+    if global_benchmarks:
+        print("  🔸 大盘等权基准:")
+        for col in global_benchmarks: print(f"      - {col}")
+
+    if year_benchmarks:
+        print("  🔸 各年度等权基准:")
+        for col in year_benchmarks: print(f"      - {col}")
+
+    if excess_returns:
+        print("  🏆 超额收益 (策略 vs 大盘基准):")
+        for col in excess_returns: print(f"      - {col}")
+    print("-" * 50 + "\n")
+
+    output_path = result_csv_path.replace('.csv', '_with_Benchmark.csv')
+    results_df.to_csv(output_path, index=False, encoding='utf-8-sig')
+
+    print(f"✅ 注入完成！共更新 {len(results_df)} 条参数记录，新增了 {len(added_columns)} 个分析字段。")
+    print(f"💾 新文件已保存至: {output_path}")
+    print("═" * 78)
+
+
 if __name__ == "__main__":
-    # 现在外部干干净净，什么都不用准备，直接执行
-    run_grid_search()
+    # K线文件列表 (和你跑回测时一模一样)
+    file_list = ["kline_data/BTC_ETH_1m.csv", "kline_data/DOGE_SOL_1m.csv", "kline_data/TON_XRP_1m.csv"]
+
+    # 你跑完的、需要加字段的那个 csv 文件路径
+    target_csv_file = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_147798_SHORT_ONLY.csv'
+
+    append_benchmarks_to_existing_csv(target_csv_file, file_list)
