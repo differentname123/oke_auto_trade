@@ -12,6 +12,10 @@ from datetime import timedelta, datetime
 # ==========================================
 GLOBAL_TRADE_MODE = 'SHORT_ONLY'
 
+
+import os
+import pandas as pd
+
 def load_and_preprocess_data_new(file_list):
     print("⏳ 正在极速解析并合并数据...")
     dfs = []
@@ -56,12 +60,22 @@ def load_and_preprocess_data_new(file_list):
     # ==========================================
     # 🎯 锁定全局共有区间 (Intersection)
     # ==========================================
-    common_start = max([price_df_4h_raw[c].first_valid_index() for c in main_coins])
-    common_end = min([price_df_4h_raw[c].last_valid_index() for c in main_coins])
+    print("\n📅 【各币对原始有效起止时间】(用于排查谁拉了后腿):")
+    coin_starts = []
+    coin_ends = []
+    for c in main_coins:
+        c_start = price_df_4h_raw[c].first_valid_index()
+        c_end = price_df_4h_raw[c].last_valid_index()
+        coin_starts.append(c_start)
+        coin_ends.append(c_end)
+        print(f"   - {c:8s}: 起始时间 {c_start} | 截止时间 {c_end}")
+
+    common_start = max(coin_starts)
+    common_end = min(coin_ends)
 
     price_df_4h = price_df_4h_raw.loc[common_start:common_end].copy()
 
-    print(f"✅ 成功锁定公共时间窗口: {common_start} 至 {common_end}")
+    print(f"\n✅ 成功锁定公共时间窗口: {common_start} 至 {common_end}")
 
     # ==========================================
     # 🛠️ 数据质量与填充统计 (共有区间内)
@@ -122,6 +136,7 @@ def load_and_preprocess_data_new(file_list):
         print("=" * 50)
 
     return price_df_4h
+
 def load_and_preprocess_data(file_list):
     print("⏳ 正在解析并合并数据...")
     dfs = []
@@ -1553,7 +1568,7 @@ def run_grid_search(max_workers=15):
         "kline_data/SOLUSDT_1m_merged.csv",
         "kline_data/ADAUSDT_1m_merged.csv",
         "kline_data/DOGEUSDT_1m_merged.csv",
-        "kline_data/MATICUSDT_1m_merged.csv",
+        # "kline_data/MATICUSDT_1m_merged.csv",
         "kline_data/DOTUSDT_1m_merged.csv",
         "kline_data/LTCUSDT_1m_merged.csv",
         "kline_data/LINKUSDT_1m_merged.csv",
