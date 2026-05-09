@@ -692,8 +692,11 @@ def run_backtest_single_year(df, year, prev_state, custom_params, next_year_coin
                         "reason": "Signal Exit Short"
                     })
 
+        # 判断是否为当前年份最后一条记录 (修复 BUG 3)
+        is_last_bar_of_year = (i == len(df) - 1)
+
         # 开仓逻辑 (多)
-        if top_long_coins:
+        if top_long_coins and not (is_last_bar_of_year and next_year_coins is not None):
             inv_vols = [1.0 / vol_arr[i, coin_to_idx[c]] if vol_arr[i, coin_to_idx[c]] > 0 else 0 for c in
                         top_long_coins]
             total_inv_vol = sum(inv_vols)
@@ -703,7 +706,7 @@ def run_backtest_single_year(df, year, prev_state, custom_params, next_year_coin
                     target_weight = min(inv_vols[k_] / total_inv_vol, MAX_WEIGHT)
                     target_val = current_equity * target_weight
                     buy_val = target_val / (1 + FEE_RATE) if cash >= target_val / (1 + FEE_RATE) else cash / (
-                                1 + FEE_RATE)
+                            1 + FEE_RATE)
                     if buy_val > 1.0:
                         fee = buy_val * FEE_RATE
                         buy_amount = buy_val / prices_row[idx_c]
@@ -716,7 +719,7 @@ def run_backtest_single_year(df, year, prev_state, custom_params, next_year_coin
                         })
 
         # 开仓逻辑 (空)
-        if top_short_coins:
+        if top_short_coins and not (is_last_bar_of_year and next_year_coins is not None):
             inv_vols = [1.0 / vol_arr[i, coin_to_idx[c]] if vol_arr[i, coin_to_idx[c]] > 0 else 0 for c in
                         top_short_coins]
             total_inv_vol = sum(inv_vols)
@@ -761,13 +764,21 @@ def run_backtest_single_year(df, year, prev_state, custom_params, next_year_coin
                 })
                 positions_arr[idx_c] = 0
 
+        # 修复 BUG 2：清退完成后，补记最后一根 Bar 的真实 equity
+        if n_steps > 0:
+            equity_values[-1] = cash + np.dot(positions_arr, last_prices_row)
+
     # 🔴 更新持仓与 PNL 追踪
     for log in trade_logs:
         c, event, direction, amt, price, fee, time_ = log['coin'], log['event'], log['direction'], log['amount'], log[
             'price'], log['fee'], log['time']
         if event == 'OPEN':
             coin_states[c]['qty'] = amt
-            coin_states[c]['cost'] = price + (fee / amt) if direction == 'LONG' else price - (fee / amt)
+            # 修复 BUG 4：防止除零报错
+            if amt > 0:
+                coin_states[c]['cost'] = price + (fee / amt) if direction == 'LONG' else price - (fee / amt)
+            else:
+                coin_states[c]['cost'] = price
             coin_states[c]['side'] = direction
             coin_states[c]['entry_time'] = time_
         elif event == 'CLOSE':
@@ -788,7 +799,7 @@ def run_backtest_single_year(df, year, prev_state, custom_params, next_year_coin
 
     curve_df = pd.DataFrame({'equity': equity_values}, index=equity_times)
     curve_df.index.name = 'time'
-    curve_df['btc_trend_on'] = btc_trend_arr[start_trade_idx:]  # ➕ 加这一行
+    curve_df['btc_trend_on'] = btc_trend_arr[start_trade_idx:]
 
     return new_state, trade_logs, curve_df
 
@@ -856,8 +867,12 @@ def _parallel_worker_task(i, params, yearly_data_cache, global_price_df, pool_ye
             if not curve_df.empty:
                 all_curves.append(curve_df)
 
-        # 完美缝合所有年份记录
-        full_curve_df = pd.concat(all_curves)
+        # 修复 BUG 1：判断 all_curves 是否为空
+        if not all_curves:
+            return False, None, params, param_name, "所有年份均无可交易数据(受预热等约束)"
+
+        # 完美缝合所有年份记录 (修复 BUG 5: 显式 sort_index)
+        full_curve_df = pd.concat(all_curves).sort_index()
         full_curve_df = full_curve_df[~full_curve_df.index.duplicated(keep='last')]
         logs_df = pd.DataFrame(all_logs)
 
