@@ -7,142 +7,153 @@ import numpy as np
 from datetime import timedelta
 
 # ==========================================
-# 🌐 全局交易模式控制
-# 支持三种模式: 'BOTH' (多空双做), 'LONG_ONLY' (只做多), 'SHORT_ONLY' (只做空)
+# 🌐 全局配置与交易模式控制
 # ==========================================
 GLOBAL_TRADE_MODE = 'BOTH'
+INITIAL_CAPITAL = 10000.0
+FEE_RATE = 0.0005
 
-
-def load_and_preprocess_data_new(file_list, start_year=2020, end_year=2027):
-    print("⏳ 正在极速解析并合并数据...")
-    dfs = []
-
-    for file in file_list:
-        coin_name = os.path.basename(file).split('_')[0].replace('USDT', '')
-
-        # 🚀 提速点 1 & 2：只读取 open_time 和 close 列，并使用 pyarrow 引擎提速
-        df = pd.read_csv(file, usecols=['open_time', 'close'], engine='pyarrow')
-
-        df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
-        df.set_index('open_time', inplace=True)
-
-        # 🚀 提速点 3：【核心算法翻新】在单币种 1m 层面提前完成 4H 降频！
-        df_4h_coin = df['close'].resample('4h').agg(
-            open='first',
-            high='max',
-            low='min',
-            close='last'
-        )
-
-        df_4h_coin.rename(columns={
-            'open': f"{coin_name}_open",
-            'high': f"{coin_name}_high",
-            'low': f"{coin_name}_low",
-            'close': coin_name
-        }, inplace=True)
-
-        dfs.append(df_4h_coin)
-
-    print("🚀 正在合并 4H K线数据...")
-    price_df_4h_raw = pd.concat(dfs, axis=1).sort_index()
-
-    main_coins = [c for c in price_df_4h_raw.columns if not any(x in c for x in ['_open', '_high', '_low'])]
-
-    # ==========================================
-    # 🎯 锁定全局共有区间 (Intersection)
-    # ==========================================
-    print("\n📅 【各币对原始有效起止时间】(用于排查谁拉了后腿):")
-    coin_starts = []
-    coin_ends = []
-    for c in main_coins:
-        c_start = price_df_4h_raw[c].first_valid_index()
-        c_end = price_df_4h_raw[c].last_valid_index()
-        coin_starts.append(c_start)
-        coin_ends.append(c_end)
-        print(f"   - {c:8s}: 起始时间 {c_start} | 截止时间 {c_end}")
-
-    common_start = max(coin_starts)
-    common_end = min(coin_ends)
-
-    user_start_limit = pd.to_datetime(f"{start_year}-01-01 00:00:00")
-    user_end_limit = pd.to_datetime(f"{end_year}-12-31 23:59:59")
-
-    common_start = max(common_start, user_start_limit)
-    common_end = min(common_end, user_end_limit)
-
-    price_df_4h = price_df_4h_raw.loc[common_start:common_end].copy()
-
-    print(f"\n✅ 成功锁定公共及自定义约束时间窗口: {common_start} 至 {common_end}")
-
-    # ==========================================
-    # 🛠️ 数据质量与填充统计 (共有区间内)
-    # ==========================================
-    total_4h_rows = len(price_df_4h)
-    missing_counts = price_df_4h.isna().sum()
-
-    print(f"\n🔍 【数据质量检测：共有区间内填充统计】 (总 4H K线数: {total_4h_rows})")
-    for c in main_coins:
-        missing = missing_counts[c]
-        fill_ratio = (missing / total_4h_rows) * 100
-        alert_flag = " ⚠️[流动性差/频繁断档]" if fill_ratio > 5.0 else ""
-        print(f"   - {c:8s}: 真实缺失/需填充 {missing:>8d} 条 | 填充率 {fill_ratio:>6.2f}%{alert_flag}")
-    print("-" * 50)
-
-    price_df_4h = price_df_4h.ffill()
-
-    # ==========================================
-    # 📈 基准表现 (Buy & Hold) 计算
-    # ==========================================
-    df_4h_close = price_df_4h[main_coins]
-
-    if not df_4h_close.empty:
-        print(f"\n📈 【共有区间内各标的表现 (Buy & Hold)】:")
-        roll_max = df_4h_close.cummax()
-        drawdowns = (df_4h_close - roll_max) / roll_max
-        max_drawdowns_pct = drawdowns.min() * 100
-
-        total_pct_change = 0.0
-        num_coins = len(main_coins)
-
-        for c in main_coins:
-            start_price = df_4h_close[c].iloc[0]
-            end_price = df_4h_close[c].iloc[-1]
-            pct_change = (end_price - start_price) / start_price * 100
-            total_pct_change += pct_change
-            mdd = max_drawdowns_pct[c]
-            print(f"   - {c:8s}: 涨跌幅 {pct_change:>8.2f}%  |  最大回撤 {mdd:>8.2f}%")
-
-        avg_pct_change = total_pct_change / num_coins if num_coins > 0 else 0.0
-        avg_mdd = max_drawdowns_pct.mean() if num_coins > 0 else 0.0
-
-        print("-" * 50)
-        print(f"   >>> 📊 基准表现 (等权 Buy & Hold):")
-        print(f"            平均涨跌幅: {avg_pct_change:+.2f}%")
-        print(f"            平均最大回撤: {avg_mdd:.2f}%")
-
-        print("-" * 50)
-        print(f"   >>> 📅 【全局基准：各年度等权大盘表现】")
-        for year, group in df_4h_close.groupby(df_4h_close.index.year):
-            start_prices = group.iloc[0]
-            end_prices = group.iloc[-1]
-            pct_changes = (end_prices - start_prices) / start_prices * 100
-            avg_beta = pct_changes.mean()
-            coin_details = ", ".join([f"{c}: {pct:+.1f}%" for c, pct in pct_changes.items()])
-            print(f"            ► {year}年: {avg_beta:>+7.2f}% | [{coin_details}]")
-        print("=" * 50)
-
-    return price_df_4h
+# 🔴 [核心改动] 动态标的池配置：支持每年更换标的
+YEARLY_POOL_CONFIG = {
+  "2021": [
+    "kline_data/BTCUSDT_1m_merged.csv",
+    "kline_data/ETHUSDT_1m_merged.csv",
+    "kline_data/XRPUSDT_1m_merged.csv",
+    "kline_data/LTCUSDT_1m_merged.csv",
+    "kline_data/BCHUSDT_1m_merged.csv",
+    "kline_data/ADAUSDT_1m_merged.csv"
+  ],
+  "2022": [
+    "kline_data/BTCUSDT_1m_merged.csv",
+    "kline_data/ETHUSDT_1m_merged.csv",
+    "kline_data/SOLUSDT_1m_merged.csv",
+    "kline_data/BNBUSDT_1m_merged.csv",
+    "kline_data/ADAUSDT_1m_merged.csv",
+    "kline_data/XRPUSDT_1m_merged.csv"
+  ],
+  "2023": [
+    "kline_data/BTCUSDT_1m_merged.csv",
+    "kline_data/ETHUSDT_1m_merged.csv",
+    "kline_data/BNBUSDT_1m_merged.csv",
+    "kline_data/XRPUSDT_1m_merged.csv",
+    "kline_data/DOGEUSDT_1m_merged.csv",
+    "kline_data/ADAUSDT_1m_merged.csv"
+  ],
+  "2024": [
+    "kline_data/BTCUSDT_1m_merged.csv",
+    "kline_data/ETHUSDT_1m_merged.csv",
+    "kline_data/SOLUSDT_1m_merged.csv",
+    "kline_data/BNBUSDT_1m_merged.csv",
+    "kline_data/XRPUSDT_1m_merged.csv",
+    "kline_data/DOGEUSDT_1m_merged.csv"
+  ],
+  "2025": [
+    "kline_data/BTCUSDT_1m_merged.csv",
+    "kline_data/ETHUSDT_1m_merged.csv",
+    "kline_data/SOLUSDT_1m_merged.csv",
+    "kline_data/XRPUSDT_1m_merged.csv",
+    "kline_data/BNBUSDT_1m_merged.csv",
+    "kline_data/DOGEUSDT_1m_merged.csv"
+  ],
+  "2026": [
+    "kline_data/BTCUSDT_1m_merged.csv",
+    "kline_data/ETHUSDT_1m_merged.csv",
+    "kline_data/SOLUSDT_1m_merged.csv",
+    "kline_data/XRPUSDT_1m_merged.csv",
+    "kline_data/BNBUSDT_1m_merged.csv",
+    "kline_data/DOGEUSDT_1m_merged.csv"
+  ]
+}
 
 
 # ==========================================
-# 🆕 评价指标辅助函数 (Helper Functions)
+# 🔴 核心改动 1: 环境预热与数据组装层
+# ==========================================
+def prepare_environment(pool_config):
+    print("\n" + "═" * 78)
+    print("⏳ 正在构建全周期动态标的池环境 (预加载与预热推导)...")
+    print("═" * 78)
+
+    yearly_cache = {}
+    min_warmup_bars = float('inf')
+    trading_dfs = []
+
+    for year_str, file_list in pool_config.items():
+        year = int(year_str)
+        print(f"   ► 解析 {year} 年标的池数据...")
+        dfs = []
+
+        for file in file_list:
+            if not os.path.exists(file):
+                print(f"     ⚠️ 文件未找到，请确保路径正确: {file}")
+                continue
+
+            coin_name = os.path.basename(file).split('_')[0].replace('USDT', '')
+            df = pd.read_csv(file, usecols=['open_time', 'close'], engine='pyarrow')
+            df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
+            df.set_index('open_time', inplace=True)
+
+            df_4h_coin = df['close'].resample('4h').agg(
+                open='first', high='max', low='min', close='last'
+            )
+            df_4h_coin.rename(columns={
+                'open': f"{coin_name}_open",
+                'high': f"{coin_name}_high",
+                'low': f"{coin_name}_low",
+                'close': coin_name
+            }, inplace=True)
+            dfs.append(df_4h_coin)
+
+        df_raw = pd.concat(dfs, axis=1).sort_index()
+        main_coins = [c for c in df_raw.columns if not any(x in c for x in ['_open', '_high', '_low'])]
+
+        # 🎯 锁定当前年份数据的公共区间
+        coin_starts = [df_raw[c].first_valid_index() for c in main_coins]
+        coin_ends = [df_raw[c].last_valid_index() for c in main_coins]
+        common_start = max(coin_starts)
+        common_end = min(coin_ends)
+
+        # 截断截止时间：不能超过该年的 12-31 23:59:59
+        year_end_limit = pd.to_datetime(f"{year}-12-31 23:59:59")
+        common_end = min(common_end, year_end_limit)
+
+        df_year = df_raw.loc[common_start:common_end].ffill()
+
+        # 计算预热 Bar 数（公共起点 -> 该年 1月1日 的 K线数）
+        year_start_time = pd.to_datetime(f"{year}-01-01 00:00:00")
+        warmup_data = df_year.loc[:year_start_time]
+        warmup_bars = len(warmup_data) - 1 if len(warmup_data) > 0 else 0
+
+        print(f"      - 公共最大起始: {common_start} | 跨年截止: {common_end}")
+        print(f"      - 该年可用预热 Bar 数: {warmup_bars}")
+
+        if warmup_bars < min_warmup_bars:
+            min_warmup_bars = warmup_bars
+
+        yearly_cache[year] = df_year
+
+        # 只取交易期的数据组合成全局 price_df，用于后续评估 MFE/MAE
+        trade_period = df_year.loc[year_start_time:common_end]
+        if not trade_period.empty:
+            trading_dfs.append(trade_period)
+
+    print(f"\n✅ 成功锁定全局最小可用预热 Bar 数为: {min_warmup_bars}")
+
+    print(f"🚀 正在合并全局指标分析专用 Price DataFrame...")
+    # 使用 outer join 合并全局价格，因为不同年份标的会变
+    global_price_df = pd.concat(trading_dfs, axis=0)
+    global_price_df = global_price_df[~global_price_df.index.duplicated(keep='first')]
+
+    return yearly_cache, global_price_df, min_warmup_bars
+
+
+# ==========================================
+# 评价指标辅助函数 (保留原逻辑)
 # ==========================================
 def _compute_gini(values):
-    if values is None or len(values) == 0:
-        return np.nan
+    if values is None or len(values) == 0: return np.nan
     arr = np.abs(np.asarray(values, dtype=float))
-    if arr.sum() == 0:
-        return 0.0
+    if arr.sum() == 0: return 0.0
     sorted_arr = np.sort(arr)
     n = len(sorted_arr)
     index = np.arange(1, n + 1)
@@ -150,13 +161,11 @@ def _compute_gini(values):
 
 
 def _compute_underwater_periods(curve_df):
-    if curve_df.empty:
-        return 0.0, 0.0, []
+    if curve_df.empty: return 0.0, 0.0, []
     cum_max = curve_df['equity'].cummax()
     drawdown = (curve_df['equity'] - cum_max) / cum_max
     underwater = drawdown < -1e-9
-    if not underwater.any():
-        return 0.0, 0.0, []
+    if not underwater.any(): return 0.0, 0.0, []
 
     periods = []
     in_uw, start_uw = False, None
@@ -168,23 +177,17 @@ def _compute_underwater_periods(curve_df):
             in_uw = False
     if in_uw:
         periods.append((underwater.index[-1] - start_uw).total_seconds() / 86400.0)
-
-    if not periods:
-        return 0.0, 0.0, []
+    if not periods: return 0.0, 0.0, []
     return float(max(periods)), float(np.mean(periods)), periods
 
 
 def _compute_time_in_market(logs_df, time_index):
-    if logs_df is None or logs_df.empty or len(time_index) == 0:
-        return 0.0
+    if logs_df is None or logs_df.empty or len(time_index) == 0: return 0.0
     logs_sorted = logs_df.sort_values('time').reset_index(drop=True)
-    events = [(row['time'], row['coin'], row['action'], row['amount'])
-              for _, row in logs_sorted.iterrows()]
-
+    events = [(row['time'], row['coin'], row['action'], row['amount']) for _, row in logs_sorted.iterrows()]
     holdings = {}
     in_market = np.zeros(len(time_index), dtype=bool)
     event_idx = 0
-
     for i, t in enumerate(time_index):
         while event_idx < len(events) and events[event_idx][0] <= t:
             _, coin, action, amt = events[event_idx]
@@ -192,28 +195,21 @@ def _compute_time_in_market(logs_df, time_index):
                 holdings[coin] = holdings.get(coin, 0) + amt
             else:
                 holdings[coin] = holdings.get(coin, 0) - amt
-            if abs(holdings.get(coin, 0)) < 1e-9:
-                holdings[coin] = 0
+            if abs(holdings.get(coin, 0)) < 1e-9: holdings[coin] = 0
             event_idx += 1
         in_market[i] = any(abs(qty) > 1e-9 for qty in holdings.values())
-
     return float(in_market.sum() / len(in_market))
 
 
 def _compute_mae_mfe(logs_df, price_df):
     out = {'mae': [], 'mfe': [], 'holding_h': []}
-    if logs_df is None or logs_df.empty:
-        return out
-
+    if logs_df is None or logs_df.empty: return out
     logs_sorted = logs_df.sort_values('time').reset_index(drop=True)
     states = {}
-
     for _, log in logs_sorted.iterrows():
-        c, t, p = log['coin'], log['time'], log['price']
-        amt = log['amount']
-        event = log.get('event', None)
-        direction = log.get('direction', 'LONG')
-
+        c, t, p, amt, event, direction = log['coin'], log['time'], log['price'], log['amount'], log.get('event',
+                                                                                                        None), log.get(
+            'direction', 'LONG')
         if event == 'OPEN':
             states[c] = {'qty': amt, 'entry_p': p, 'entry': t, 'side': direction}
         elif event == 'CLOSE':
@@ -222,7 +218,6 @@ def _compute_mae_mfe(logs_df, price_df):
                 entry_p = states[c]['entry_p']
                 side = states[c]['side']
                 out['holding_h'].append((t - entry_t).total_seconds() / 3600.0)
-
                 if f"{c}_high" in price_df.columns and f"{c}_low" in price_df.columns:
                     period = price_df.loc[entry_t:t]
                     if not period.empty and entry_p > 0:
@@ -234,13 +229,12 @@ def _compute_mae_mfe(logs_df, price_df):
                         else:
                             out['mfe'].append((entry_p - pl) / entry_p)
                             out['mae'].append((entry_p - ph) / entry_p)
-
                 states[c] = {'qty': 0, 'entry_p': 0, 'entry': None, 'side': None}
     return out
 
 
 # ==========================================
-# 🆕 完整指标计算
+# 完整指标计算 (保留原逻辑, 但传入全局 df)
 # ==========================================
 def calculate_comprehensive_metrics(logs_df, curve_df, price_df, custom_params, param_name,
                                     initial_capital=10000.0, fee_rate=0.0005,
@@ -295,20 +289,16 @@ def calculate_comprehensive_metrics(logs_df, curve_df, price_df, custom_params, 
     if len(rets_4h) > 1:
         mr, sr_ = float(rets_4h.mean()), float(rets_4h.std())
         metrics['sharpe_ratio'] = (mr / sr_ * np.sqrt(bars_per_year)) if sr_ > 0 else 0.0
-
         downside = rets_4h[rets_4h < 0]
         d_std = float(downside.std()) if len(downside) > 1 else 0
         metrics['sortino_ratio'] = (mr / d_std * np.sqrt(bars_per_year)) if d_std and d_std > 0 else 0.0
-
         metrics['calmar_ratio'] = (metrics['annual_return'] / abs(metrics['max_drawdown'])) if metrics[
                                                                                                    'max_drawdown'] < 0 else float(
             'inf')
         metrics['mar_ratio'] = metrics['calmar_ratio']
-
         pos_r = float(rets_4h[rets_4h > 0].sum())
         neg_r = float(abs(rets_4h[rets_4h < 0].sum()))
         metrics['omega_ratio'] = pos_r / neg_r if neg_r > 0 else float('inf')
-
         if len(rets_4h) > 20:
             p95 = float(rets_4h.quantile(0.95))
             p5 = float(rets_4h.quantile(0.05))
@@ -327,30 +317,23 @@ def calculate_comprehensive_metrics(logs_df, curve_df, price_df, custom_params, 
         metrics['rolling_12m_return_mean'] = float(rolling_12m.mean())
         metrics['rolling_12m_return_std'] = float(rolling_12m.std())
         metrics['rolling_12m_return_min'] = float(rolling_12m.min())
-
         roll_sharpe = monthly_rets.rolling(12).apply(
-            lambda x: (x.mean() / x.std() * np.sqrt(12)) if x.std() > 0 else 0
-        ).dropna()
+            lambda x: (x.mean() / x.std() * np.sqrt(12)) if x.std() > 0 else 0).dropna()
         metrics['rolling_12m_sharpe_mean'] = float(roll_sharpe.mean())
         metrics['rolling_12m_sharpe_std'] = float(roll_sharpe.std())
-        metrics['rolling_12m_sharpe_cv'] = (
-            float(abs(roll_sharpe.std() / roll_sharpe.mean()))
-            if abs(roll_sharpe.mean()) > 1e-9 else np.nan
-        )
+        metrics['rolling_12m_sharpe_cv'] = float(abs(roll_sharpe.std() / roll_sharpe.mean())) if abs(
+            roll_sharpe.mean()) > 1e-9 else np.nan
 
         def _r_sortino(x):
-            if not (x < 0).any():
-                return 0
+            if not (x < 0).any(): return 0
             d = x[x < 0].std()
             return (x.mean() / d * np.sqrt(12)) if d > 0 else 0
 
         roll_sortino = monthly_rets.rolling(12).apply(_r_sortino).dropna()
         metrics['rolling_12m_sortino_mean'] = float(roll_sortino.mean())
         metrics['rolling_12m_sortino_std'] = float(roll_sortino.std())
-        metrics['rolling_12m_sortino_cv'] = (
-            float(abs(roll_sortino.std() / roll_sortino.mean()))
-            if abs(roll_sortino.mean()) > 1e-9 else np.nan
-        )
+        metrics['rolling_12m_sortino_cv'] = float(abs(roll_sortino.std() / roll_sortino.mean())) if abs(
+            roll_sortino.mean()) > 1e-9 else np.nan
     else:
         for k in ['rolling_12m_return_mean', 'rolling_12m_return_std', 'rolling_12m_return_min',
                   'rolling_12m_sharpe_mean', 'rolling_12m_sharpe_std', 'rolling_12m_sharpe_cv',
@@ -381,9 +364,7 @@ def calculate_comprehensive_metrics(logs_df, curve_df, price_df, custom_params, 
             metrics['top3_pnl_ratio'] = float(sorted_desc[:min(3, len(sorted_desc))].sum()) / total_pnl
             metrics['top5_pnl_ratio'] = float(sorted_desc[:min(5, len(sorted_desc))].sum()) / total_pnl
         else:
-            metrics['top1_pnl_ratio'] = np.nan
-            metrics['top3_pnl_ratio'] = np.nan
-            metrics['top5_pnl_ratio'] = np.nan
+            metrics['top1_pnl_ratio'] = metrics['top3_pnl_ratio'] = metrics['top5_pnl_ratio'] = np.nan
 
         wins = sell_logs[sell_logs['pnl'] > 0]
         losses = sell_logs[sell_logs['pnl'] <= 0]
@@ -399,8 +380,7 @@ def calculate_comprehensive_metrics(logs_df, curve_df, price_df, custom_params, 
             metrics['expectancy_ci_low'] = metrics['expectancy'] - 1.96 * se
             metrics['expectancy_ci_high'] = metrics['expectancy'] + 1.96 * se
         else:
-            metrics['expectancy_ci_low'] = metrics['expectancy']
-            metrics['expectancy_ci_high'] = metrics['expectancy']
+            metrics['expectancy_ci_low'] = metrics['expectancy_ci_high'] = metrics['expectancy']
 
         for k in [1, 3, 5]:
             if len(sorted_desc) > k:
@@ -424,34 +404,26 @@ def calculate_comprehensive_metrics(logs_df, curve_df, price_df, custom_params, 
                 metrics[k] = np.nan
     else:
         for k in ['pnl_mean', 'pnl_std', 'pnl_skew', 'pnl_kurtosis', 'pnl_gini',
-                  'top1_pnl_ratio', 'top3_pnl_ratio', 'top5_pnl_ratio',
-                  'win_rate', 'avg_win', 'avg_loss', 'profit_loss_ratio',
-                  'expectancy', 'expectancy_ci_low', 'expectancy_ci_high',
-                  'drop_top1_pnl_decay', 'drop_top3_pnl_decay', 'drop_top5_pnl_decay',
-                  'bootstrap_pnl_mean_mean', 'bootstrap_pnl_mean_std',
-                  'bootstrap_pnl_mean_p5', 'bootstrap_pnl_mean_p95',
-                  'bootstrap_positive_prob']:
+                  'top1_pnl_ratio', 'top3_pnl_ratio', 'top5_pnl_ratio', 'win_rate', 'avg_win', 'avg_loss',
+                  'profit_loss_ratio',
+                  'expectancy', 'expectancy_ci_low', 'expectancy_ci_high', 'drop_top1_pnl_decay', 'drop_top3_pnl_decay',
+                  'drop_top5_pnl_decay',
+                  'bootstrap_pnl_mean_mean', 'bootstrap_pnl_mean_std', 'bootstrap_pnl_mean_p5',
+                  'bootstrap_pnl_mean_p95', 'bootstrap_positive_prob']:
             metrics[k] = np.nan
 
     mm = _compute_mae_mfe(logs_df, price_df)
     if mm['mae']:
-        metrics['mae_pct_mean'] = float(np.mean(mm['mae']))
-        metrics['mae_pct_median'] = float(np.median(mm['mae']))
-        metrics['mae_pct_worst'] = float(np.min(mm['mae']))
-        metrics['mfe_pct_mean'] = float(np.mean(mm['mfe']))
-        metrics['mfe_pct_median'] = float(np.median(mm['mfe']))
-        metrics['mfe_pct_best'] = float(np.max(mm['mfe']))
+        metrics['mae_pct_mean'], metrics['mae_pct_median'], metrics['mae_pct_worst'] = float(np.mean(mm['mae'])), float(
+            np.median(mm['mae'])), float(np.min(mm['mae']))
+        metrics['mfe_pct_mean'], metrics['mfe_pct_median'], metrics['mfe_pct_best'] = float(np.mean(mm['mfe'])), float(
+            np.median(mm['mfe'])), float(np.max(mm['mfe']))
     else:
-        for k in ['mae_pct_mean', 'mae_pct_median', 'mae_pct_worst',
-                  'mfe_pct_mean', 'mfe_pct_median', 'mfe_pct_best']:
+        for k in ['mae_pct_mean', 'mae_pct_median', 'mae_pct_worst', 'mfe_pct_mean', 'mfe_pct_median', 'mfe_pct_best']:
             metrics[k] = np.nan
 
-    if mm['holding_h']:
-        metrics['avg_holding_hours'] = float(np.mean(mm['holding_h']))
-        metrics['median_holding_hours'] = float(np.median(mm['holding_h']))
-    else:
-        metrics['avg_holding_hours'] = 0.0
-        metrics['median_holding_hours'] = 0.0
+    metrics['avg_holding_hours'] = float(np.mean(mm['holding_h'])) if mm['holding_h'] else 0.0
+    metrics['median_holding_hours'] = float(np.median(mm['holding_h'])) if mm['holding_h'] else 0.0
 
     # =============== C. 标的层面 ===============
     coins = [c for c in price_df.columns if not any(s in c for s in ['_open', '_high', '_low'])]
@@ -462,8 +434,7 @@ def calculate_comprehensive_metrics(logs_df, curve_df, price_df, custom_params, 
         c_sells = sell_logs[sell_logs['coin'] == c] if len(sell_logs) > 0 else pd.DataFrame()
         if len(c_sells) > 0:
             cp = c_sells['pnl'].values
-            cw = c_sells[c_sells['pnl'] > 0]
-            cl = c_sells[c_sells['pnl'] <= 0]
+            cw, cl = c_sells[c_sells['pnl'] > 0], c_sells[c_sells['pnl'] <= 0]
             avg_w = float(cw['pnl'].mean()) if len(cw) > 0 else 0.0
             avg_l = float(abs(cl['pnl'].mean())) if len(cl) > 0 else 0.0
             expect = float(np.mean(cp))
@@ -471,23 +442,17 @@ def calculate_comprehensive_metrics(logs_df, curve_df, price_df, custom_params, 
             net = float(cp.sum())
             share = net / total_pnl_all if total_pnl_all > 0 else 0.0
             asset_records[c] = {
-                'trades': int(len(c_sells)),
-                'win_rate': float(len(cw) / len(c_sells)),
-                'avg_win': avg_w, 'avg_loss': avg_l,
-                'profit_loss_ratio': avg_w / avg_l if avg_l > 0 else float('inf'),
-                'expectancy': expect, 'expectancy_ci_low': ci_low,
-                'net_pnl': net, 'pnl_share': share
+                'trades': int(len(c_sells)), 'win_rate': float(len(cw) / len(c_sells)),
+                'avg_win': avg_w, 'avg_loss': avg_l, 'profit_loss_ratio': avg_w / avg_l if avg_l > 0 else float('inf'),
+                'expectancy': expect, 'expectancy_ci_low': ci_low, 'net_pnl': net, 'pnl_share': share
             }
         else:
-            asset_records[c] = {
-                'trades': 0, 'win_rate': 0.0, 'avg_win': 0.0, 'avg_loss': 0.0,
-                'profit_loss_ratio': 0.0, 'expectancy': 0.0, 'expectancy_ci_low': 0.0,
-                'net_pnl': 0.0, 'pnl_share': 0.0
-            }
+            asset_records[c] = {k: 0.0 for k in
+                                ['trades', 'win_rate', 'avg_win', 'avg_loss', 'profit_loss_ratio', 'expectancy',
+                                 'expectancy_ci_low', 'net_pnl', 'pnl_share']}
 
     for c, m in asset_records.items():
-        for k, v in m.items():
-            metrics[f'asset_{c}_{k}'] = v
+        for k, v in m.items(): metrics[f'asset_{c}_{k}'] = v
 
     pos_pnls = [m['net_pnl'] for m in asset_records.values() if m['net_pnl'] > 0]
     if pos_pnls:
@@ -496,49 +461,35 @@ def calculate_comprehensive_metrics(logs_df, curve_df, price_df, custom_params, 
         metrics['asset_hhi'] = float(sum(s ** 2 for s in shares))
         metrics['asset_top1_share'] = float(max(shares))
     else:
-        metrics['asset_hhi'] = np.nan
-        metrics['asset_top1_share'] = np.nan
+        metrics['asset_hhi'] = metrics['asset_top1_share'] = np.nan
 
     metrics['active_assets'] = int(sum(1 for m in asset_records.values() if m['trades'] > 0))
-    metrics['negative_expectancy_assets'] = int(sum(
-        1 for m in asset_records.values() if m['expectancy'] < 0 and m['trades'] > 0))
-
-    for c, m in asset_records.items():
-        metrics[f'asset_{c}_loo_pnl_change'] = -m['net_pnl']
-        metrics[f'asset_{c}_loo_total_pnl'] = total_pnl_all - m['net_pnl']
+    metrics['negative_expectancy_assets'] = int(
+        sum(1 for m in asset_records.values() if m['expectancy'] < 0 and m['trades'] > 0))
 
     # =============== D. 时间维度 ===============
     if len(monthly_rets) > 0:
         metrics['monthly_positive_ratio'] = float((monthly_rets > 0).sum() / len(monthly_rets))
-
         ls, mls = 0, 0
         for r in monthly_rets:
             if r < 0:
-                ls += 1
-                mls = max(mls, ls)
+                ls += 1; mls = max(mls, ls)
             else:
                 ls = 0
         metrics['max_consecutive_losing_months'] = int(mls)
         metrics['monthly_return_mean'] = float(monthly_rets.mean())
         metrics['monthly_return_std'] = float(monthly_rets.std())
-
         m_pnl_dollar = monthly_eq.diff().dropna()
         pos_m_pnl = m_pnl_dollar[m_pnl_dollar > 0]
         if pos_m_pnl.sum() > 0:
             metrics['top1_month_pnl_ratio'] = float(pos_m_pnl.max() / pos_m_pnl.sum())
-            metrics['top3_months_pnl_ratio'] = float(
-                pos_m_pnl.nlargest(min(3, len(pos_m_pnl))).sum() / pos_m_pnl.sum()
-            )
+            metrics['top3_months_pnl_ratio'] = float(pos_m_pnl.nlargest(min(3, len(pos_m_pnl))).sum() / pos_m_pnl.sum())
         else:
-            metrics['top1_month_pnl_ratio'] = np.nan
-            metrics['top3_months_pnl_ratio'] = np.nan
+            metrics['top1_month_pnl_ratio'] = metrics['top3_months_pnl_ratio'] = np.nan
     else:
-        metrics['monthly_positive_ratio'] = 0.0
-        metrics['max_consecutive_losing_months'] = 0
-        metrics['monthly_return_mean'] = 0.0
-        metrics['monthly_return_std'] = 0.0
-        metrics['top1_month_pnl_ratio'] = np.nan
-        metrics['top3_months_pnl_ratio'] = np.nan
+        for k in ['monthly_positive_ratio', 'max_consecutive_losing_months', 'monthly_return_mean',
+                  'monthly_return_std']: metrics[k] = 0.0
+        metrics['top1_month_pnl_ratio'] = metrics['top3_months_pnl_ratio'] = np.nan
 
     annual_records = []
     for year in sorted(set(curve_df.index.year)):
@@ -553,10 +504,8 @@ def calculate_comprehensive_metrics(logs_df, curve_df, price_df, custom_params, 
             yds = yrr[yrr < 0]
             yo = (yrr.mean() / yds.std() * np.sqrt(bars_per_year)) if len(yds) > 1 and yds.std() > 0 else 0.0
             yc = (yr / abs(ydd)) if ydd < 0 else (float('inf') if yr > 0 else 0.0)
-            annual_records.append({
-                'year': int(year), 'return': yr, 'max_dd': ydd,
-                'sharpe': ys, 'sortino': yo, 'calmar': yc
-            })
+            annual_records.append(
+                {'year': int(year), 'return': yr, 'max_dd': ydd, 'sharpe': ys, 'sortino': yo, 'calmar': yc})
 
     if annual_records:
         adf = pd.DataFrame(annual_records)
@@ -564,331 +513,129 @@ def calculate_comprehensive_metrics(logs_df, curve_df, price_df, custom_params, 
         metrics['annual_return_std'] = float(adf['return'].std()) if len(adf) > 1 else 0.0
         metrics['annual_dd_mean'] = float(adf['max_dd'].mean())
         metrics['annual_dd_worst'] = float(adf['max_dd'].min())
-
         finite_sortino = adf['sortino'][np.isfinite(adf['sortino'])]
         metrics['annual_sortino_mean'] = float(finite_sortino.mean()) if len(finite_sortino) > 0 else 0.0
-        metrics['annual_sortino_std'] = float(finite_sortino.std()) if len(finite_sortino) > 1 else 0.0
-
         finite_calmar = adf['calmar'][np.isfinite(adf['calmar'])]
         metrics['annual_calmar_mean'] = float(finite_calmar.mean()) if len(finite_calmar) > 0 else 0.0
-
         metrics['profitable_years'] = int((adf['return'] > 0).sum())
         metrics['total_years'] = int(len(adf))
         metrics['profitable_years_ratio'] = metrics['profitable_years'] / metrics['total_years']
-
         for _, row in adf.iterrows():
             y = int(row['year'])
             metrics[f'year_{y}_return'] = float(row['return'])
             metrics[f'year_{y}_max_dd'] = float(row['max_dd'])
             metrics[f'year_{y}_sortino'] = float(row['sortino']) if np.isfinite(row['sortino']) else np.nan
     else:
-        for k in ['annual_return_mean', 'annual_return_std', 'annual_dd_mean', 'annual_dd_worst',
-                  'annual_sortino_mean', 'annual_sortino_std', 'annual_calmar_mean',
-                  'profitable_years_ratio']:
-            metrics[k] = 0.0
-        metrics['profitable_years'] = 0
-        metrics['total_years'] = 0
-
-    mid = len(curve_df) // 2
-    if mid > 10 and len(curve_df) - mid > 10:
-        fh = curve_df.iloc[:mid]
-        sh = curve_df.iloc[mid:]
-        fhs, fhe = float(fh['equity'].iloc[0]), float(fh['equity'].iloc[-1])
-        shs, she = float(sh['equity'].iloc[0]), float(sh['equity'].iloc[-1])
-        metrics['first_half_return'] = (fhe - fhs) / fhs if fhs > 0 else 0.0
-        metrics['second_half_return'] = (she - shs) / shs if shs > 0 else 0.0
-        metrics['half_return_diff'] = metrics['second_half_return'] - metrics['first_half_return']
-        metrics['first_half_max_dd'] = float(((fh['equity'] - fh['equity'].cummax()) / fh['equity'].cummax()).min())
-        metrics['second_half_max_dd'] = float(((sh['equity'] - sh['equity'].cummax()) / sh['equity'].cummax()).min())
-    else:
-        for k in ['first_half_return', 'second_half_return', 'half_return_diff',
-                  'first_half_max_dd', 'second_half_max_dd']:
-            metrics[k] = np.nan
+        for k in ['annual_return_mean', 'annual_return_std', 'annual_dd_mean', 'annual_dd_worst', 'annual_sortino_mean',
+                  'annual_calmar_mean', 'profitable_years_ratio']: metrics[k] = 0.0
+        metrics['profitable_years'] = metrics['total_years'] = 0
 
     if 'BTC' in price_df.columns and 'BTC_TREND_WINDOW' in custom_params:
         btw = custom_params['BTC_TREND_WINDOW']
         btc_ma = price_df['BTC'].rolling(window=btw).mean()
         btc_on = (price_df['BTC'] > btc_ma).reindex(curve_df.index).fillna(False)
         btc_on_lag = btc_on.shift(1).fillna(False)
+        bull_rets = rets_4h[btc_on_lag.reindex(rets_4h.index).fillna(False)]
+        bear_rets = rets_4h[~btc_on_lag.reindex(rets_4h.index).fillna(False)]
 
-        bull_mask = btc_on_lag.reindex(rets_4h.index).fillna(False)
-        bull_rets = rets_4h[bull_mask]
-        bear_rets = rets_4h[~bull_mask]
+        metrics['bull_regime_total_return'] = float((1 + bull_rets).prod() - 1) if len(bull_rets) > 0 else 0.0
+        metrics['bull_regime_bars'] = int(len(bull_rets))
+        metrics['bear_regime_total_return'] = float((1 + bear_rets).prod() - 1) if len(bear_rets) > 0 else 0.0
+        metrics['bear_regime_bars'] = int(len(bear_rets))
 
-        if len(bull_rets) > 0:
-            metrics['bull_regime_total_return'] = float((1 + bull_rets).prod() - 1)
-            metrics['bull_regime_bars'] = int(len(bull_rets))
-            metrics['bull_regime_sharpe'] = float(
-                bull_rets.mean() / bull_rets.std() * np.sqrt(bars_per_year)) if bull_rets.std() > 0 else 0.0
-        else:
-            metrics['bull_regime_total_return'] = 0.0
-            metrics['bull_regime_bars'] = 0
-            metrics['bull_regime_sharpe'] = 0.0
-
-        if len(bear_rets) > 0:
-            metrics['bear_regime_total_return'] = float((1 + bear_rets).prod() - 1)
-            metrics['bear_regime_bars'] = int(len(bear_rets))
-            metrics['bear_regime_sharpe'] = float(
-                bear_rets.mean() / bear_rets.std() * np.sqrt(bars_per_year)) if bear_rets.std() > 0 else 0.0
-        else:
-            metrics['bear_regime_total_return'] = 0.0
-            metrics['bear_regime_bars'] = 0
-            metrics['bear_regime_sharpe'] = 0.0
-
-    # =============== F. 鲁棒性 (成本敏感性曲线) ===============
+    # =============== F. 鲁棒性 ===============
     if logs_df is not None and not logs_df.empty:
-        bv = float(logs_df[logs_df['action'] == 'BUY']['value'].sum())
-        sv = float(logs_df[logs_df['action'] == 'SELL']['value'].sum())
-        total_vol = bv + sv
+        total_vol = float(logs_df['value'].sum())
         ofe = final_equity
-
         for tf in [0.0010, 0.0020, 0.0030]:
             ef = max(0, tf - fee_rate)
-            el = total_vol * ef
-            seq = ofe - el
-            sret = (seq - initial_capital) / initial_capital
-            sann = ((seq / initial_capital) ** (365 / days_passed) - 1) if days_passed > 0 and seq > 0 else -1.0
-            metrics[f'cost_stress_{int(tf * 10000)}bps_return'] = float(sret)
-            metrics[f'cost_stress_{int(tf * 10000)}bps_annual'] = float(sann)
-
+            seq = ofe - total_vol * ef
+            metrics[f'cost_stress_{int(tf * 10000)}bps_return'] = float((seq - initial_capital) / initial_capital)
+            metrics[f'cost_stress_{int(tf * 10000)}bps_annual'] = float(
+                ((seq / initial_capital) ** (365 / days_passed) - 1)) if days_passed > 0 and seq > 0 else -1.0
         metrics['total_trading_volume'] = total_vol
         metrics['total_fee_paid'] = float(logs_df['fee'].sum())
-        metrics['fee_to_pnl_ratio'] = (
-            float(metrics['total_fee_paid'] / abs(total_pnl_all))
-            if abs(total_pnl_all) > 0 else np.nan
-        )
+        metrics['fee_to_pnl_ratio'] = float(metrics['total_fee_paid'] / abs(total_pnl_all)) if abs(
+            total_pnl_all) > 0 else np.nan
     else:
-        for tf in [10, 20, 30]:
-            metrics[f'cost_stress_{tf}bps_return'] = np.nan
-            metrics[f'cost_stress_{tf}bps_annual'] = np.nan
-        metrics['total_trading_volume'] = 0.0
-        metrics['total_fee_paid'] = 0.0
-        metrics['fee_to_pnl_ratio'] = np.nan
+        for tf in [10, 20, 30]: metrics[f'cost_stress_{tf}bps_return'] = metrics[f'cost_stress_{tf}bps_annual'] = np.nan
+        metrics['total_trading_volume'] = metrics['total_fee_paid'] = metrics['fee_to_pnl_ratio'] = np.nan
 
     return metrics
 
 
-def _print_comprehensive_panel(metrics, param_name=""):
-    print("\n" + "═" * 78)
-    print(f"📊 【完整评价指标面板】: {param_name}")
-    print("═" * 78)
-
-    g = metrics.get
-
-    def _fmt_inf(v, fmt="{:>+8.3f}", inf_str="    +inf"):
-        if v == float('inf'):
-            return inf_str
-        if v == float('-inf'):
-            return "    -inf"
-        if isinstance(v, float) and (np.isnan(v) or not np.isfinite(v)):
-            return "     N/A"
-        return fmt.format(v)
-
-    print("\n[A. 资金曲线 & 回撤]")
-    print(f"  初始/最终资金:         ${g('initial_capital', 0):>12,.2f}  →  ${g('final_equity', 0):>12,.2f}")
-    print(f"  总收益率/年化收益率:   {g('total_return', 0) * 100:>+8.2f}%  /  {g('annual_return', 0) * 100:>+8.2f}%")
-    print(f"  Max DD / Avg DD:       {g('max_drawdown', 0) * 100:>+8.2f}%  /  {g('avg_drawdown', 0) * 100:>+8.2f}%")
-    print(f"  Ulcer Index:           {g('ulcer_index', 0):>8.3f}")
-    print(f"  Pain Index:            {g('pain_index', 0):>8.3f}")
-    print(f"  最长水下时长:          {g('max_time_under_water_days', 0):>8.1f} 天")
-    print(f"  平均回撤恢复时长:      {g('avg_recovery_time_days', 0):>8.1f} 天")
-    print(f"  log(equity) R²:        {g('log_equity_r2', 0):>8.4f}")
-    print(f"  Time in Market:        {g('time_in_market_pct', 0) * 100:>8.2f}%")
-
-    print("\n[E. 风险调整收益]")
-    print(f"  Sharpe / Sortino:      {g('sharpe_ratio', 0):>+8.3f}  /  {g('sortino_ratio', 0):>+8.3f}")
-    print(f"  Calmar / Omega:        {_fmt_inf(g('calmar_ratio', 0))}  /  {_fmt_inf(g('omega_ratio', 0))}")
-    print(f"  Tail Ratio (95/5):     {_fmt_inf(g('tail_ratio', np.nan))}")
-    rs_m = g('rolling_12m_sharpe_mean', np.nan)
-    if not (isinstance(rs_m, float) and np.isnan(rs_m)):
-        rs_cv = g('rolling_12m_sharpe_cv', np.nan)
-        print(f"  滚动12M Sharpe (均值/CV):  {rs_m:>+7.3f}  /  {_fmt_inf(rs_cv, '{:>7.3f}', '   N/A')}")
-        ro_m = g('rolling_12m_sortino_mean', np.nan)
-        ro_cv = g('rolling_12m_sortino_cv', np.nan)
-        print(f"  滚动12M Sortino (均值/CV): {ro_m:>+7.3f}  /  {_fmt_inf(ro_cv, '{:>7.3f}', '   N/A')}")
-    else:
-        print(f"  滚动12M Sharpe/Sortino:    N/A (样本不足12个月)")
-
-    print("\n[B. 交易层面]")
-    print(f"  总动作 / 平仓笔数:     {g('total_actions', 0):>5d}  /  {g('total_closed_trades', 0):>5d}")
-    if g('total_closed_trades', 0) > 0:
-        print(
-            f"  胜率 / 盈亏比:         {g('win_rate', 0) * 100:>6.2f}%  /  {_fmt_inf(g('profit_loss_ratio', 0), '{:>6.2f}', '   inf')}")
-        print(f"  平均盈/亏:             ${g('avg_win', 0):>+9.2f}  /  ${g('avg_loss', 0):>9.2f}")
-        print(f"  Expectancy:            ${g('expectancy', 0):>+9.2f}")
-        print(f"  Expectancy 95% CI:     [${g('expectancy_ci_low', 0):>+8.2f}, ${g('expectancy_ci_high', 0):>+8.2f}]")
-        bp = g('bootstrap_positive_prob', np.nan)
-        if not np.isnan(bp):
-            print(f"  Bootstrap 正期望概率:  {bp * 100:>6.2f}%")
-        print(f"  PnL Mean / Std:        ${g('pnl_mean', 0):>+9.2f}  /  ${g('pnl_std', 0):>9.2f}")
-        print(f"  PnL Skew / Kurt:       {g('pnl_skew', 0):>+8.3f}  /  {g('pnl_kurtosis', 0):>+8.3f}")
-        print(f"  PnL Gini系数:          {g('pnl_gini', 0):>8.4f}")
-
-        t1 = g('top1_pnl_ratio', np.nan)
-        if not (isinstance(t1, float) and np.isnan(t1)):
-            print(f"  Top-1/3/5 利润占比:    "
-                  f"{t1 * 100:>5.1f}% / {g('top3_pnl_ratio', 0) * 100:>5.1f}% / {g('top5_pnl_ratio', 0) * 100:>5.1f}%")
-        print(f"  Drop-Top1/3/5 衰减:    "
-              f"{g('drop_top1_pnl_decay', 0) * 100:>5.1f}% / "
-              f"{g('drop_top3_pnl_decay', 0) * 100:>5.1f}% / "
-              f"{g('drop_top5_pnl_decay', 0) * 100:>5.1f}%")
-
-        mae_m = g('mae_pct_mean', np.nan)
-        if not (isinstance(mae_m, float) and np.isnan(mae_m)):
-            print(f"  MAE 平均/最差:         {mae_m * 100:>+6.2f}%  /  {g('mae_pct_worst', 0) * 100:>+6.2f}%")
-            print(
-                f"  MFE 平均/最佳:         {g('mfe_pct_mean', 0) * 100:>+6.2f}%  /  {g('mfe_pct_best', 0) * 100:>+6.2f}%")
-        print(f"  平均/中位持仓时长:     {g('avg_holding_hours', 0):>6.1f}h  /  {g('median_holding_hours', 0):>6.1f}h")
-
-    print("\n[C. 标的集中度]")
-    print(f"  活跃标的 /负期望标的:  {g('active_assets', 0)} / {g('negative_expectancy_assets', 0)}")
-    hhi = g('asset_hhi', np.nan)
-    if not (isinstance(hhi, float) and np.isnan(hhi)):
-        print(f"  Asset HHI:             {hhi:>8.4f}")
-        print(f"  Top-1 标的利润占比:    {g('asset_top1_share', 0) * 100:>6.2f}%")
-
-    asset_keys = sorted([k for k in metrics.keys() if k.startswith('asset_') and k.endswith('_trades')])
-    coins_in_metrics = [k[len('asset_'):-len('_trades')] for k in asset_keys]
-    if coins_in_metrics:
-        print("  各标的明细:")
-        print(f"    {'Coin':<6} {'Trades':>6} {'WinRate':>8} {'P/L':>7} {'Expect':>10} {'NetPnL':>11} {'Share':>8}")
-        for c in coins_in_metrics:
-            tr_n = g(f'asset_{c}_trades', 0)
-            if tr_n > 0:
-                pl = g(f'asset_{c}_profit_loss_ratio', 0)
-                pl_s = "  inf" if pl == float('inf') else f"{pl:>5.2f}"
-                print(f"    {c:<6} {tr_n:>6d} {g(f'asset_{c}_win_rate', 0) * 100:>7.2f}% "
-                      f"{pl_s:>7} {g(f'asset_{c}_expectancy', 0):>+10.2f} "
-                      f"{g(f'asset_{c}_net_pnl', 0):>+11.2f} {g(f'asset_{c}_pnl_share', 0) * 100:>+7.2f}%")
-            else:
-                print(f"    {c:<6} {0:>6d} {'--':>8} {'--':>7} {'--':>10} {'--':>11} {'--':>8}")
-
-    print("\n[D. 时间稳定性]")
-    print(f"  月度正收益占比:        {g('monthly_positive_ratio', 0) * 100:>6.2f}%")
-    print(f"  最长连续亏损月:        {g('max_consecutive_losing_months', 0):>2d} 个月")
-    t1m = g('top1_month_pnl_ratio', np.nan)
-    if not (isinstance(t1m, float) and np.isnan(t1m)):
-        print(f"  Top-1/Top-3 月利润占比: {t1m * 100:>5.1f}% / {g('top3_months_pnl_ratio', 0) * 100:>5.1f}%")
-    print(
-        f"  盈利年份占比:          {g('profitable_years_ratio', 0) * 100:>6.2f}%  ({g('profitable_years', 0)}/{g('total_years', 0)})")
-    print(
-        f"  年度回撤(均值/最差):   {g('annual_dd_mean', 0) * 100:>+7.2f}%  /  {g('annual_dd_worst', 0) * 100:>+7.2f}%")
-    fh_r = g('first_half_return', np.nan)
-    if not (isinstance(fh_r, float) and np.isnan(fh_r)):
-        print(f"  上半段/下半段 收益:    {fh_r * 100:>+7.2f}%  /  {g('second_half_return', 0) * 100:>+7.2f}%")
-        print(
-            f"  上半段/下半段 Max DD:  {g('first_half_max_dd', 0) * 100:>+7.2f}%  /  {g('second_half_max_dd', 0) * 100:>+7.2f}%")
-
-    print("\n[F. 鲁棒性 - 成本敏感性曲线]")
-    print(f"  原始 5bps (基准年化):  {g('annual_return', 0) * 100:>+7.2f}%")
-    for fee in [10, 20, 30]:
-        ann = g(f'cost_stress_{fee}bps_annual', np.nan)
-        if not (isinstance(ann, float) and np.isnan(ann)):
-            status = "✅ 存活" if ann > 0 else "💀 破产"
-            print(f"  压力 {fee:>2d}bps 年化:        {ann * 100:>+7.2f}%  {status}")
-
-    if 'bull_regime_total_return' in metrics:
-        bull_r = g('bull_regime_total_return', 0)
-        bull_b = g('bull_regime_bars', 0)
-        bear_r = g('bear_regime_total_return', 0)
-        bear_b = g('bear_regime_bars', 0)
-        print(f"  Bull市表现 (BTC>MA):   收益={bull_r * 100:>+7.2f}%  Bar数={bull_b}")
-        print(f"  Bear市表现 (BTC≤MA):   收益={bear_r * 100:>+7.2f}%  Bar数={bear_b}")
-
-    print(f"  总交易额:              ${g('total_trading_volume', 0):>11,.0f}")
-    print(f"  总手续费:              ${g('total_fee_paid', 0):>11,.2f}")
-    f2p = g('fee_to_pnl_ratio', np.nan)
-    if not (isinstance(f2p, float) and np.isnan(f2p)):
-        print(f"  手续费/PnL 比率:       {f2p * 100:>6.2f}%")
-
-    print("═" * 78)
-
-
-def run_backtest(df, param_name="默认基准参数", custom_params=None, verbose=True):
-    if custom_params is None:
-        custom_params = {
-            'MOM_WINDOW': 20 * 6,
-            'VOL_WINDOW': 20 * 6,
-            'BTC_TREND_WINDOW': 60 * 6,
-            'MAX_WEIGHT': 0.30
-        }
-
+# ==========================================
+# 🔴 核心改动 2: 单年状态流转推演模块
+# ==========================================
+def run_backtest_single_year(df, year, prev_state, custom_params, next_year_coins=None):
     MOM_WINDOW = custom_params['MOM_WINDOW']
     VOL_WINDOW = custom_params['VOL_WINDOW']
     BTC_TREND_WINDOW = custom_params['BTC_TREND_WINDOW']
     MAX_WEIGHT = custom_params['MAX_WEIGHT']
-
-    if verbose:
-        print(f"\n🚀 启动截面动量回测引擎 (多空对称, 信号驱动二元进出)... [{param_name}]")
-        print(
-            f"   ⚙️ 参数配置: MOM_WIN={MOM_WINDOW}, VOL_WIN={VOL_WINDOW}, BTC_TREND={BTC_TREND_WINDOW}, MAX_WT={MAX_WEIGHT}")
-
     TOP_K = int(custom_params.get('TOP_K', 2))
-
-    FEE_RATE = 0.0005
-    INITIAL_CAPITAL = 10000.0
 
     coins = [c for c in df.columns if not any(suffix in c for suffix in ['_open', '_high', '_low'])]
     if 'BTC' not in coins:
         raise ValueError("数据中必须包含 BTC 作为宏观开关！")
 
     df_close = df[coins]
-    returns = df_close.pct_change(MOM_WINDOW)
 
+    # 🔴 在全局 DataFrame 上计算指标 (天然利用预热期)
+    returns = df_close.pct_change(MOM_WINDOW)
     high_df = df[[f"{c}_high" for c in coins]].copy()
     high_df.columns = coins
     low_df = df[[f"{c}_low" for c in coins]].copy()
     low_df.columns = coins
     prev_close = df_close.shift(1)
 
-    tr1 = (high_df - low_df).values
-    tr2 = (high_df - prev_close).abs().values
-    tr3 = (low_df - prev_close).abs().values
-
-    tr_arr = np.fmax.reduce([tr1, tr2, tr3])
-    tr_df = pd.DataFrame(tr_arr, index=df.index, columns=coins)
-
-    atr = tr_df.rolling(window=VOL_WINDOW).mean()
+    tr_arr = np.fmax.reduce(
+        [(high_df - low_df).values, (high_df - prev_close).abs().values, (low_df - prev_close).abs().values])
+    atr = pd.DataFrame(tr_arr, index=df.index, columns=coins).rolling(window=VOL_WINDOW).mean()
     atr_pct = atr / df_close
-
-    # 🚀 优化点：这部分仅用于打印日志，严重消耗性能，已放入 if verbose 块中
-    if verbose:
-        log_returns = np.log(df_close / df_close.shift(1))
-        old_volatility = log_returns.rolling(window=VOL_WINDOW).std() * np.sqrt(365 * 6)
-        old_adj_mom = returns / (old_volatility + 1e-8)
 
     adj_mom = returns / (atr_pct + 1e-8)
     volatility = atr_pct
 
-    if verbose:
-        print(f"   [归因验证] 动量计算分母已从 原标准差(Std) 替换为 ATR_pct !")
-        rank_corr = old_adj_mom.rank(axis=1).corrwith(adj_mom.rank(axis=1), axis=1).mean()
-        print(f"             -> 截面排序平均相关系数 (Rank Corr): {rank_corr:.4f} (越低说明优化影响越大)")
-        print(
-            f"             -> 均值对比 | ATR_pct: {atr_pct.mean().mean():.4f}  vs  原波动率: {old_volatility.mean().mean():.4f}")
-
     btc_ma = df['BTC'].rolling(window=BTC_TREND_WINDOW).mean()
     btc_trend_on = df['BTC'] > btc_ma
 
-    cash = INITIAL_CAPITAL
+    # 🔴 状态继承
+    cash = prev_state['cash']
+    positions_dict = prev_state['positions']
+    coin_states = prev_state['coin_states']
     trade_logs = []
 
-    start_idx = max(MOM_WINDOW, VOL_WINDOW, BTC_TREND_WINDOW)
+    for c in coins:
+        if c not in coin_states:
+            coin_states[c] = {'qty': 0.0, 'cost': 0.0, 'entry_time': None, 'side': None}
 
     n_coins = len(coins)
     coin_to_idx = {c: idx for idx, c in enumerate(coins)}
+
+    positions_arr = np.zeros(n_coins, dtype=float)
+    for idx, c in enumerate(coins):
+        if c in positions_dict:
+            positions_arr[idx] = positions_dict[c]
+
     close_arr = df_close.values
     vol_arr = volatility[coins].values
     mom_arr = adj_mom[coins].values
     btc_trend_arr = btc_trend_on.values
     time_index = df.index
 
-    positions_arr = np.zeros(n_coins, dtype=float)
-    n_steps = len(df) - start_idx
-    equity_values = np.empty(n_steps, dtype=float)
-    equity_times = time_index[start_idx:]
+    # 🔴 核心：精确定位该年实际可交易的起点 (1月1日)
+    year_start_time = pd.to_datetime(f"{year}-01-01 00:00:00")
+    trading_mask = time_index >= year_start_time
 
-    for j, i in enumerate(range(start_idx, len(df))):
+    if not trading_mask.any():
+        return prev_state, [], pd.DataFrame()
+
+    start_trade_idx = np.where(trading_mask)[0][0]
+    n_steps = len(df) - start_trade_idx
+    equity_values = np.empty(n_steps, dtype=float)
+    equity_times = time_index[start_trade_idx:]
+
+    for j, i in enumerate(range(start_trade_idx, len(df))):
         current_time = time_index[i]
         prices_row = close_arr[i]
 
@@ -897,7 +644,6 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None, verbos
 
         top_long_coins = []
         top_short_coins = []
-
         current_mom = mom_arr[i]
 
         if btc_trend_arr[i]:
@@ -907,8 +653,7 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None, verbos
                     valid_idx = np.where(mask)[0]
                     valid_vals = current_mom[valid_idx]
                     order = np.argsort(-valid_vals, kind='stable')
-                    top_k_indices = valid_idx[order[:TOP_K]]
-                    top_long_coins = [coins[idx] for idx in top_k_indices]
+                    top_long_coins = [coins[idx] for idx in valid_idx[order[:TOP_K]]]
         else:
             if GLOBAL_TRADE_MODE in ['BOTH', 'SHORT_ONLY']:
                 mask = ~np.isnan(current_mom) & (current_mom < 0)
@@ -916,9 +661,9 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None, verbos
                     valid_idx = np.where(mask)[0]
                     valid_vals = current_mom[valid_idx]
                     order = np.argsort(valid_vals, kind='stable')
-                    top_k_indices = valid_idx[order[:TOP_K]]
-                    top_short_coins = [coins[idx] for idx in top_k_indices]
+                    top_short_coins = [coins[idx] for idx in valid_idx[order[:TOP_K]]]
 
+        # 平仓逻辑
         for idx_c in range(n_coins):
             if positions_arr[idx_c] > 0:
                 c = coins[idx_c]
@@ -926,260 +671,138 @@ def run_backtest(df, param_name="默认基准参数", custom_params=None, verbos
                     sell_amount = positions_arr[idx_c]
                     actual_sell_val = sell_amount * prices_row[idx_c]
                     fee = actual_sell_val * FEE_RATE
-
                     positions_arr[idx_c] = 0
                     cash += (actual_sell_val - fee)
-
                     trade_logs.append({
-                        "time": current_time, "action": "SELL", "coin": c,
-                        "direction": "LONG", "event": "CLOSE",
-                        "price": prices_row[idx_c], "amount": sell_amount, "value": actual_sell_val,
-                        "fee": fee, "reason": "Signal Exit Long"
+                        "time": current_time, "action": "SELL", "coin": c, "direction": "LONG", "event": "CLOSE",
+                        "price": prices_row[idx_c], "amount": sell_amount, "value": actual_sell_val, "fee": fee,
+                        "reason": "Signal Exit Long"
                     })
 
-        for idx_c in range(n_coins):
-            if positions_arr[idx_c] < 0:
+            elif positions_arr[idx_c] < 0:
                 c = coins[idx_c]
                 if c not in top_short_coins:
                     buy_amount = abs(positions_arr[idx_c])
                     actual_buy_val = buy_amount * prices_row[idx_c]
                     fee = actual_buy_val * FEE_RATE
-
                     positions_arr[idx_c] = 0
                     cash -= (actual_buy_val + fee)
-
                     trade_logs.append({
-                        "time": current_time, "action": "BUY", "coin": c,
-                        "direction": "SHORT", "event": "CLOSE",
-                        "price": prices_row[idx_c], "amount": buy_amount, "value": actual_buy_val,
-                        "fee": fee, "reason": "Signal Exit Short"
+                        "time": current_time, "action": "BUY", "coin": c, "direction": "SHORT", "event": "CLOSE",
+                        "price": prices_row[idx_c], "amount": buy_amount, "value": actual_buy_val, "fee": fee,
+                        "reason": "Signal Exit Short"
                     })
 
+        # 开仓逻辑 (多)
         if top_long_coins:
-            inv_vols = []
-            for c in top_long_coins:
-                idx_c = coin_to_idx[c]
-                c_vol = vol_arr[i, idx_c]
-                inv_vols.append(1.0 / c_vol if c_vol > 0 else 0)
-
+            inv_vols = [1.0 / vol_arr[i, coin_to_idx[c]] if vol_arr[i, coin_to_idx[c]] > 0 else 0 for c in
+                        top_long_coins]
             total_inv_vol = sum(inv_vols)
-
             for k_, c in enumerate(top_long_coins):
                 idx_c = coin_to_idx[c]
-                if positions_arr[idx_c] == 0:
-                    if total_inv_vol > 0:
-                        raw_weight = inv_vols[k_] / total_inv_vol
-                        target_weight = min(raw_weight, MAX_WEIGHT)
-                        target_val = current_equity * target_weight
+                if positions_arr[idx_c] == 0 and total_inv_vol > 0:
+                    target_weight = min(inv_vols[k_] / total_inv_vol, MAX_WEIGHT)
+                    target_val = current_equity * target_weight
+                    buy_val = target_val / (1 + FEE_RATE) if cash >= target_val / (1 + FEE_RATE) else cash / (
+                                1 + FEE_RATE)
+                    if buy_val > 1.0:
+                        fee = buy_val * FEE_RATE
+                        buy_amount = buy_val / prices_row[idx_c]
+                        positions_arr[idx_c] += buy_amount
+                        cash -= (buy_val + fee)
+                        trade_logs.append({
+                            "time": current_time, "action": "BUY", "coin": c, "direction": "LONG", "event": "OPEN",
+                            "price": prices_row[idx_c], "amount": buy_amount, "value": buy_val, "fee": fee,
+                            "reason": "Signal Entry Long"
+                        })
 
-                        available_to_spend = target_val / (1 + FEE_RATE)
-                        if cash >= available_to_spend:
-                            buy_val = available_to_spend
-                        else:
-                            buy_val = cash / (1 + FEE_RATE)
-
-                        if buy_val > 1.0:
-                            fee = buy_val * FEE_RATE
-                            buy_amount = buy_val / prices_row[idx_c]
-
-                            positions_arr[idx_c] += buy_amount
-                            cash -= (buy_val + fee)
-
-                            trade_logs.append({
-                                "time": current_time, "action": "BUY", "coin": c,
-                                "direction": "LONG", "event": "OPEN",
-                                "price": prices_row[idx_c], "amount": buy_amount, "value": buy_val,
-                                "fee": fee, "reason": "Signal Entry Long"
-                            })
-
+        # 开仓逻辑 (空)
         if top_short_coins:
-            inv_vols = []
-            for c in top_short_coins:
-                idx_c = coin_to_idx[c]
-                c_vol = vol_arr[i, idx_c]
-                inv_vols.append(1.0 / c_vol if c_vol > 0 else 0)
-
+            inv_vols = [1.0 / vol_arr[i, coin_to_idx[c]] if vol_arr[i, coin_to_idx[c]] > 0 else 0 for c in
+                        top_short_coins]
             total_inv_vol = sum(inv_vols)
-
             for k_, c in enumerate(top_short_coins):
                 idx_c = coin_to_idx[c]
-                if positions_arr[idx_c] == 0:
-                    if total_inv_vol > 0:
-                        raw_weight = inv_vols[k_] / total_inv_vol
-                        target_weight = min(raw_weight, MAX_WEIGHT)
-                        target_val = current_equity * target_weight
+                if positions_arr[idx_c] == 0 and total_inv_vol > 0:
+                    target_weight = min(inv_vols[k_] / total_inv_vol, MAX_WEIGHT)
+                    sell_val = current_equity * target_weight / (1 + FEE_RATE)
+                    if sell_val > 1.0:
+                        fee = sell_val * FEE_RATE
+                        sell_amount = sell_val / prices_row[idx_c]
+                        positions_arr[idx_c] -= sell_amount
+                        cash += (sell_val - fee)
+                        trade_logs.append({
+                            "time": current_time, "action": "SELL", "coin": c, "direction": "SHORT", "event": "OPEN",
+                            "price": prices_row[idx_c], "amount": sell_amount, "value": sell_val, "fee": fee,
+                            "reason": "Signal Entry Short"
+                        })
 
-                        available_to_short = target_val / (1 + FEE_RATE)
-                        sell_val = available_to_short
+    # 🔴 核心：年底清退不在下一年标的池的资产 (强制平仓)
+    if next_year_coins is not None:
+        last_time = time_index[-1]
+        last_prices_row = close_arr[-1]
+        for idx_c in range(n_coins):
+            c = coins[idx_c]
+            if c not in next_year_coins and abs(positions_arr[idx_c]) > 1e-9:
+                amt = abs(positions_arr[idx_c])
+                val = amt * last_prices_row[idx_c]
+                fee = val * FEE_RATE
 
-                        if sell_val > 1.0:
-                            fee = sell_val * FEE_RATE
-                            sell_amount = sell_val / prices_row[idx_c]
+                if positions_arr[idx_c] > 0:  # 平多
+                    cash += (val - fee)
+                    action, direction = "SELL", "LONG"
+                else:  # 平空
+                    cash -= (val + fee)
+                    action, direction = "BUY", "SHORT"
 
-                            positions_arr[idx_c] -= sell_amount
-                            cash += (sell_val - fee)
+                trade_logs.append({
+                    "time": last_time, "action": action, "coin": c, "direction": direction, "event": "CLOSE",
+                    "price": last_prices_row[idx_c], "amount": amt, "value": val, "fee": fee,
+                    "reason": f"End of Year {year} Delisting"
+                })
+                positions_arr[idx_c] = 0
 
-                            trade_logs.append({
-                                "time": current_time, "action": "SELL", "coin": c,
-                                "direction": "SHORT", "event": "OPEN",
-                                "price": prices_row[idx_c], "amount": sell_amount, "value": sell_val,
-                                "fee": fee, "reason": "Signal Entry Short"
-                            })
-
-    final_equity = cash + np.dot(positions_arr, close_arr[-1])
-    total_return = (final_equity - INITIAL_CAPITAL) / INITIAL_CAPITAL
-
-    curve_df = pd.DataFrame({'equity': equity_values}, index=equity_times)
-    curve_df.index.name = 'time'
-    curve_df['cum_max'] = curve_df['equity'].cummax()
-    curve_df['drawdown'] = (curve_df['equity'] - curve_df['cum_max']) / curve_df['cum_max']
-    max_drawdown = curve_df['drawdown'].min()
-
-    days_passed = (curve_df.index[-1] - curve_df.index[0]).days
-    annual_return = ((final_equity / INITIAL_CAPITAL) ** (365 / days_passed) - 1) if days_passed > 0 else 0.0
-
-    curve_df['returns'] = curve_df['equity'].pct_change()
-    mean_return = curve_df['returns'].mean()
-    std_return = curve_df['returns'].std()
-    sharpe_ratio = (mean_return / std_return * np.sqrt(365 * 6)) if std_return > 0 else 0
-    calmar_ratio = annual_return / abs(max_drawdown) if max_drawdown < 0 else float('inf')
-
-    win_trades, loss_trades = 0, 0
-    total_profit, total_loss = 0.0, 0.0
-    holding_times = []
-    long_close_cnt, short_close_cnt = 0, 0
-    coin_states = {c: {'qty': 0.0, 'cost': 0.0, 'entry_time': None, 'side': None} for c in coins}
-
+    # 🔴 更新持仓与 PNL 追踪
     for log in trade_logs:
-        c = log['coin']
-        direction = log['direction']
-        event = log['event']
-        amt = log['amount']
-        price = log['price']
-        fee = log['fee']
-        time_ = log['time']
-
+        c, event, direction, amt, price, fee, time_ = log['coin'], log['event'], log['direction'], log['amount'], log[
+            'price'], log['fee'], log['time']
         if event == 'OPEN':
             coin_states[c]['qty'] = amt
-            if direction == 'LONG':
-                coin_states[c]['cost'] = price + (fee / amt) if amt > 0 else price
-            else:
-                coin_states[c]['cost'] = price - (fee / amt) if amt > 0 else price
+            coin_states[c]['cost'] = price + (fee / amt) if direction == 'LONG' else price - (fee / amt)
             coin_states[c]['side'] = direction
             coin_states[c]['entry_time'] = time_
-
         elif event == 'CLOSE':
             cost_price = coin_states[c]['cost']
             side = coin_states[c]['side']
-
             if cost_price > 0 and side is not None:
-                if side == 'LONG':
-                    pnl = amt * (price - cost_price) - fee
-                    long_close_cnt += 1
-                else:
-                    pnl = amt * (cost_price - price) - fee
-                    short_close_cnt += 1
-
+                pnl = amt * (price - cost_price) - fee if side == 'LONG' else amt * (cost_price - price) - fee
                 log['pnl'] = pnl
-
-                if pnl > 0:
-                    win_trades += 1
-                    total_profit += pnl
-                else:
-                    loss_trades += 1
-                    total_loss += abs(pnl)
-
-                if coin_states[c]['entry_time'] is not None:
-                    holding_times.append(time_ - coin_states[c]['entry_time'])
-
             coin_states[c] = {'qty': 0.0, 'cost': 0.0, 'entry_time': None, 'side': None}
 
-    total_closed_trades = win_trades + loss_trades
-    win_rate = win_trades / total_closed_trades if total_closed_trades > 0 else 0.0
-    avg_profit = total_profit / win_trades if win_trades > 0 else 0.0
-    avg_loss = total_loss / loss_trades if loss_trades > 0 else 0.0
-    profit_loss_ratio = avg_profit / avg_loss if avg_loss > 0 else float('inf')
-    avg_holding_time = sum(holding_times, timedelta()) / len(holding_times) if holding_times else timedelta(0)
+    new_positions_dict = {coins[i]: positions_arr[i] for i in range(n_coins) if abs(positions_arr[i]) > 1e-9}
 
-    if verbose:
-        print("\n" + "=" * 45)
-        print(f"📊 【测试结果面板】: {param_name}")
-        print("-" * 45)
-        print(f"💸[资金与收益]")
-        print(f"  初始资金:     ${INITIAL_CAPITAL:.2f}")
-        print(f"  最终资金:     ${final_equity:.2f}")
-        print(f"  总收益率:     {total_return * 100:.2f}%")
-        print(f"  年化收益率:   {annual_return * 100:.2f}%")
-        print(f"🛡️ [风险与绩效指标]")
-        print(f"  最大回撤:     {max_drawdown * 100:.2f}%")
-        print(f"  夏普比率:     {sharpe_ratio:.2f}")
-        print(f"  卡玛比率:     {calmar_ratio:.2f}")
-        print(f"⚖️ [交易统计]")
-        print(f"  总触发动作:   {len(trade_logs)} 次")
-        print(f"  有效平仓笔数: {total_closed_trades} 笔 (多头: {long_close_cnt} | 空头: {short_close_cnt})")
-        if total_closed_trades > 0:
-            print(f"  胜率 (Win%):  {win_rate * 100:.2f}%")
-            print(f"  盈亏比 (P/L): {profit_loss_ratio:.2f}")
-            print(f"  单笔均盈:     ${avg_profit:.2f}")
-            print(f"  单笔均亏:     ${avg_loss:.2f}")
-            print(f"  平均持仓时间: {avg_holding_time}")
-        else:
-            print("  (无有效平仓记录)")
-        print("=" * 45)
+    new_state = {
+        'cash': cash,
+        'positions': new_positions_dict,
+        'coin_states': coin_states
+    }
 
-    logs_df = pd.DataFrame(trade_logs)
+    curve_df = pd.DataFrame({'equity': equity_values}, index=equity_times)
+    curve_df.index.name = 'time'
 
-    metrics = calculate_comprehensive_metrics(
-        logs_df=logs_df,
-        curve_df=curve_df,
-        price_df=df,
-        custom_params=custom_params,
-        param_name=param_name,
-        initial_capital=INITIAL_CAPITAL,
-        fee_rate=FEE_RATE,
-        final_equity_override=final_equity
-    )
-
-    if verbose:
-        _print_comprehensive_panel(metrics, param_name=param_name)
-
-    metrics_df = pd.DataFrame([metrics])
-
-    return logs_df, curve_df, metrics_df
+    return new_state, trade_logs, curve_df
 
 
-def _parallel_worker_task(i, params, df_4h):
-    param_name = f"Grid_No.{i + 1}"
-    try:
-        _, _, metrics_df = run_backtest(
-            df_4h,
-            param_name=param_name,
-            custom_params=params,
-            verbose=False
-        )
-        return True, metrics_df, params, param_name, None
-    except Exception as e:
-        return False, None, params, param_name, str(e)
-
-
-def build_clean_param_grid(df_len):
+# ==========================================
+# 🔴 核心改动 3: 参数动态过滤
+# ==========================================
+def build_clean_param_grid(min_warmup_bars):
     base_grid = {
-        'MOM_WINDOW': sorted([
-            6, 12, 18, 24, 30, 36, 42, 48, 60, 72, 84, 90,
-            120, 168, 180, 240, 360, 480, 540, 720, 1080, 1440, 2190
-        ]),
-        'VOL_WINDOW': sorted([
-            6, 12, 18, 24, 36, 42, 48, 60, 84, 90,
-            120, 180, 240, 360, 480, 540, 720
-        ]),
-        'BTC_TREND_WINDOW': sorted([
-            30, 60, 90, 120, 180, 270, 300, 360, 540,
-            720, 1080, 1200, 1440, 2160
-        ]),
-        'MAX_WEIGHT': sorted([
-            0.05, 0.10, 0.12, 0.15, 0.20, 0.25,
-            0.30, 0.40, 0.50, 0.70, 1.00
-        ]),
+        'MOM_WINDOW': sorted(
+            [6, 12, 18, 24, 30, 36, 42, 48, 60, 72, 84, 90, 120, 168, 180, 240, 360, 480, 540, 720, 1080, 1440, 2190]),
+        'VOL_WINDOW': sorted([6, 12, 18, 24, 36, 42, 48, 60, 84, 90, 120, 180, 240, 360, 480, 540, 720]),
+        'BTC_TREND_WINDOW': sorted([30, 60, 90, 120, 180, 270, 300, 360, 540, 720, 1080, 1200, 1440, 2160]),
+        'MAX_WEIGHT': sorted([0.05, 0.10, 0.12, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50, 0.70, 1.00]),
         'TOP_K': [1, 2, 3]
     }
 
@@ -1191,8 +814,8 @@ def build_clean_param_grid(df_len):
         mom, vol, btc = p['MOM_WINDOW'], p['VOL_WINDOW'], p['BTC_TREND_WINDOW']
         if tk * mw > 1.0 + 1e-9:
             return False
-        DATA_BARS = df_len
-        if max(mom, vol, btc) > DATA_BARS * 0.40:
+        # 🔴 基于严格预热数据拦截，不符合条件的坚决抛弃
+        if max(mom, vol, btc) > min_warmup_bars:
             return False
         return True
 
@@ -1200,26 +823,72 @@ def build_clean_param_grid(df_len):
     return clean_combos
 
 
-def append_benchmarks_to_existing_csv(result_csv_path, price_df_4h):
-    """
-    🔴 优化：直接接收内存中的 price_df_4h，消除重复加载 CSV 文件的冗余 I/O。
-    """
+# ==========================================
+# 🔴 核心改动 4: 串行连接执行器 (缝合资金曲线)
+# ==========================================
+def _parallel_worker_task(i, params, yearly_data_cache, global_price_df, pool_years):
+    param_name = f"Grid_No.{i + 1}"
+    try:
+        # 初始资金状态
+        state = {
+            'cash': INITIAL_CAPITAL,
+            'positions': {},
+            'coin_states': {}
+        }
+
+        all_logs = []
+        all_curves = []
+
+        # 按年份依次串行执行
+        for idx, year in enumerate(pool_years):
+            df_year = yearly_data_cache[year]
+            next_year_coins = None
+
+            if idx < len(pool_years) - 1:
+                next_year = pool_years[idx + 1]
+                next_df = yearly_data_cache[next_year]
+                next_year_coins = [c for c in next_df.columns if not any(s in c for s in ['_open', '_high', '_low'])]
+
+            state, year_logs, curve_df = run_backtest_single_year(
+                df=df_year, year=year, prev_state=state, custom_params=params, next_year_coins=next_year_coins
+            )
+
+            all_logs.extend(year_logs)
+            if not curve_df.empty:
+                all_curves.append(curve_df)
+
+        # 完美缝合所有年份记录
+        full_curve_df = pd.concat(all_curves)
+        full_curve_df = full_curve_df[~full_curve_df.index.duplicated(keep='last')]
+        logs_df = pd.DataFrame(all_logs)
+
+        # 全局重新计算一次综合评价所需的资金指标
+        metrics = calculate_comprehensive_metrics(
+            logs_df=logs_df,
+            curve_df=full_curve_df,
+            price_df=global_price_df,  # 全局价格表
+            custom_params=params,
+            param_name=param_name,
+            initial_capital=INITIAL_CAPITAL,
+            fee_rate=FEE_RATE
+        )
+        return True, pd.DataFrame([metrics]), params, param_name, None
+
+    except Exception as e:
+        import traceback
+        return False, None, params, param_name, traceback.format_exc()
+
+
+def append_benchmarks_to_existing_csv(result_csv_path, global_price_df):
     print("\n" + "═" * 78)
     print(f"🛠️ 启动后处理：向回测结果注入基准指标")
     print("═" * 78)
 
-    if not os.path.exists(result_csv_path):
-        print(f"❌ 找不到指定的CSV文件: {result_csv_path}")
-        return
-
-    print(f"📥 1. 正在读取已有的回测结果...")
+    if not os.path.exists(result_csv_path): return
     results_df = pd.read_csv(result_csv_path)
 
-    original_columns = set(results_df.columns)
-
-    print(f"🧮 2. 正在计算全局和各年度基准...")
-    coins = [c for c in price_df_4h.columns if not any(s in c for s in ['_open', '_high', '_low'])]
-    df_4h_close = price_df_4h[coins]
+    coins = [c for c in global_price_df.columns if not any(s in c for s in ['_open', '_high', '_low'])]
+    df_4h_close = global_price_df[coins]
 
     roll_max = df_4h_close.cummax()
     drawdowns = (df_4h_close - roll_max) / roll_max
@@ -1241,92 +910,54 @@ def append_benchmarks_to_existing_csv(result_csv_path, price_df_4h):
 
     annual_benchmarks = {}
     for year, group in df_4h_close.groupby(df_4h_close.index.year):
-        ys = group.iloc[0]
-        ye = group.iloc[-1]
+        ys, ye = group.iloc[0], group.iloc[-1]
         y_pct = (ye - ys) / ys
         annual_benchmarks[int(year)] = y_pct.mean()
         results_df[f'benchmark_year_{year}_return'] = y_pct.mean()
 
-    print(f"✨ 3. 正在计算超额收益 (Alpha)...")
     if 'total_return' in results_df.columns:
         results_df['excess_total_return'] = results_df['total_return'] - results_df['benchmark_avg_return']
 
     for year, b_ret in annual_benchmarks.items():
-        strat_col = f'year_{year}_return'
-        excess_col = f'year_{year}_excess_return'
-        if strat_col in results_df.columns:
-            results_df[excess_col] = results_df[strat_col] - b_ret
-
-    new_columns = set(results_df.columns)
-    added_columns = sorted(list(new_columns - original_columns))
-
-    print("\n" + "-" * 50)
-    print("📋 【本次成功注入的新增字段清单】:")
-
-    coin_benchmarks = [c for c in added_columns if
-                       c.startswith('benchmark_') and not c.startswith('benchmark_year') and not c.startswith(
-                           'benchmark_avg')]
-    global_benchmarks = [c for c in added_columns if c.startswith('benchmark_avg')]
-    year_benchmarks = [c for c in added_columns if c.startswith('benchmark_year')]
-    excess_returns = [c for c in added_columns if 'excess' in c]
-
-    if coin_benchmarks:
-        print("  🔸 各标的基准 (Buy & Hold):")
-        for col in coin_benchmarks: print(f"      - {col}")
-    if global_benchmarks:
-        print("  🔸 大盘等权基准:")
-        for col in global_benchmarks: print(f"      - {col}")
-    if year_benchmarks:
-        print("  🔸 各年度等权基准:")
-        for col in year_benchmarks: print(f"      - {col}")
-    if excess_returns:
-        print("  🏆 超额收益 (策略 vs 大盘基准):")
-        for col in excess_returns: print(f"      - {col}")
-    print("-" * 50 + "\n")
+        if f'year_{year}_return' in results_df.columns:
+            results_df[f'year_{year}_excess_return'] = results_df[f'year_{year}_return'] - b_ret
 
     output_path = result_csv_path.replace('.csv', '_with_Benchmark.csv')
     results_df.to_csv(output_path, index=False, encoding='utf-8-sig')
-
-    print(f"✅ 注入完成！共更新 {len(results_df)} 条参数记录，新增了 {len(added_columns)} 个分析字段。")
-    print(f"💾 新文件已保存至: {output_path}")
-    print("═" * 78)
+    print(f"✅ 注入完成！新文件已保存至: {output_path}")
 
 
+# ==========================================
+# 🔴 核心改动 5: 组装引擎执行搜索
+# ==========================================
 def run_grid_search(max_workers=15):
     print("\n" + "═" * 70)
-    print(f"🚀 启动参数暴力搜索引擎 (完全独立闭环版 - 并行加速)")
+    print(f"🚀 启动参数暴力搜索引擎 (动态标的池/状态流转版)")
     print("═" * 70)
 
-    file_list_new = [
-        "kline_data/BTCUSDT_1m_merged.csv",
-        "kline_data/ETHUSDT_1m_merged.csv",
-        "kline_data/BNBUSDT_1m_merged.csv",
-        "kline_data/XRPUSDT_1m_merged.csv",
-        "kline_data/SOLUSDT_1m_merged.csv",
-        "kline_data/ADAUSDT_1m_merged.csv",
-        "kline_data/DOGEUSDT_1m_merged.csv",
-    ]
+    # 1. 组装缓存层，严格获取全局最小可用 warmup
+    yearly_data_cache, global_price_df, min_warmup_bars = prepare_environment(YEARLY_POOL_CONFIG)
+    pool_years = sorted(list(yearly_data_cache.keys()))
 
-    save_dir = r'W:\project\python_project\oke_auto_trade\param_search_results'
-    df_4h = load_and_preprocess_data_new(file_list_new)
-
-    df_len = len(df_4h)
-    param_combinations = build_clean_param_grid(df_len)
+    # 2. 生成过滤参数 (利用 min_warmup_bars)
+    param_combinations = build_clean_param_grid(min_warmup_bars)
     total_combos = len(param_combinations)
-    keys = list(param_combinations[0].keys())
 
-    filename = f"grid_search_{total_combos}_{GLOBAL_TRADE_MODE}_new_pool.csv"
+    if total_combos == 0:
+        print("❌ 警告：所有参数组合都被严格预热约束拦截过滤掉了！请缩小参数步长或放宽标的池时间！")
+        return pd.DataFrame()
+
+    keys = list(param_combinations[0].keys())
+    save_dir = r'W:\project\python_project\oke_auto_trade\param_search_results'
+    filename = f"grid_search_{total_combos}_{GLOBAL_TRADE_MODE}_dynamic_pool.csv"
     save_path = os.path.join(save_dir, filename)
 
-    print(f"\n   ► 参数维度: {len(keys)} 维 ({', '.join(keys)})")
+    print(f"\n   ► 包含交易年份: {pool_years}")
+    print(f"   ► 参数维度: {len(keys)} 维 ({', '.join(keys)})")
     print(f"   ► 总搜索量: {total_combos} 组组合")
-    print(f"   ► 存储路径: {save_dir}")
-    print(f"   ► 并行进程: {max_workers} 个")
     print("═" * 70)
 
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
-        print(f"📁 已自动创建输出目录: {save_dir}")
+    if not os.path.exists(save_dir): os.makedirs(save_dir)
 
     all_metrics_df = []
     start_time = time.time()
@@ -1334,7 +965,8 @@ def run_grid_search(max_workers=15):
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         future_to_task = {
-            executor.submit(_parallel_worker_task, i, params, df_4h): (i, params)
+            executor.submit(_parallel_worker_task, i, params, yearly_data_cache, global_price_df, pool_years): (
+            i, params)
             for i, params in enumerate(param_combinations)
         }
 
@@ -1343,45 +975,33 @@ def run_grid_search(max_workers=15):
             success, metrics_df, res_params, param_name, err_msg = future.result()
 
             completed_count += 1
-
             progress_pct = completed_count / total_combos * 100
             elapsed = time.time() - start_time
             avg_time = elapsed / completed_count if completed_count > 0 else 0
             eta = avg_time * (total_combos - completed_count)
 
-            print(f"\r⏳ 进度: [{completed_count}/{total_combos}] {progress_pct:5.1f}% | "
-                  f"耗时: {elapsed:.1f}s | 预估剩余: {eta:.1f}s | 刚完成测算: {res_params}", end="")
+            print(
+                f"\r⏳ 进度: [{completed_count}/{total_combos}] {progress_pct:5.1f}% | 耗时: {elapsed:.1f}s | 预估剩余: {eta:.1f}s | 最新完成: {res_params}",
+                end="")
 
             if success:
                 all_metrics_df.append(metrics_df)
             else:
-                print(f"\n❌ [异常捕获] {param_name} 测试失败: {res_params} | 错误信息: {err_msg}")
+                print(f"\n❌ [异常捕获] {param_name} 测试失败 | 错误信息:\n{err_msg}")
 
     print("\n\n✅ 搜索任务执行完毕！正在聚合保存数据...")
-
-    if not all_metrics_df:
-        print("⚠️ 未生成任何有效评价数据。")
-        return pd.DataFrame()
+    if not all_metrics_df: return pd.DataFrame()
 
     aggregated_df = pd.concat(all_metrics_df, ignore_index=True)
-
     aggregated_df.to_csv(save_path, index=False, encoding='utf-8-sig')
 
-    # 🔴 优化：直接将内存里的 df_4h 传给基准计算函数，不再从磁盘重新读一遍
-    append_benchmarks_to_existing_csv(save_path, df_4h)
+    append_benchmarks_to_existing_csv(save_path, global_price_df)
 
-    total_time = time.time() - start_time
-    print("═" * 70)
-    print(f"🎉 搜索圆满结束！")
-    print(f"⏱️ 总耗时: {total_time / 60:.2f} 分钟")
-    print(f"💾 结果已保存至:\n   {save_path}")
+    print(f"⏱️ 总耗时: {(time.time() - start_time) / 60:.2f} 分钟")
     print("═" * 70)
 
     return aggregated_df
 
 
-# ==========================================
-# 实际调用示例 (极简到极致)
-# ==========================================
 if __name__ == "__main__":
     run_grid_search()
