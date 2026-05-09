@@ -530,13 +530,12 @@ def calculate_comprehensive_metrics(logs_df, curve_df, price_df, custom_params, 
                   'annual_calmar_mean', 'profitable_years_ratio']: metrics[k] = 0.0
         metrics['profitable_years'] = metrics['total_years'] = 0
 
-    if 'BTC' in price_df.columns and 'BTC_TREND_WINDOW' in custom_params:
-        btw = custom_params['BTC_TREND_WINDOW']
-        btc_ma = price_df['BTC'].rolling(window=btw).mean()
-        btc_on = (price_df['BTC'] > btc_ma).reindex(curve_df.index).fillna(False)
+    if 'BTC_TREND_WINDOW' in custom_params and 'btc_trend_on' in curve_df.columns:
+        btc_on = curve_df['btc_trend_on'].fillna(False)
         btc_on_lag = btc_on.shift(1).fillna(False)
-        bull_rets = rets_4h[btc_on_lag.reindex(rets_4h.index).fillna(False)]
-        bear_rets = rets_4h[~btc_on_lag.reindex(rets_4h.index).fillna(False)]
+
+        bull_rets = rets_4h[btc_on_lag]
+        bear_rets = rets_4h[~btc_on_lag]
 
         metrics['bull_regime_total_return'] = float((1 + bull_rets).prod() - 1) if len(bull_rets) > 0 else 0.0
         metrics['bull_regime_bars'] = int(len(bull_rets))
@@ -789,6 +788,7 @@ def run_backtest_single_year(df, year, prev_state, custom_params, next_year_coin
 
     curve_df = pd.DataFrame({'equity': equity_values}, index=equity_times)
     curve_df.index.name = 'time'
+    curve_df['btc_trend_on'] = btc_trend_arr[start_trade_idx:]  # ➕ 加这一行
 
     return new_state, trade_logs, curve_df
 
@@ -798,8 +798,7 @@ def run_backtest_single_year(df, year, prev_state, custom_params, next_year_coin
 # ==========================================
 def build_clean_param_grid(min_warmup_bars):
     base_grid = {
-        'MOM_WINDOW': sorted(
-            [6, 12, 18, 24, 30, 36, 42, 48, 60, 72, 84, 90, 120, 168, 180, 240, 360, 480, 540, 720, 1080, 1440, 2190]),
+        'MOM_WINDOW': sorted([6, 12, 18, 24, 30, 36, 42, 48, 60, 72, 84, 90, 120, 168, 180, 240, 360, 480, 540, 720, 1080, 1440, 2190]),
         'VOL_WINDOW': sorted([6, 12, 18, 24, 36, 42, 48, 60, 84, 90, 120, 180, 240, 360, 480, 540, 720]),
         'BTC_TREND_WINDOW': sorted([30, 60, 90, 120, 180, 270, 300, 360, 540, 720, 1080, 1200, 1440, 2160]),
         'MAX_WEIGHT': sorted([0.05, 0.10, 0.12, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50, 0.70, 1.00]),
@@ -814,8 +813,8 @@ def build_clean_param_grid(min_warmup_bars):
         mom, vol, btc = p['MOM_WINDOW'], p['VOL_WINDOW'], p['BTC_TREND_WINDOW']
         if tk * mw > 1.0 + 1e-9:
             return False
-        # 🔴 基于严格预热数据拦截，不符合条件的坚决抛弃
-        if max(mom, vol, btc) > min_warmup_bars:
+        # ✅ 修复: ATR 需要 VOL_WINDOW + 1 根 K 线，这里补上 +1 保证发车时绝对没有 NaN
+        if max(mom, vol, btc) + 1 > min_warmup_bars:
             return False
         return True
 
@@ -862,6 +861,16 @@ def _parallel_worker_task(i, params, yearly_data_cache, global_price_df, pool_ye
         full_curve_df = full_curve_df[~full_curve_df.index.duplicated(keep='last')]
         logs_df = pd.DataFrame(all_logs)
 
+        # ✅ 核心修复: 在所有年份跑完后，获取最后一年的最后一根收盘价，精确计算包含持仓市值的最终资金
+        last_year = pool_years[-1]
+        last_df = yearly_data_cache[last_year]
+        last_close_row = last_df.iloc[-1]
+
+        final_equity_computed = state['cash']
+        for c, qty in state['positions'].items():
+            if c in last_close_row.index:
+                final_equity_computed += qty * last_close_row[c]
+
         # 全局重新计算一次综合评价所需的资金指标
         metrics = calculate_comprehensive_metrics(
             logs_df=logs_df,
@@ -870,7 +879,8 @@ def _parallel_worker_task(i, params, yearly_data_cache, global_price_df, pool_ye
             custom_params=params,
             param_name=param_name,
             initial_capital=INITIAL_CAPITAL,
-            fee_rate=FEE_RATE
+            fee_rate=FEE_RATE,
+            final_equity_override=final_equity_computed  # ✅ 核心修复: 强制传入精确算好的最终资金
         )
         return True, pd.DataFrame([metrics]), params, param_name, None
 
@@ -881,42 +891,70 @@ def _parallel_worker_task(i, params, yearly_data_cache, global_price_df, pool_ye
 
 def append_benchmarks_to_existing_csv(result_csv_path, global_price_df):
     print("\n" + "═" * 78)
-    print(f"🛠️ 启动后处理：向回测结果注入基准指标")
+    print(f"🛠️ 启动后处理：构建【动态合成大盘指数】并注入基准指标")
     print("═" * 78)
 
     if not os.path.exists(result_csv_path): return
     results_df = pd.read_csv(result_csv_path)
 
-    coins = [c for c in global_price_df.columns if not any(s in c for s in ['_open', '_high', '_low'])]
-    df_4h_close = global_price_df[coins]
-
-    roll_max = df_4h_close.cummax()
-    drawdowns = (df_4h_close - roll_max) / roll_max
-    max_drawdowns = drawdowns.min()
-
-    start_prices = df_4h_close.iloc[0]
-    end_prices = df_4h_close.iloc[-1]
-    pct_changes = (end_prices - start_prices) / start_prices
-
-    avg_pct_change = pct_changes.mean()
-    avg_mdd = max_drawdowns.mean()
-
-    for c in coins:
-        results_df[f'benchmark_{c}_return'] = pct_changes[c]
-        results_df[f'benchmark_{c}_max_dd'] = max_drawdowns[c]
-
-    results_df['benchmark_avg_return'] = avg_pct_change
-    results_df['benchmark_avg_max_dd'] = avg_mdd
+    # 1. 初始化大盘指数资金曲线
+    bench_equity = pd.Series(index=global_price_df.index, dtype=float)
+    current_capital = 1.0  # 基准指数的初始净值设为 1.0
 
     annual_benchmarks = {}
-    for year, group in df_4h_close.groupby(df_4h_close.index.year):
-        ys, ye = group.iloc[0], group.iloc[-1]
-        y_pct = (ye - ys) / ys
-        annual_benchmarks[int(year)] = y_pct.mean()
-        results_df[f'benchmark_year_{year}_return'] = y_pct.mean()
 
+    # 2. 按年生成动态等权指数并拼接
+    pool_years = sorted(list(set(global_price_df.index.year)))
+
+    for year in pool_years:
+        # 切出当年的数据
+        year_mask = global_price_df.index.year == year
+        year_df = global_price_df.loc[year_mask]
+        main_cols = [c for c in year_df.columns if not any(s in c for s in ['_open', '_high', '_low'])]
+        year_df = year_df[main_cols]
+        # 🎯 核心逻辑：剔除当年全为 NaN 的币（即当年不在标的池的币种，如 2021 年的 SOL）
+        year_coins_df = year_df.dropna(axis=1, how='all')
+
+        if year_coins_df.empty:
+            continue
+
+        # 将年初第一根 K 线价格作为基准 1.0（归一化）
+        start_prices = year_coins_df.iloc[0]
+        normalized_df = year_coins_df / start_prices
+
+        # 当年等权组合的走势曲线
+        year_curve = normalized_df.mean(axis=1)
+
+        # 按照上一年年末的资金量，进行等比例缩放（资金继承）
+        bench_equity.loc[year_mask] = year_curve * current_capital
+
+        # 更新跨年继承资金
+        current_capital = bench_equity.loc[year_mask].iloc[-1]
+
+        # 记录当年的大盘收益率
+        annual_benchmarks[year] = year_curve.iloc[-1] - 1.0
+
+    # 3. 补全可能的 NaN（用前值填充）
+    bench_equity = bench_equity.ffill()
+
+    # 4. 计算真正的全局大盘指标 (基于合成指数曲线)
+    global_bench_return = bench_equity.iloc[-1] - 1.0
+
+    # 计算全局大盘最大回撤
+    roll_max = bench_equity.cummax()
+    drawdowns = (bench_equity - roll_max) / roll_max
+    global_bench_max_dd = drawdowns.min()
+
+    # 5. 写入 CSV 报表
+    results_df['benchmark_global_return'] = global_bench_return
+    results_df['benchmark_global_max_dd'] = global_bench_max_dd
+
+    for year, b_ret in annual_benchmarks.items():
+        results_df[f'benchmark_year_{year}_return'] = b_ret
+
+    # 6. 计算极其严谨的超额收益 (Alpha)
     if 'total_return' in results_df.columns:
-        results_df['excess_total_return'] = results_df['total_return'] - results_df['benchmark_avg_return']
+        results_df['excess_global_return'] = results_df['total_return'] - results_df['benchmark_global_return']
 
     for year, b_ret in annual_benchmarks.items():
         if f'year_{year}_return' in results_df.columns:
@@ -924,8 +962,10 @@ def append_benchmarks_to_existing_csv(result_csv_path, global_price_df):
 
     output_path = result_csv_path.replace('.csv', '_with_Benchmark.csv')
     results_df.to_csv(output_path, index=False, encoding='utf-8-sig')
-    print(f"✅ 注入完成！新文件已保存至: {output_path}")
 
+    print(
+        f"📊 动态大盘指数 (等权复利) 终极表现: 收益率 {global_bench_return * 100:+.2f}% | 最大回撤 {global_bench_max_dd * 100:.2f}%")
+    print(f"✅ 科学基准注入完成！新文件已保存至: {output_path}")
 
 # ==========================================
 # 🔴 核心改动 5: 组装引擎执行搜索
