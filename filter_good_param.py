@@ -15,7 +15,7 @@ from collections import defaultdict
 # ═══════════════════════════════════════════════════════════════════════════
 # 配置区
 # ═══════════════════════════════════════════════════════════════════════════
-RESULTS_PATH = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_147798_BOTH_with_Benchmark.csv'
+RESULTS_PATH = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_BOTH_dynamic_pool_offset_1h_with_Benchmark.csv'
 OUTPUT_DIR   = r'W:\project\python_project\oke_auto_trade\param_search_results\evaluation'
 
 # ---- Layer 1: 基础健康度过滤 (只淘汰反常，不筛选优秀) ----
@@ -639,14 +639,172 @@ def evaluate(results_path):
     print_rejection_summary(df, 'L3_PASS', 'L3_REASONS', 'L3 约束')
     print_top_candidates(df, PRIMARY_OBJECTIVE, varying, top_n=5)
 
-    # 保存
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    base = os.path.splitext(os.path.basename(results_path))[0]
-    save_path = os.path.join(OUTPUT_DIR, f'{base}_evaluated.csv')
-    df.to_csv(save_path, index=False, encoding='utf-8-sig')
-    print(f"\n💾 完整评估结果已保存: {save_path}")
+    # # 保存
+    # os.makedirs(OUTPUT_DIR, exist_ok=True)
+    # base = os.path.splitext(os.path.basename(results_path))[0]
+    # save_path = os.path.join(OUTPUT_DIR, f'{base}_evaluated.csv')
+    # df.to_csv(save_path, index=False, encoding='utf-8-sig')
+    # print(f"\n💾 完整评估结果已保存: {save_path}")
 
     return df
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 🎯 指定参数定点查询打印
+# ═══════════════════════════════════════════════════════════════════════════
+def print_specific_params(df, target_params, primary_obj, varying_params):
+    """
+    根据给定的参数字典，查找并打印该参数组合的详细表现。
+     target_params: dict, 例如 {'MOM_WINDOW': 72, 'MAX_WEIGHT': 0.15, ...}
+    """
+    print("\n" + "═" * 80)
+    print(f"🎯 指定参数组合深度核查")
+    print("═" * 80)
+
+    # 1. 构建查询条件 (处理列名并解决浮点数精度匹配问题)
+    mask = pd.Series(True, index=df.index)
+    for k, v in target_params.items():
+        # 自动适配带不带 'param_' 前缀的情况
+        col = f"param_{k}" if not k.startswith("param_") else k
+        if col in df.columns:
+            if isinstance(v, float):
+                mask &= np.isclose(df[col].fillna(-999.9), v, atol=1e-5)
+            else:
+                mask &= (df[col] == v)
+        else:
+            print(f"⚠️ 找不到参数列: {col}")
+            return
+
+    match_df = df[mask]
+
+    if len(match_df) == 0:
+        print(f"❌ 未在回测结果中找到匹配的参数组合: \n{target_params}")
+        return
+    elif len(match_df) > 1:
+        print(f"⚠️ 找到 {len(match_df)} 条匹配记录，仅展示第一条。")
+
+    # 取出该行数据
+    row = match_df.iloc[0]
+
+    # --- 格式化辅助函数 ---
+    def fmt_pct(val, dec=1):
+        return f"{val * 100:+.{dec}f}%" if pd.notna(val) else "N/A"
+
+    def fmt_pct_abs(val, dec=1):
+        return f"{val * 100:.{dec}f}%" if pd.notna(val) else "N/A"
+
+    def fmt_flt(val, dec=3):
+        return f"{val:.{dec}f}" if pd.notna(val) else "N/A"
+
+    def fmt_int(val):
+        return f"{int(val)}" if pd.notna(val) else "0"
+
+    p_name = row.get('param_name', 'Target_Grid')
+    score = row.get('FINAL_SCORE', np.nan)
+
+    print(f"\n" + "▼" * 80)
+    print(f" 🎯 目标追踪 | 参数代号: {p_name}")
+    print(f"   ► 稳健综合分: {fmt_flt(score, 4)}  [计算逻辑: 邻域均值 × 邻域存活率 / (1 + 邻域CV)]")
+    print("─" * 80)
+
+    print(" [⚙️ 策略参数配置]")
+    param_strs = [f"{p.replace('param_', '')}: {row.get(p, 'N/A')}" for p in varying_params]
+    print(f"   ► {',  '.join(param_strs)}")
+
+    # 🌟 新增：漏斗通关状态诊断（为什么它没上榜？）
+    print("\n [🚦 漏斗诊断状态 (揭秘为何未上榜)]")
+    l1 = "✅ 通过" if row.get('L1_PASS') else f"❌ 淘汰 ({row.get('L1_REASONS', '未知')})"
+    l2 = "✅ 通过" if row.get('L2_PARETO') else "❌ 淘汰 (被其他参数支配)"
+    l3 = "✅ 通过" if row.get('L3_PASS') else f"❌ 淘汰 ({row.get('L3_REASONS', '未知')})"
+    l4 = "✅ 通过" if row.get('L4_PASS') else "❌ 淘汰 (平原悬崖或容量不足)"
+    l5 = "✅ 通过" if row.get('L5_PASS') else "❌ 淘汰 (年度或半年度不稳)"
+    print(f"   ├─ L1 基础健康: {l1}")
+    print(f"   ├─ L2 Pareto  : {l2} (Rank: {row.get('PARETO_RANK', 'N/A')})")
+    print(f"   ├─ L3 约束偏好: {l3}")
+    print(f"   ├─ L4 邻域稳定: {l4}")
+    print(f"   └─ L5 时间稳定: {l5}")
+
+    print("\n [📊 核心基础绩效]")
+    print(
+        f"   ├─ 交易统计: {fmt_int(row.get('total_closed_trades'))} 笔平仓 | 胜率: {fmt_pct_abs(row.get('win_rate'))} | 盈亏比: {fmt_flt(row.get('profit_loss_ratio'), 2)}")
+    print(f"   ├─ 收益状况: 总收益: {fmt_pct(row.get('total_return'))} | 年化收益: {fmt_pct(row.get('annual_return'))}")
+
+    max_uw_days = row.get('max_time_under_water_days', np.nan)
+    total_days = row.get('days_passed', np.nan)
+    uw_str = f"{fmt_flt(max_uw_days, 1)}天"
+    if pd.notna(max_uw_days) and pd.notna(total_days) and total_days > 0:
+        uw_str += f" (占回测总时长 {fmt_pct_abs(max_uw_days / total_days, 1)})"
+
+    print(
+        f"   ├─ 回撤体验: 最大回撤: {fmt_pct(row.get('max_drawdown'))} | 最长水下期: {uw_str} | 平均恢复: {fmt_flt(row.get('avg_recovery_time_days'), 1)}天")
+    print(
+        f"   ├─ 风险调整: {primary_obj}(主目标): {fmt_flt(row.get(primary_obj))} | 盈利月占比: {fmt_pct_abs(row.get('monthly_positive_ratio'))}")
+    print(
+        f"   └─ 集中度险: 币种HHI: {fmt_flt(row.get('asset_hhi'))} | 最赚1笔占比: {fmt_pct_abs(row.get('top1_pnl_ratio'))}")
+
+    print("\n [🛡️ 参数平原与鲁棒性验证]")
+    print(
+        f"   ├─ 平原稳定性: 邻居容量 [目标: {fmt_int(row.get('L4_TARGET_NEIGHBOR_COUNT'))} | 实际: {fmt_int(row.get('L4_NEIGHBOR_COUNT'))} | 存活: {fmt_int(row.get('L4_SURVIVING_NEIGHBOR_COUNT'))}] | 存活率: {fmt_pct_abs(row.get('L4_NEIGHBOR_HEALTH_RATE'), 0)}")
+    print(
+        f"   ├─ 邻域绩效评估: 主目标均值: {fmt_flt(row.get('L4_NEIGHBOR_OBJ_MEAN'))} | 颠簸度CV: {fmt_flt(row.get('L4_NEIGHBOR_OBJ_CV'), 4)}")
+    print(f"   └─ 成本压力测: 增加20bps双边滑点后，年化收益变为 -> {fmt_pct(row.get('cost_stress_20bps_annual'))}")
+
+    print("\n [📅 年度表现拆解]")
+    year_cols = [c for c in df.columns if c.startswith('year_') and c.endswith('_return')]
+    if year_cols:
+        years = sorted(list(set([int(c.split('_')[1]) for c in year_cols])))
+        for y in years:
+            y_ret = row.get(f'year_{y}_return', np.nan)
+            y_dd = row.get(f'year_{y}_max_dd', np.nan)
+            y_bench_ret = row.get(f'benchmark_year_{y}_return', np.nan)
+            excess_ret = row.get(f'year_{y}_excess_return', np.nan)
+
+            if pd.notna(y_bench_ret):
+                bench_str = f" | 基准收益: {fmt_pct(y_bench_ret):>7} | 🌟超额收益: {fmt_pct(excess_ret):>7}"
+            else:
+                bench_str = ""
+
+            if pd.notna(y_ret):
+                print(f"   ► {y}年: 策略收益: {fmt_pct(y_ret):>7} (最大回撤 {fmt_pct(y_dd):>7}){bench_str}")
+    else:
+        print("   ► (无年度拆解数据)")
+
+    print("\n [🪙 标的盈亏贡献明细 (按净利润排序)]")
+    asset_cols = [c for c in df.columns if c.startswith('asset_') and c.endswith('_net_pnl')]
+    if asset_cols:
+        assets_info = []
+        for c in asset_cols:
+            coin = c.replace('asset_', '').replace('_net_pnl', '')
+            net_pnl = row.get(c, 0.0)
+            trades = row.get(f'asset_{coin}_trades', 0)
+            win_r = row.get(f'asset_{coin}_win_rate', np.nan)
+            share = row.get(f'asset_{coin}_pnl_share', np.nan)
+            if trades > 0:
+                assets_info.append({'coin': coin, 'pnl': net_pnl, 'trades': trades, 'wr': win_r, 'share': share})
+
+        assets_info = sorted(assets_info, key=lambda x: x['pnl'], reverse=True)
+        for a in assets_info:
+            print(
+                f"   - {a['coin']:<6}: 净利润 ${a['pnl']:>8.2f} (利润占比: {fmt_pct_abs(a['share'])} ) | 交易: {fmt_int(a['trades']):>3}笔 | 胜率: {fmt_pct_abs(a['wr'])}")
+    else:
+        print("   ► (无标的拆解数据)")
+
+    print("▲" * 80 + "\n")
+
+
 if __name__ == "__main__":
     result_df = evaluate(RESULTS_PATH)
+
+    # 2. 🎯 指定想要核查的参数组合
+    # 注意: 键名不需要加 'param_' 前缀，函数内部会自动处理
+    target_check = {
+        'MOM_WINDOW': 72,
+        'VOL_WINDOW': 60,
+        'BTC_TREND_WINDOW': 720,
+        'MAX_WEIGHT': 0.15,
+        'TOP_K': 2
+    }
+    _, varying, _ = detect_param_cols(result_df)
+
+    # 3. 打印核查结果
+    print_specific_params(result_df, target_check, PRIMARY_OBJECTIVE, varying)
