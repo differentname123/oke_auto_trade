@@ -67,11 +67,11 @@ YEARLY_POOL_CONFIG = {
 
 
 # ==========================================
-# 🔴 核心改动 1: 环境预热与数据组装层
+# 🔴 核心改动 1: 环境预热与数据组装层 (支持时间相位错位)
 # ==========================================
-def prepare_environment(pool_config):
+def prepare_environment(pool_config, time_offset='0h'):
     print("\n" + "═" * 78)
-    print("⏳ 正在构建全周期动态标的池环境 (预加载与预热推导)...")
+    print(f"⏳ 正在构建全周期动态标的池环境 (预加载与预热推导 | 相位偏移: {time_offset})...")
     print("═" * 78)
 
     yearly_cache = {}
@@ -93,9 +93,14 @@ def prepare_environment(pool_config):
             df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
             df.set_index('open_time', inplace=True)
 
-            df_4h_coin = df['close'].resample('4h').agg(
+            # 🔴 [核心修改]: 在重采样中注入时间错位参数 offset
+            df_4h_coin = df['close'].resample('4h', offset=time_offset).agg(
                 open='first', high='max', low='min', close='last'
             )
+
+            # 🔴 [安全补丁]: 因为时间错位，首尾可能会切出全为 NaN 的碎片 K 线，必须清理
+            df_4h_coin.dropna(how='all', inplace=True)
+
             df_4h_coin.rename(columns={
                 'open': f"{coin_name}_open",
                 'high': f"{coin_name}_high",
@@ -145,7 +150,6 @@ def prepare_environment(pool_config):
     global_price_df = global_price_df[~global_price_df.index.duplicated(keep='first')]
 
     return yearly_cache, global_price_df, min_warmup_bars
-
 
 # ==========================================
 # 评价指标辅助函数 (保留原逻辑)
@@ -982,16 +986,18 @@ def append_benchmarks_to_existing_csv(result_csv_path, global_price_df):
         f"📊 动态大盘指数 (等权复利) 终极表现: 收益率 {global_bench_return * 100:+.2f}% | 最大回撤 {global_bench_max_dd * 100:.2f}%")
     print(f"✅ 科学基准注入完成！新文件已保存至: {output_path}")
 
+
 # ==========================================
-# 🔴 核心改动 5: 组装引擎执行搜索
+# 🔴 核心改动 5: 组装引擎执行搜索 (支持动态相位错位)
 # ==========================================
-def run_grid_search(max_workers=15):
+def run_grid_search(time_offset='0h', max_workers=15):
     print("\n" + "═" * 70)
-    print(f"🚀 启动参数暴力搜索引擎 (动态标的池/状态流转版)")
+    print(f"🚀 启动参数暴力搜索引擎 (动态标的池/状态流转版 | 相位错位: {time_offset})")
     print("═" * 70)
 
-    # 1. 组装缓存层，严格获取全局最小可用 warmup
-    yearly_data_cache, global_price_df, min_warmup_bars = prepare_environment(YEARLY_POOL_CONFIG)
+    # 1. 组装缓存层，严格获取全局最小可用 warmup (🔴 传入 time_offset)
+    yearly_data_cache, global_price_df, min_warmup_bars = prepare_environment(YEARLY_POOL_CONFIG,
+                                                                              time_offset=time_offset)
     pool_years = sorted(list(yearly_data_cache.keys()))
 
     # 2. 生成过滤参数 (利用 min_warmup_bars)
@@ -1004,7 +1010,9 @@ def run_grid_search(max_workers=15):
 
     keys = list(param_combinations[0].keys())
     save_dir = r'W:\project\python_project\oke_auto_trade\param_search_results'
-    filename = f"grid_search_{total_combos}_{GLOBAL_TRADE_MODE}_dynamic_pool.csv"
+
+    # 🔴 [核心修改]: 保存的 CSV 文件名称动态体现 time_offset
+    filename = f"grid_search_{total_combos}_{GLOBAL_TRADE_MODE}_dynamic_pool_offset_{time_offset}.csv"
     save_path = os.path.join(save_dir, filename)
 
     print(f"\n   ► 包含交易年份: {pool_years}")
@@ -1021,7 +1029,7 @@ def run_grid_search(max_workers=15):
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         future_to_task = {
             executor.submit(_parallel_worker_task, i, params, yearly_data_cache, global_price_df, pool_years): (
-            i, params)
+                i, params)
             for i, params in enumerate(param_combinations)
         }
 
@@ -1058,5 +1066,19 @@ def run_grid_search(max_workers=15):
     return aggregated_df
 
 
+# ==========================================
+# 🔴 底部入口：全自动遍历你指定的错位列表
+# ==========================================
 if __name__ == "__main__":
-    run_grid_search()
+    # 定义需要依次回测的时间错位列表
+    offsets = ['30min', '1h', '2h', '3h','0h']
+
+    for offset in offsets:
+        print(f"\n\n{'=' * 80}")
+        print(f"🌟 正在启动全局相位测试，当前测试阶段: [ 错位 {offset} ]")
+        print(f"{'=' * 80}")
+
+        # 依次回测，并传入当前的 offset
+        run_grid_search(time_offset=offset, max_workers=15)
+
+    print("\n🎉 所有时间错位测试已全部执行完毕！请前往 results 文件夹对比各相位的 CSV 表现。")
