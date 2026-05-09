@@ -8,21 +8,8 @@ import zipfile  # <--- 新增这行导入，用于校验压缩包完整性
 TARGET_FILES = ["kline_data/BTC_ETH_1m.csv", "kline_data/DOGE_SOL_1m.csv", "kline_data/TON_XRP_1m.csv"]
 # 自动解析列表涉及到的币，并拼接成 USDT 交易对 (例如: BTCUSDT, ETHUSDT)
 SYMBOLS = [
-    "BTCUSDT",
-    "ETHUSDT",
-    "BNBUSDT",
-    "XRPUSDT",
-    "SOLUSDT",
-    "ADAUSDT",
-    "DOGEUSDT",
-    "MATICUSDT",
-    "DOTUSDT",
-    "LTCUSDT",
-    "LINKUSDT",
-    "AVAXUSDT",
-    "UNIUSDT",
-    "ATOMUSDT",
-    "NEARUSDT"
+    "BTCUSDT", "ETHUSDT", "XRPUSDT", "LTCUSDT", "BCHUSDT",
+    "EOSUSDT", "ADAUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT"
 ]
 
 # for f in TARGET_FILES:

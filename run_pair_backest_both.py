@@ -12,10 +12,6 @@ from datetime import timedelta, datetime
 # ==========================================
 GLOBAL_TRADE_MODE = 'BOTH'
 
-
-import os
-import pandas as pd
-
 def load_and_preprocess_data_new(file_list, start_year=2020, end_year=2027):
     print("⏳ 正在极速解析并合并数据...")
     dfs = []
@@ -1743,22 +1739,6 @@ def run_grid_search(max_workers=15):
         # "kline_data/NEARUSDT_1m_merged.csv"
     ]
 
-    # ==========================================
-    # 2. 内部固定：搜索空间与保存路径
-    # ==========================================
-    param_grid = {
-    # 拓展了超短线(12,18)和长线(480,720)，保持中段的合理跳跃
-    'MOM_WINDOW': [12, 18, 24, 36, 48, 60, 72, 90, 120, 180, 240, 360, 480, 720],  # 14个
-
-    # 同样拓展边界，让波动率自适应更有深度
-    'VOL_WINDOW': [12, 18, 24, 36, 48, 60, 90, 120, 180, 240, 360, 480],           # 12个
-
-    # 加入了更长的牛熊判定周期(1440, 2160)
-    'BTC_TREND_WINDOW': [90, 180, 270, 360, 540, 720, 1080, 1440, 2160],           # 9个
-
-    # 补充实盘最常用的安全水位(0.05, 0.12)
-    'MAX_WEIGHT': [0.05, 0.10, 0.12, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50]                 # 8个
-}
     save_dir = r'W:\project\python_project\oke_auto_trade\param_search_results'
     df_4h = load_and_preprocess_data_new(file_list_new)  # 预热数据，确保后续搜索时内存中已有数据，无需重复加载
 
