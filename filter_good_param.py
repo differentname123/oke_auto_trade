@@ -15,7 +15,7 @@ from collections import defaultdict
 # ═══════════════════════════════════════════════════════════════════════════
 # 配置区
 # ═══════════════════════════════════════════════════════════════════════════
-RESULTS_PATH = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_BOTH_dynamic_pool_offset_1h_with_Benchmark.csv'
+RESULTS_PATH = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_BOTH_dynamic_pool_offset_0h_with_Benchmark.csv'
 OUTPUT_DIR   = r'W:\project\python_project\oke_auto_trade\param_search_results\evaluation'
 
 # ---- Layer 1: 基础健康度过滤 (只淘汰反常，不筛选优秀) ----
@@ -685,7 +685,9 @@ def print_specific_params(df, target_params, primary_obj, varying_params):
 
     # 取出该行数据
     row = match_df.iloc[0]
-
+    # 打印每一个字段以及相应的值
+    for col in df.columns:
+        print(f"{col}: {row.get(col, 'N/A')}")
     # --- 格式化辅助函数 ---
     def fmt_pct(val, dec=1):
         return f"{val * 100:+.{dec}f}%" if pd.notna(val) else "N/A"

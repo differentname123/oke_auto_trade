@@ -9,7 +9,7 @@ from datetime import timedelta
 # ==========================================
 # 🌐 全局配置与交易模式控制
 # ==========================================
-GLOBAL_TRADE_MODE = 'BOTH'
+GLOBAL_TRADE_MODE = 'LONG_ONLY'
 INITIAL_CAPITAL = 10000.0
 FEE_RATE = 0.0005
 
@@ -568,7 +568,7 @@ def calculate_comprehensive_metrics(logs_df, curve_df, price_df, custom_params, 
 
 
 # ==========================================
-# 🔴 核心改动 2: 单年状态流转推演模块
+# 🔴 核心改动 2: 单年状态流转推演模块 (仅增加 target_weight 记录)
 # ==========================================
 def run_backtest_single_year(df, year, prev_state, custom_params, next_year_coins=None):
     MOM_WINDOW = custom_params['MOM_WINDOW']
@@ -583,7 +583,7 @@ def run_backtest_single_year(df, year, prev_state, custom_params, next_year_coin
 
     df_close = df[coins]
 
-    # 🔴 在全局 DataFrame 上计算指标 (天然利用预热期)
+    # 在全局 DataFrame 上计算指标 (天然利用预热期)
     returns = df_close.pct_change(MOM_WINDOW)
     high_df = df[[f"{c}_high" for c in coins]].copy()
     high_df.columns = coins
@@ -602,7 +602,7 @@ def run_backtest_single_year(df, year, prev_state, custom_params, next_year_coin
     btc_ma = df['BTC'].rolling(window=BTC_TREND_WINDOW).mean()
     btc_trend_on = df['BTC'] > btc_ma
 
-    # 🔴 状态继承
+    # 状态继承
     cash = prev_state['cash']
     positions_dict = prev_state['positions']
     coin_states = prev_state['coin_states']
@@ -626,7 +626,7 @@ def run_backtest_single_year(df, year, prev_state, custom_params, next_year_coin
     btc_trend_arr = btc_trend_on.values
     time_index = df.index
 
-    # 🔴 核心：精确定位该年实际可交易的起点 (1月1日)
+    # 核心：精确定位该年实际可交易的起点 (1月1日)
     year_start_time = pd.to_datetime(f"{year}-01-01 00:00:00")
     trading_mask = time_index >= year_start_time
 
@@ -679,7 +679,8 @@ def run_backtest_single_year(df, year, prev_state, custom_params, next_year_coin
                     trade_logs.append({
                         "time": current_time, "action": "SELL", "coin": c, "direction": "LONG", "event": "CLOSE",
                         "price": prices_row[idx_c], "amount": sell_amount, "value": actual_sell_val, "fee": fee,
-                        "reason": "Signal Exit Long"
+                        "reason": "Signal Exit Long",
+                        "target_weight": 0.0  # 🟢【新增】平仓记录为 0
                     })
 
             elif positions_arr[idx_c] < 0:
@@ -693,7 +694,8 @@ def run_backtest_single_year(df, year, prev_state, custom_params, next_year_coin
                     trade_logs.append({
                         "time": current_time, "action": "BUY", "coin": c, "direction": "SHORT", "event": "CLOSE",
                         "price": prices_row[idx_c], "amount": buy_amount, "value": actual_buy_val, "fee": fee,
-                        "reason": "Signal Exit Short"
+                        "reason": "Signal Exit Short",
+                        "target_weight": 0.0  # 🟢【新增】平仓记录为 0
                     })
 
         # 判断是否为当前年份最后一条记录 (修复 BUG 3)
@@ -719,7 +721,8 @@ def run_backtest_single_year(df, year, prev_state, custom_params, next_year_coin
                         trade_logs.append({
                             "time": current_time, "action": "BUY", "coin": c, "direction": "LONG", "event": "OPEN",
                             "price": prices_row[idx_c], "amount": buy_amount, "value": buy_val, "fee": fee,
-                            "reason": "Signal Entry Long"
+                            "reason": "Signal Entry Long",
+                            "target_weight": target_weight  # 🟢【核心新增】真实目标权重
                         })
 
         # 开仓逻辑 (空)
@@ -740,10 +743,11 @@ def run_backtest_single_year(df, year, prev_state, custom_params, next_year_coin
                         trade_logs.append({
                             "time": current_time, "action": "SELL", "coin": c, "direction": "SHORT", "event": "OPEN",
                             "price": prices_row[idx_c], "amount": sell_amount, "value": sell_val, "fee": fee,
-                            "reason": "Signal Entry Short"
+                            "reason": "Signal Entry Short",
+                            "target_weight": target_weight  # 🟢【核心新增】真实目标权重
                         })
 
-    # 🔴 核心：年底清退不在下一年标的池的资产 (强制平仓)
+    # 核心：年底清退不在下一年标的池的资产 (强制平仓)
     if next_year_coins is not None:
         last_time = time_index[-1]
         last_prices_row = close_arr[-1]
@@ -764,7 +768,8 @@ def run_backtest_single_year(df, year, prev_state, custom_params, next_year_coin
                 trade_logs.append({
                     "time": last_time, "action": action, "coin": c, "direction": direction, "event": "CLOSE",
                     "price": last_prices_row[idx_c], "amount": amt, "value": val, "fee": fee,
-                    "reason": f"End of Year {year} Delisting"
+                    "reason": f"End of Year {year} Delisting",
+                    "target_weight": 0.0  # 🟢【新增】退市平仓记录为 0
                 })
                 positions_arr[idx_c] = 0
 
@@ -772,7 +777,7 @@ def run_backtest_single_year(df, year, prev_state, custom_params, next_year_coin
         if n_steps > 0:
             equity_values[-1] = cash + np.dot(positions_arr, last_prices_row)
 
-    # 🔴 更新持仓与 PNL 追踪
+    # 更新持仓与 PNL 追踪
     for log in trade_logs:
         c, event, direction, amt, price, fee, time_ = log['coin'], log['event'], log['direction'], log['amount'], log[
             'price'], log['fee'], log['time']
@@ -838,7 +843,7 @@ def build_clean_param_grid(min_warmup_bars):
 
 
 # ==========================================
-# 🔴 核心改动 4: 串行连接执行器 (缝合资金曲线)
+# 🔴 核心改动 4: 串行连接执行器 (缝合资金曲线与事件流持久化)
 # ==========================================
 def _parallel_worker_task(i, params, yearly_data_cache, global_price_df, pool_years):
     param_name = f"Grid_No.{i + 1}"
@@ -880,7 +885,31 @@ def _parallel_worker_task(i, params, yearly_data_cache, global_price_df, pool_ye
         full_curve_df = full_curve_df[~full_curve_df.index.duplicated(keep='last')]
         logs_df = pd.DataFrame(all_logs)
 
-        # ✅ 核心修复: 在所有年份跑完后，获取最后一年的最后一根收盘价，精确计算包含持仓市值的最终资金
+        # 🟢【新增核心逻辑：提取纯净事件流并持久化保存】
+        if all_logs:
+            pure_events = []
+            for log in all_logs:
+                pure_events.append({
+                    "time": log["time"],
+                    "coin": log["coin"],
+                    "event": log["event"],
+                    "direction": log["direction"],
+                    "action": log["action"],
+                    "price": log["price"],
+                    "target_weight": log.get("target_weight", 0.0)
+                })
+
+            events_df = pd.DataFrame(pure_events)
+            # 建立用于保存事件流的专门子目录
+            save_dir = r'W:\project\python_project\oke_auto_trade\param_search_results\event_streams'
+            os.makedirs(save_dir, exist_ok=True)
+
+            # 使用参数组合ID和交易模式命名文件，方便后续组合
+            event_save_path = os.path.join(save_dir, f"{GLOBAL_TRADE_MODE}_{param_name}_events.csv")
+            events_df.to_csv(event_save_path, index=False, encoding='utf-8-sig')
+        # 🟢 ========================================
+
+        # 核心修复: 在所有年份跑完后，获取最后一年的最后一根收盘价，精确计算包含持仓市值的最终资金
         last_year = pool_years[-1]
         last_df = yearly_data_cache[last_year]
         last_close_row = last_df.iloc[-1]
@@ -899,7 +928,7 @@ def _parallel_worker_task(i, params, yearly_data_cache, global_price_df, pool_ye
             param_name=param_name,
             initial_capital=INITIAL_CAPITAL,
             fee_rate=FEE_RATE,
-            final_equity_override=final_equity_computed  # ✅ 核心修复: 强制传入精确算好的最终资金
+            final_equity_override=final_equity_computed  # 强制传入精确算好的最终资金
         )
         return True, pd.DataFrame([metrics]), params, param_name, None
 
