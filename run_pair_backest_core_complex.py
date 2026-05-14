@@ -1315,8 +1315,8 @@ if __name__ == "__main__":
     # yearly_data_cache, global_price_df, _ = prepare_environment(YEARLY_POOL_CONFIG)
     #
     # # 2. 假设你找到了做多的天选参数日志 和 做空的天选参数日志
-    # long_file = r"...\param_search_results\event_streams\LONG_ONLY_Grid_No.15_events.csv"
-    # short_file = r"...\param_search_results\event_streams\SHORT_ONLY_Grid_No.82_events.csv"
+    # long_file = r"W:\project\python_project\oke_auto_trade\param_search_results\event_streams\SHORT_ONLY_Grid_No.8_0h_events.csv"
+    # short_file = r"W:\project\python_project\oke_auto_trade\param_search_results\event_streams\SHORT_ONLY_Grid_No.8_0h_events.csv"
     #
     # # 3. 极速缝合并重演！
     # combined_logs, combined_curve = fast_combined_replay(
