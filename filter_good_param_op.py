@@ -15,7 +15,7 @@ from collections import defaultdict
 # 切换评估模式: 'LONG' (多头参数漏斗) 或 'SHORT' (空头参数漏斗)
 
 # 文件路径配置
-RESULTS_PATH = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_LONG_ONLY_dynamic_pool_offset_0h_with_Benchmark.csv'
+RESULTS_PATH = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_SHORT_ONLY_dynamic_pool_offset_0h_with_Benchmark.csv'
 EVAL_SIDE = 'LONG'
 if 'SHORT' in RESULTS_PATH.upper():
     EVAL_SIDE = 'SHORT'
@@ -59,7 +59,7 @@ SHORT_CONFIG = {
         'max_drawdown_threshold':        -0.30,   # ✅ 放宽：从 -0.20 放宽到 -0.30，容忍熊市剧烈反弹
         'max_mae_pct_worst':             -0.35,   # ✅ 放宽：从 -0.25 放宽到 -0.35
         'min_bear_regime_total_return':  0.0,     # 🔒 底线：熊市必须赚钱，这个绝对不能动
-        'min_cost_stress_20bps_annual':  0.0,     # ✅ 修复5.3: 收紧为 >= 0.0，与 L2 最大化目标自洽
+        'min_cost_stress_30bps_annual':  0.0,     # 🌟 修复: 统一空头标准为30bps，对齐日志打印
         'min_expectancy_ci_low':         0.0,     # ✅ 修复5.4: 增加空头置信下界硬约束防小样本运气
         'max_avg_holding_hours':         120.0,   # ✅ 放宽：从 72 小时放宽到 120 小时(5天)
     },
@@ -67,7 +67,7 @@ SHORT_CONFIG = {
         'calmar_ratio':               'maximize',
         'mae_pct_worst':              'maximize',
         'bear_regime_total_return':   'maximize',
-        'cost_stress_20bps_annual':   'maximize', # 配合 L1 修改
+        'cost_stress_30bps_annual':   'maximize', # 🌟 修复: 同步修改为30bps
     },
     'L3_CONSTRAINTS': {
         'top1_pnl_ratio':           ('<=', 0.45), # ✅ 修复5.1: 统一列名映射
@@ -273,7 +273,7 @@ def layer4_neighborhood(df, varying_params, primary_obj, config):
         cliffs[idx] = False
 
         # 满足容量够、存活率达标（>=10%）、平原均值为正即可放行
-        passes[idx] = bool((len(nbrs_idx) >= config.get('min_neighbor_count', 5)) and (health_rates[idx] >= 0.10) and (
+        passes[idx] = bool((len(nbrs_idx) >= config.get('min_neighbor_count', 3)) and (health_rates[idx] >= 0.10) and (
                     obj_means[idx] > 0))
 
     out['L4_TARGET_NEIGHBOR_COUNT'], out['L4_NEIGHBOR_COUNT'], out[
@@ -309,7 +309,8 @@ def compute_final_score(df):
     nbrs_std = out.loc[valid_mask, 'L4_NEIGHBOR_OBJ_STD']
 
     lcb = nbrs_mean - 1.5 * nbrs_std
-    out.loc[valid_mask, 'FINAL_SCORE'] = lcb * nbrs_health
+    # 🌟 核心修复: 如果LCB为负，剥离存活率扭曲，直接保留负数进行自然垫底，杜绝负负得正
+    out.loc[valid_mask, 'FINAL_SCORE'] = np.where(lcb > 0, lcb * nbrs_health, lcb)
     return out
 
 # ═══════════════════════════════════════════════════════════════════════════
