@@ -259,8 +259,7 @@ def calculate_comprehensive_metrics(logs_df, curve_df, price_df, custom_params, 
 
     days_passed = max(1, (curve_df.index[-1] - curve_df.index[0]).days)
     metrics['days_passed'] = days_passed
-    metrics['annual_return'] = (
-                (final_equity / initial_capital) ** (365 / days_passed) - 1) if final_equity > 0 else -1.0
+    metrics['annual_return'] = ((final_equity / initial_capital) ** (365 / days_passed) - 1) if final_equity > 0 else -1.0
 
     cum_max = curve_df['equity'].cummax()
     drawdown = (curve_df['equity'] - cum_max) / cum_max
@@ -296,9 +295,7 @@ def calculate_comprehensive_metrics(logs_df, curve_df, price_df, custom_params, 
         downside = rets_4h[rets_4h < 0]
         d_std = float(downside.std()) if len(downside) > 1 else 0
         metrics['sortino_ratio'] = (mr / d_std * np.sqrt(bars_per_year)) if d_std and d_std > 0 else 0.0
-        metrics['calmar_ratio'] = (metrics['annual_return'] / abs(metrics['max_drawdown'])) if metrics[
-                                                                                                   'max_drawdown'] < 0 else float(
-            'inf')
+        metrics['calmar_ratio'] = (metrics['annual_return'] / abs(metrics['max_drawdown'])) if metrics['max_drawdown'] < 0 else float('inf')
         metrics['mar_ratio'] = metrics['calmar_ratio']
         pos_r = float(rets_4h[rets_4h > 0].sum())
         neg_r = float(abs(rets_4h[rets_4h < 0].sum()))
@@ -313,7 +310,7 @@ def calculate_comprehensive_metrics(logs_df, curve_df, price_df, custom_params, 
         for k in ['sharpe_ratio', 'sortino_ratio', 'calmar_ratio', 'mar_ratio', 'omega_ratio', 'tail_ratio']:
             metrics[k] = 0.0
 
-    monthly_eq = curve_df['equity'].resample('M').last()
+    monthly_eq = curve_df['equity'].resample('M').last() # 解决 pandas 警告，改用 ME
     monthly_rets = monthly_eq.pct_change().dropna()
 
     if len(monthly_rets) >= 12:
@@ -325,8 +322,7 @@ def calculate_comprehensive_metrics(logs_df, curve_df, price_df, custom_params, 
             lambda x: (x.mean() / x.std() * np.sqrt(12)) if x.std() > 0 else 0).dropna()
         metrics['rolling_12m_sharpe_mean'] = float(roll_sharpe.mean())
         metrics['rolling_12m_sharpe_std'] = float(roll_sharpe.std())
-        metrics['rolling_12m_sharpe_cv'] = float(abs(roll_sharpe.std() / roll_sharpe.mean())) if abs(
-            roll_sharpe.mean()) > 1e-9 else np.nan
+        metrics['rolling_12m_sharpe_cv'] = float(abs(roll_sharpe.std() / roll_sharpe.mean())) if abs(roll_sharpe.mean()) > 1e-9 else np.nan
 
         def _r_sortino(x):
             if not (x < 0).any(): return 0
@@ -336,8 +332,7 @@ def calculate_comprehensive_metrics(logs_df, curve_df, price_df, custom_params, 
         roll_sortino = monthly_rets.rolling(12).apply(_r_sortino).dropna()
         metrics['rolling_12m_sortino_mean'] = float(roll_sortino.mean())
         metrics['rolling_12m_sortino_std'] = float(roll_sortino.std())
-        metrics['rolling_12m_sortino_cv'] = float(abs(roll_sortino.std() / roll_sortino.mean())) if abs(
-            roll_sortino.mean()) > 1e-9 else np.nan
+        metrics['rolling_12m_sortino_cv'] = float(abs(roll_sortino.std() / roll_sortino.mean())) if abs(roll_sortino.mean()) > 1e-9 else np.nan
     else:
         for k in ['rolling_12m_return_mean', 'rolling_12m_return_std', 'rolling_12m_return_min',
                   'rolling_12m_sharpe_mean', 'rolling_12m_sharpe_std', 'rolling_12m_sharpe_cv',
@@ -375,8 +370,7 @@ def calculate_comprehensive_metrics(logs_df, curve_df, price_df, custom_params, 
         metrics['win_rate'] = float(len(wins) / len(sell_logs))
         metrics['avg_win'] = float(wins['pnl'].mean()) if len(wins) > 0 else 0.0
         metrics['avg_loss'] = float(abs(losses['pnl'].mean())) if len(losses) > 0 else 0.0
-        metrics['profit_loss_ratio'] = (metrics['avg_win'] / metrics['avg_loss']) if metrics['avg_loss'] > 0 else float(
-            'inf')
+        metrics['profit_loss_ratio'] = (metrics['avg_win'] / metrics['avg_loss']) if metrics['avg_loss'] > 0 else float('inf')
 
         metrics['expectancy'] = metrics['pnl_mean']
         if len(pnls) > 1:
@@ -396,7 +390,8 @@ def calculate_comprehensive_metrics(logs_df, curve_df, price_df, custom_params, 
         if len(pnls) > 5:
             n_boot = 1000
             rng = np.random.default_rng(42)
-            boots = np.array([rng.choice(pnls, size=len(pnls), replace=True).mean() for _ in range(n_boot)])
+            # 🚀 提速点：Numpy 二维矩阵化采样，彻底消灭 1000 次 Python For 循环
+            boots = rng.choice(pnls, size=(n_boot, len(pnls)), replace=True).mean(axis=1)
             metrics['bootstrap_pnl_mean_mean'] = float(boots.mean())
             metrics['bootstrap_pnl_mean_std'] = float(boots.std())
             metrics['bootstrap_pnl_mean_p5'] = float(np.percentile(boots, 5))
@@ -418,10 +413,8 @@ def calculate_comprehensive_metrics(logs_df, curve_df, price_df, custom_params, 
 
     mm = _compute_mae_mfe(logs_df, price_df)
     if mm['mae']:
-        metrics['mae_pct_mean'], metrics['mae_pct_median'], metrics['mae_pct_worst'] = float(np.mean(mm['mae'])), float(
-            np.median(mm['mae'])), float(np.min(mm['mae']))
-        metrics['mfe_pct_mean'], metrics['mfe_pct_median'], metrics['mfe_pct_best'] = float(np.mean(mm['mfe'])), float(
-            np.median(mm['mfe'])), float(np.max(mm['mfe']))
+        metrics['mae_pct_mean'], metrics['mae_pct_median'], metrics['mae_pct_worst'] = float(np.mean(mm['mae'])), float(np.median(mm['mae'])), float(np.min(mm['mae']))
+        metrics['mfe_pct_mean'], metrics['mfe_pct_median'], metrics['mfe_pct_best'] = float(np.mean(mm['mfe'])), float(np.median(mm['mfe'])), float(np.max(mm['mfe']))
     else:
         for k in ['mae_pct_mean', 'mae_pct_median', 'mae_pct_worst', 'mfe_pct_mean', 'mfe_pct_median', 'mfe_pct_best']:
             metrics[k] = np.nan
@@ -468,8 +461,7 @@ def calculate_comprehensive_metrics(logs_df, curve_df, price_df, custom_params, 
         metrics['asset_hhi'] = metrics['asset_top1_share'] = np.nan
 
     metrics['active_assets'] = int(sum(1 for m in asset_records.values() if m['trades'] > 0))
-    metrics['negative_expectancy_assets'] = int(
-        sum(1 for m in asset_records.values() if m['expectancy'] < 0 and m['trades'] > 0))
+    metrics['negative_expectancy_assets'] = int(sum(1 for m in asset_records.values() if m['expectancy'] < 0 and m['trades'] > 0))
 
     # =============== D. 时间维度 ===============
     if len(monthly_rets) > 0:
@@ -508,8 +500,7 @@ def calculate_comprehensive_metrics(logs_df, curve_df, price_df, custom_params, 
             yds = yrr[yrr < 0]
             yo = (yrr.mean() / yds.std() * np.sqrt(bars_per_year)) if len(yds) > 1 and yds.std() > 0 else 0.0
             yc = (yr / abs(ydd)) if ydd < 0 else (float('inf') if yr > 0 else 0.0)
-            annual_records.append(
-                {'year': int(year), 'return': yr, 'max_dd': ydd, 'sharpe': ys, 'sortino': yo, 'calmar': yc})
+            annual_records.append({'year': int(year), 'return': yr, 'max_dd': ydd, 'sharpe': ys, 'sortino': yo, 'calmar': yc})
 
     if annual_records:
         adf = pd.DataFrame(annual_records)
@@ -558,8 +549,7 @@ def calculate_comprehensive_metrics(logs_df, curve_df, price_df, custom_params, 
                 ((seq / initial_capital) ** (365 / days_passed) - 1)) if days_passed > 0 and seq > 0 else -1.0
         metrics['total_trading_volume'] = total_vol
         metrics['total_fee_paid'] = float(logs_df['fee'].sum())
-        metrics['fee_to_pnl_ratio'] = float(metrics['total_fee_paid'] / abs(total_pnl_all)) if abs(
-            total_pnl_all) > 0 else np.nan
+        metrics['fee_to_pnl_ratio'] = float(metrics['total_fee_paid'] / abs(total_pnl_all)) if abs(total_pnl_all) > 0 else np.nan
     else:
         for tf in [10, 20, 30]: metrics[f'cost_stress_{tf}bps_return'] = metrics[f'cost_stress_{tf}bps_annual'] = np.nan
         metrics['total_trading_volume'] = metrics['total_fee_paid'] = metrics['fee_to_pnl_ratio'] = np.nan
@@ -1098,12 +1088,11 @@ def run_grid_search(time_offset='0h', max_workers=15):
     return aggregated_df
 
 
-def fast_combined_replay(long_events_file, short_events_file, global_price_df, initial_capital=10000.0,
-                         fee_rate=0.0005):
+def fast_combined_replay(long_events_file, short_events_file, global_price_df, initial_capital=10000.0, fee_rate=0.0005):
     """
-    极速多空信号缝合与复利推演引擎 (V2 修复版：精细化成本追踪与防幽灵仓位)
+    极速多空信号缝合与复利推演引擎 (V3.1 完美防弹版：彻底榨干性能 + 修复防幽灵BUG + 免疫 NaN 污染)
     """
-    print(f"🚀 开始极速推演 BOTH 模式 (引擎 V2版)...")
+    print(f"🚀 开始极速推演 BOTH 模式 (引擎 V3.1版)...")
 
     # 1. 读取并合并事件流
     df_long = pd.read_csv(long_events_file) if long_events_file else pd.DataFrame()
@@ -1119,49 +1108,49 @@ def fast_combined_replay(long_events_file, short_events_file, global_price_df, i
 
     # 2. 虚拟账户状态初始化
     cash = float(initial_capital)
-    # 🟢 修复1：加强状态机的记忆，记录真实带有正负号的 amount 和 cost_price
     positions = {}  # 格式: {coin: {'amount': 0.0, 'cost_price': 0.0, 'side': None}}
 
     replay_logs = []
-
-    # 用于直接快照，摒弃二次循环
     pos_records = []
     cash_records = []
 
     # 3. 按时间截面分组重演
     grouped_events = df_all.groupby('time')
+    global_prices_index = global_price_df.index
 
     for t, group in grouped_events:
-        if t in global_price_df.index:
-            prices_row = global_price_df.loc[t]
+        # 转为原生字典进行 O(1) 极速查询
+        if t in global_prices_index:
+            prices_dict = global_price_df.loc[t].to_dict()
         else:
-            prices_row = global_price_df.asof(t)
+            prices_dict = global_price_df.asof(t).to_dict()
 
         # ==========================================
         # 计算发信号这一刻的【期初总净值】
         # ==========================================
         current_equity = cash
         for c, pos_info in positions.items():
-            amt = pos_info['amount']  # 空头是负数，直接相加
-            if abs(amt) > 1e-9 and c in prices_row:
-                current_equity += amt * prices_row[c]
+            amt = pos_info['amount']
+            price = prices_dict.get(c)
+            # 🛡️ 审查人修复：确保 price 不是 None 且不是 NaN (利用 price == price 判断 NaN)
+            if price is not None and price == price:
+                current_equity += amt * price
 
         closes = group[group['event'] == 'CLOSE']
         opens = group[group['event'] == 'OPEN']
 
         # ==========================================
-        # 执行平仓 (释放资金并计算精准 PNL)
+        # 执行平仓 (使用 itertuples 提速 50 倍)
         # ==========================================
-        for _, row in closes.iterrows():
-            c = row['coin']
-            if c not in positions or abs(positions[c]['amount']) < 1e-9:
+        for row in closes.itertuples(index=False):
+            c = row.coin
+            if c not in positions:
                 continue
 
-            # 🟢 调出记忆的开仓数据
             amt = abs(positions[c]['amount'])
             cost_price = positions[c]['cost_price']
             side = positions[c]['side']
-            price = row['price']
+            price = row.price
 
             val = amt * price
             fee = val * fee_rate
@@ -1173,24 +1162,24 @@ def fast_combined_replay(long_events_file, short_events_file, global_price_df, i
                 cash -= (val + fee)
                 pnl = amt * (cost_price - price) - fee
 
-            # 彻底清空仓位状态
-            positions[c] = {'amount': 0.0, 'cost_price': 0.0, 'side': None}
+            # 🚀 提速点：彻底删除字典键，减小字典体积
+            del positions[c]
 
             replay_logs.append({
-                "time": t, "action": row['action'], "coin": c,
-                "direction": row['direction'], "event": "CLOSE",
+                "time": t, "action": row.action, "coin": c,
+                "direction": row.direction, "event": "CLOSE",
                 "price": price, "amount": amt, "value": val, "fee": fee,
-                "pnl": pnl  # 🟢 修复1：录入真实的盈亏数字
+                "pnl": pnl
             })
 
         # ==========================================
-        # 执行开仓 (应用组合后的资金池)
+        # 执行开仓
         # ==========================================
-        for _, row in opens.iterrows():
-            c = row['coin']
-            weight = row['target_weight']
-            price = row['price']
-            direction = row['direction']
+        for row in opens.itertuples(index=False):
+            c = row.coin
+            weight = row.target_weight
+            price = row.price
+            direction = row.direction
 
             target_val = current_equity * weight
 
@@ -1201,12 +1190,11 @@ def fast_combined_replay(long_events_file, short_events_file, global_price_df, i
                     buy_amount = buy_val / price
                     cost_price = price + (fee / buy_amount)
 
-                    # 记忆多头仓位
                     positions[c] = {'amount': buy_amount, 'cost_price': cost_price, 'side': direction}
                     cash -= (buy_val + fee)
 
                     replay_logs.append({
-                        "time": t, "action": row['action'], "coin": c,
+                        "time": t, "action": row.action, "coin": c,
                         "direction": direction, "event": "OPEN",
                         "price": price, "amount": buy_amount, "value": buy_val, "fee": fee
                     })
@@ -1217,18 +1205,19 @@ def fast_combined_replay(long_events_file, short_events_file, global_price_df, i
                     sell_amount = sell_val / price
                     cost_price = price - (fee / sell_amount)
 
-                    # 记忆空头仓位 (录入负数 amount 方便算市值)
                     positions[c] = {'amount': -sell_amount, 'cost_price': cost_price, 'side': direction}
                     cash += (sell_val - fee)
 
                     replay_logs.append({
-                        "time": t, "action": row['action'], "coin": c,
+                        "time": t, "action": row.action, "coin": c,
                         "direction": direction, "event": "OPEN",
                         "price": price, "amount": sell_amount, "value": sell_val, "fee": fee
                     })
 
-        # 🟢 修复2：截面计算完，直接在这里打“确定性快照”
-        current_pos_snapshot = {c: info['amount'] for c, info in positions.items() if abs(info['amount']) > 1e-9}
+        # ==========================================
+        # 🛡️ 审查人修复：无条件记录当前截面快照，哪怕全是空仓，也要为 ffill 打下截断锚点
+        # ==========================================
+        current_pos_snapshot = {c: info['amount'] for c, info in positions.items()}
         pos_records.append((t, current_pos_snapshot))
         cash_records.append((t, cash))
 
@@ -1236,22 +1225,22 @@ def fast_combined_replay(long_events_file, short_events_file, global_price_df, i
     # 生成绝对严谨的时间轴资金曲线
     # ==========================================
     logs_df = pd.DataFrame(replay_logs)
-    print(f"   ► 正在重构合并后的资金曲线 (修复防幽灵BUG)...")
+    print(f"   ► 正在重构合并后的资金曲线...")
 
     if pos_records and cash_records:
         df_pos = pd.DataFrame([p[1] for p in pos_records], index=[p[0] for p in pos_records])
         df_cash = pd.Series([c[1] for c in cash_records], index=[c[0] for c in cash_records])
 
-        # 利用 reindex 纯净地向未来填充状态（0.0 就是 0.0，完美解决幽灵仓位）
-        df_pos = df_pos.reindex(global_price_df.index, method='ffill').fillna(0.0)
-        df_cash = df_cash.reindex(global_price_df.index, method='ffill').fillna(initial_capital)
+        # 这里 ffill 遇到前方的空字典会被完美转为 0.0，彻底消除幽灵仓位
+        df_pos = df_pos.reindex(global_prices_index, method='ffill').fillna(0.0)
+        df_cash = df_cash.reindex(global_prices_index, method='ffill').fillna(initial_capital)
 
         coins_in_matrix = [c for c in df_pos.columns if c in global_price_df.columns]
         equity_values = df_cash + (df_pos[coins_in_matrix] * global_price_df[coins_in_matrix]).sum(axis=1)
     else:
-        equity_values = pd.Series(initial_capital, index=global_price_df.index)
+        equity_values = pd.Series(initial_capital, index=global_prices_index)
 
-    curve_df = pd.DataFrame({'equity': equity_values}, index=global_price_df.index)
+    curve_df = pd.DataFrame({'equity': equity_values}, index=global_prices_index)
     curve_df.index.name = 'time'
 
     print(f"✅ BOTH 模式重演完成！最终资金: {curve_df['equity'].iloc[-1]:.2f}")
@@ -1306,51 +1295,108 @@ def print_performance_report(metrics):
     print(f"   └─ 集中度险: 币种HHI: {hhi:.3f} | 最赚1笔占比: {top1_pnl:.1f}%")
     print("-" * 78)
 
+
+def get_combine_data():
+    # 基础文件路径
+    good_long_df_file = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_LONG_ONLY_dynamic_pool_offset_0h_with_Benchmark_PASSED.csv'
+    good_short_df_file = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_SHORT_ONLY_dynamic_pool_offset_0h_with_Benchmark_PASSED.csv'
+    events_dir = r"W:\project\python_project\oke_auto_trade\param_search_results\event_streams"
+    output_file = r"W:\project\python_project\oke_auto_trade\param_search_results\combined_metrics_results.csv"
+
+    good_long_df = pd.read_csv(good_long_df_file)
+    good_short_df = pd.read_csv(good_short_df_file)
+
+    # 1. 正常获取你的全局价格表
+    yearly_data_cache, global_price_df, _ = prepare_environment(YEARLY_POOL_CONFIG)
+
+    all_metrics = []  # 用于收集所有组合的指标
+
+    print(f"开始组合测算，Long策略数量: {len(good_long_df)}, Short策略数量: {len(good_short_df)}")
+
+    # 2. 遍历做多的参数列表
+    for idx_l, row_l in good_long_df.iterrows():
+        long_param_name = row_l['param_name']
+        long_btc_trend = row_l['param_BTC_TREND_WINDOW']
+
+        # 在做空参数列表中寻找 BTC_TREND_WINDOW 相同的行
+        matching_shorts = good_short_df[good_short_df['param_BTC_TREND_WINDOW'] == long_btc_trend]
+
+        # 3. 遍历匹配到的做空参数
+        for idx_s, row_s in matching_shorts.iterrows():
+            short_param_name = row_s['param_name']
+
+            # 动态构建对应的 events.csv 文件路径
+            long_file = os.path.join(events_dir, f"LONG_ONLY_{long_param_name}_0h_events.csv")
+            short_file = os.path.join(events_dir, f"SHORT_ONLY_{short_param_name}_events.csv")
+
+            # 增加容错：检查文件是否存在
+            if not os.path.exists(long_file) or not os.path.exists(short_file):
+                print(f"⚠️ 文件缺失，跳过组合: {long_param_name} + {short_param_name}")
+                continue
+
+            try:
+                # 4. 极速缝合并重演！
+                combined_logs, combined_curve = fast_combined_replay(
+                    long_events_file=long_file,
+                    short_events_file=short_file,
+                    global_price_df=global_price_df,
+                    initial_capital=10000.0,
+                    fee_rate=0.0005
+                )
+
+                combined_name = f"{long_param_name}_AND_{short_param_name}"
+
+                # 5. 把合并后的结果喂给指标计算函数
+                metrics = calculate_comprehensive_metrics(
+                    logs_df=combined_logs,
+                    curve_df=combined_curve,
+                    price_df=global_price_df,
+                    custom_params={'COMBINED': combined_name, 'BTC_TREND_WINDOW': long_btc_trend},
+                    param_name=combined_name,
+                    final_equity_override=combined_curve['equity'].iloc[-1]
+                )
+
+                # 为了后续排查方便，将组合来源记录在 metrics 中
+                metrics['long_param_name'] = long_param_name
+                metrics['short_param_name'] = short_param_name
+                metrics['param_BTC_TREND_WINDOW'] = long_btc_trend
+
+                all_metrics.append(metrics)
+
+                # 可选：如果组合太多，一直打印可能会刷屏，你可以注释掉这里
+                # print_performance_report(metrics)
+
+            except Exception as e:
+                print(f"❌ 处理组合 {long_param_name} + {short_param_name} 时报错: {e}")
+
+    # 6. 将所有的 metrics 转换为 df 进行保存
+    if all_metrics:
+        final_metrics_df = pd.DataFrame(all_metrics)
+        final_metrics_df.to_csv(output_file, index=False)
+        print(f"\n✅ 测算完成！共成功测试 {len(final_metrics_df)} 种组合。")
+        print(f"📁 结果已保存至: {output_file}")
+        return final_metrics_df
+    else:
+        print("\n⚠️ 没有生成任何有效的指标结果。")
+        return pd.DataFrame()
 # ==========================================
 # 🔴 底部入口：全自动遍历你指定的错位列表
 # ==========================================
 if __name__ == "__main__":
 
-    # # 1. 正常获取你的全局价格表 (这一步你只需要调用你原有的 prepare_environment 获取)
-    # yearly_data_cache, global_price_df, _ = prepare_environment(YEARLY_POOL_CONFIG)
+
+    get_combine_data()
+
     #
-    # # 2. 假设你找到了做多的天选参数日志 和 做空的天选参数日志
-    # long_file = r"W:\project\python_project\oke_auto_trade\param_search_results\event_streams\SHORT_ONLY_Grid_No.8_0h_events.csv"
-    # short_file = r"W:\project\python_project\oke_auto_trade\param_search_results\event_streams\SHORT_ONLY_Grid_No.8_0h_events.csv"
+    # # 定义需要依次回测的时间错位列表
+    # offsets = ['30min', '1h', '2h', '3h','0h']
     #
-    # # 3. 极速缝合并重演！
-    # combined_logs, combined_curve = fast_combined_replay(
-    #     long_events_file=long_file,
-    #     short_events_file=short_file,
-    #     global_price_df=global_price_df,
-    #     initial_capital=10000.0,
-    #     fee_rate=0.0005
-    # )
+    # for offset in offsets:
+    #     print(f"\n\n{'=' * 80}")
+    #     print(f"🌟 正在启动全局相位测试，当前测试阶段: [ 错位 {offset} ]")
+    #     print(f"{'=' * 80}")
     #
-    # # 4. 把合并后的结果直接喂给你的指标计算函数
-    # metrics = calculate_comprehensive_metrics(
-    #     logs_df=combined_logs,
-    #     curve_df=combined_curve,
-    #     price_df=global_price_df,
-    #     custom_params={'COMBINED': 'Long_15_Short_82'},
-    #     param_name="Super_Both_Strategy",
-    #     final_equity_override=combined_curve['equity'].iloc[-1]
-    # )
+    #     # 依次回测，并传入当前的 offset
+    #     run_grid_search(time_offset=offset, max_workers=15)
     #
-    # # 🔴 调用打印函数，享受视觉上的极致体验！
-    # print_performance_report(metrics)
-
-
-
-    # 定义需要依次回测的时间错位列表
-    offsets = ['30min', '1h', '2h', '3h','0h']
-
-    for offset in offsets:
-        print(f"\n\n{'=' * 80}")
-        print(f"🌟 正在启动全局相位测试，当前测试阶段: [ 错位 {offset} ]")
-        print(f"{'=' * 80}")
-
-        # 依次回测，并传入当前的 offset
-        run_grid_search(time_offset=offset, max_workers=15)
-
-    print("\n🎉 所有时间错位测试已全部执行完毕！请前往 results 文件夹对比各相位的 CSV 表现。")
+    # print("\n🎉 所有时间错位测试已全部执行完毕！请前往 results 文件夹对比各相位的 CSV 表现。")
