@@ -845,8 +845,8 @@ def build_clean_param_grid(min_warmup_bars):
 # ==========================================
 # 🔴 核心改动 4: 串行连接执行器 (缝合资金曲线与事件流持久化)
 # ==========================================
-def _parallel_worker_task(i, params, yearly_data_cache, global_price_df, pool_years):
-    param_name = f"Grid_No.{i + 1}"
+def _parallel_worker_task(i, params, yearly_data_cache, global_price_df, pool_years, offset):
+    param_name = f"Grid_No.{i + 1}_{offset}"
     try:
         # 初始资金状态
         state = {
@@ -1060,7 +1060,7 @@ def run_grid_search(time_offset='0h', max_workers=15):
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         future_to_task = {
-            executor.submit(_parallel_worker_task, i, params, yearly_data_cache, global_price_df, pool_years): (
+            executor.submit(_parallel_worker_task, i, params, yearly_data_cache, global_price_df, pool_years, time_offset): (
                 i, params)
             for i, params in enumerate(param_combinations)
         }

@@ -52,36 +52,39 @@ LONG_CONFIG = {
 # ═══════════════════════════════════════════════════════════════════════════
 # 📉 方案 B：SHORT 专属评价体系
 # ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
+# 📉 方案 B：SHORT 专属评价体系 (宽进严评松绑版)
+# ═══════════════════════════════════════════════════════════════════════════
 SHORT_CONFIG = {
     'L1_HEALTH': {
         'min_total_trades':              30,
         'min_active_assets':             2,
-        'max_drawdown_threshold':        -0.20,
-        'max_mae_pct_worst':             -0.25,
-        'min_bear_regime_total_return':  0.0,
-        'min_cost_stress_30bps_annual':  0.0,
-        'max_avg_holding_hours':         72.0,
+        'max_drawdown_threshold':        -0.30,   # ✅ 放宽：从 -0.20 放宽到 -0.30，容忍熊市剧烈反弹
+        'max_mae_pct_worst':             -0.35,   # ✅ 放宽：从 -0.25 放宽到 -0.35
+        'min_bear_regime_total_return':  0.0,     # 🔒 底线：熊市必须赚钱，这个绝对不能动
+        'min_cost_stress_20bps_annual': -0.05,    # ✅ 放宽：改用 20bps 评估，且容忍极限压力下有 -5% 的微亏
+        'max_avg_holding_hours':         120.0,   # ✅ 放宽：从 72 小时放宽到 120 小时(5天)
     },
     'L2_PARETO': {
         'calmar_ratio':               'maximize',
         'mae_pct_worst':              'maximize',
         'bear_regime_total_return':   'maximize',
-        'cost_stress_30bps_annual':   'maximize',
+        'cost_stress_20bps_annual':   'maximize', # 配合 L1 修改
     },
     'L3_CONSTRAINTS': {
-        'max_top1_pnl_ratio':       ('<=', 0.35),
-        'profit_loss_ratio':        ('>=', 1.0),
+        'max_top1_pnl_ratio':       ('<=', 0.45), # ✅ 放宽：从 0.35 放宽到 0.45
+        'profit_loss_ratio':        ('>=', 0.9),  # ✅ 放宽：只要期望下界好，盈亏比 0.9 也能接受
     },
     'L5_TIME': {
-        'min_profitable_years_ratio': 0.40,
+        'min_profitable_years_ratio': 0.30,       # ✅ 放宽：空头本来赚钱年份就少，30%即可
     },
     'PRIMARY_OBJ': 'calmar_ratio'
 }
 
 NEIGHBOR_CONFIG = {
-    'radius':             2,
+    'radius':             1,
     'cliff_threshold':    0.40,
-    'min_neighbor_count': 5,
+    'min_neighbor_count': 3,
     'ignore_params':      ['param_MAX_WEIGHT', 'param_TOP_K']
 }
 
@@ -166,8 +169,7 @@ def layer2_pareto_frontier(df, objectives, max_fronts=5):
         for idx in current_front:
             real_idx = idx_list[idx]
             out.loc[real_idx, 'PARETO_RANK'] = current_front_rank
-            if current_front_rank == 1:
-                pareto_pass_global_idx.append(real_idx)
+            pareto_pass_global_idx.append(real_idx)
         remaining_indices = remaining_indices[~is_efficient]
         current_front_rank += 1
 
@@ -201,10 +203,13 @@ def layer3_constraint_filter(df, constraints):
     out.loc[cands.index[pass_mask], 'L3_PASS'] = True
     return out
 
+
 def layer4_neighborhood(df, varying_params, primary_obj, config):
     out = df.copy()
     n_rows = len(out)
-    target_counts, neighbor_counts, surviving_counts = np.zeros(n_rows, dtype=int), np.zeros(n_rows, dtype=int), np.zeros(n_rows, dtype=int)
+    target_counts, neighbor_counts, surviving_counts = np.zeros(n_rows, dtype=int), np.zeros(n_rows,
+                                                                                             dtype=int), np.zeros(
+        n_rows, dtype=int)
     health_rates, obj_means, obj_cvs = np.full(n_rows, np.nan), np.full(n_rows, np.nan), np.full(n_rows, np.nan)
     cliffs, passes = np.zeros(n_rows, dtype=bool), np.zeros(n_rows, dtype=bool)
 
@@ -228,8 +233,8 @@ def layer4_neighborhood(df, varying_params, primary_obj, config):
     for i, c in enumerate(coords):
         if not np.any(c < 0): coord_map[tuple(c)].append(i)
 
-    l3_pass_mask = out.get('L3_PASS', pd.Series([False]*n_rows)).values
-    l1_pass_arr  = out.get('L1_PASS', pd.Series([False]*n_rows)).fillna(False).values
+    l3_pass_mask = out.get('L3_PASS', pd.Series([False] * n_rows)).values
+    l1_pass_arr = out.get('L1_PASS', pd.Series([False] * n_rows)).fillna(False).values
     primary_obj_arr = out[primary_obj].astype(float).values
 
     for idx in np.where(l3_pass_mask)[0]:
@@ -257,22 +262,30 @@ def layer4_neighborhood(df, varying_params, primary_obj, config):
             surviving_counts[idx] = surviving
             health_rates[idx] = surviving / len(nbrs_idx)
 
-        obj_vals = primary_obj_arr[nbrs_idx]
+        # 只提取 L1 存活的邻居数据计算均值和颠簸度
+        surviving_nbrs_idx = [n_idx for n_idx in nbrs_idx if l1_pass_arr[n_idx]]
+        obj_vals = primary_obj_arr[surviving_nbrs_idx]
         obj_vals = obj_vals[~np.isnan(obj_vals)]
         if len(obj_vals) >= 2:
             mu, sd = obj_vals.mean(), obj_vals.std(ddof=1)
             cv = abs(sd / mu) if abs(mu) > 1e-9 else np.inf
             obj_means[idx], obj_cvs[idx] = mu, cv
-            cur = primary_obj_arr[idx]
-            if not np.isnan(cur) and cur > 1e-9:
-                if (cur - obj_vals.min()) / cur > config['cliff_threshold']: cliffs[idx] = True
 
-        passes[idx] = bool((len(nbrs_idx) >= config['min_neighbor_count']) and not cliffs[idx])
+        # 强制废除悬崖判断，将惩罚权移交给 LCB
+        cliffs[idx] = False
 
-    out['L4_TARGET_NEIGHBOR_COUNT'], out['L4_NEIGHBOR_COUNT'], out['L4_SURVIVING_NEIGHBOR_COUNT'] = target_counts, neighbor_counts, surviving_counts
-    out['L4_NEIGHBOR_HEALTH_RATE'], out['L4_NEIGHBOR_OBJ_MEAN'], out['L4_NEIGHBOR_OBJ_CV'] = health_rates, obj_means, obj_cvs
+        # 满足容量够、存活率达标（>=10%）、平原均值为正即可放行
+        passes[idx] = bool((len(nbrs_idx) >= config.get('min_neighbor_count', 5)) and (health_rates[idx] >= 0.10) and (
+                    obj_means[idx] > 0))
+
+    out['L4_TARGET_NEIGHBOR_COUNT'], out['L4_NEIGHBOR_COUNT'], out[
+        'L4_SURVIVING_NEIGHBOR_COUNT'] = target_counts, neighbor_counts, surviving_counts
+    out['L4_NEIGHBOR_HEALTH_RATE'], out['L4_NEIGHBOR_OBJ_MEAN'], out[
+        'L4_NEIGHBOR_OBJ_CV'] = health_rates, obj_means, obj_cvs
     out['L4_CLIFF'], out['L4_PASS'] = cliffs, passes
     return out
+
+
 
 def layer5_time_stability(df, config):
     out = df.copy()
