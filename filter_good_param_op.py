@@ -15,7 +15,7 @@ from collections import defaultdict
 # 切换评估模式: 'LONG' (多头参数漏斗) 或 'SHORT' (空头参数漏斗)
 
 # 文件路径配置
-RESULTS_PATH = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_SHORT_ONLY_dynamic_pool_offset_0h_with_Benchmark.csv'
+RESULTS_PATH = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_LONG_ONLY_dynamic_pool_offset_0h_with_Benchmark.csv'
 EVAL_SIDE = 'LONG'
 if 'SHORT' in RESULTS_PATH.upper():
     EVAL_SIDE = 'SHORT'
@@ -40,7 +40,7 @@ LONG_CONFIG = {
         'drop_top3_pnl_decay':        'minimize',
     },
     'L3_CONSTRAINTS': {
-        'max_top1_pnl_ratio':       ('<=', 0.45),
+        'top1_pnl_ratio':           ('<=', 0.45), # ✅ 修复5.1: 统一列名映射
         'asset_hhi':                ('<=', 0.65),
     },
     'L5_TIME': {
@@ -49,9 +49,6 @@ LONG_CONFIG = {
     'PRIMARY_OBJ': 'sortino_ratio'
 }
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 📉 方案 B：SHORT 专属评价体系
-# ═══════════════════════════════════════════════════════════════════════════
 # ═══════════════════════════════════════════════════════════════════════════
 # 📉 方案 B：SHORT 专属评价体系 (宽进严评松绑版)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -62,7 +59,8 @@ SHORT_CONFIG = {
         'max_drawdown_threshold':        -0.30,   # ✅ 放宽：从 -0.20 放宽到 -0.30，容忍熊市剧烈反弹
         'max_mae_pct_worst':             -0.35,   # ✅ 放宽：从 -0.25 放宽到 -0.35
         'min_bear_regime_total_return':  0.0,     # 🔒 底线：熊市必须赚钱，这个绝对不能动
-        'min_cost_stress_20bps_annual': -0.05,    # ✅ 放宽：改用 20bps 评估，且容忍极限压力下有 -5% 的微亏
+        'min_cost_stress_20bps_annual':  0.0,     # ✅ 修复5.3: 收紧为 >= 0.0，与 L2 最大化目标自洽
+        'min_expectancy_ci_low':         0.0,     # ✅ 修复5.4: 增加空头置信下界硬约束防小样本运气
         'max_avg_holding_hours':         120.0,   # ✅ 放宽：从 72 小时放宽到 120 小时(5天)
     },
     'L2_PARETO': {
@@ -72,7 +70,7 @@ SHORT_CONFIG = {
         'cost_stress_20bps_annual':   'maximize', # 配合 L1 修改
     },
     'L3_CONSTRAINTS': {
-        'max_top1_pnl_ratio':       ('<=', 0.45), # ✅ 放宽：从 0.35 放宽到 0.45
+        'top1_pnl_ratio':           ('<=', 0.45), # ✅ 修复5.1: 统一列名映射
         'profit_loss_ratio':        ('>=', 0.9),  # ✅ 放宽：只要期望下界好，盈亏比 0.9 也能接受
     },
     'L5_TIME': {
@@ -110,7 +108,8 @@ def layer1_health_filter(df, filters):
     if 'total_closed_trades' in out.columns:
         reject(out['total_closed_trades'].fillna(0) < filters.get('min_total_trades', 0), 'too_few_trades')
     if 'active_assets' in out.columns:
-        reject(out['active_assets'].fillna(0) < filters.get('min_active_assets', 0), 'too_few_active_assets')
+        # ✅ 修复5.2: 默认安全下限改为 2，避免配置遗失时退化为不筛选
+        reject(out['active_assets'].fillna(0) < filters.get('min_active_assets', 2), 'too_few_active_assets')
     if 'max_drawdown' in out.columns:
         reject(out['max_drawdown'].fillna(-1) < filters.get('max_drawdown_threshold', -1), 'dd_too_deep')
     if 'expectancy_ci_low' in out.columns and 'min_expectancy_ci_low' in filters:
@@ -186,11 +185,7 @@ def layer3_constraint_filter(df, constraints):
     pass_mask = pd.Series(True, index=cands.index)
 
     for col, (op, threshold) in constraints.items():
-        if col == 'max_top1_pnl_ratio' and 'top1_pnl_ratio' in cands.columns:
-            fail = cands['top1_pnl_ratio'].fillna(1) > threshold
-            pass_mask &= ~fail
-            out.loc[cands.index[fail], 'L3_REASONS'] += f"top1_pnl>{threshold}; "
-            continue
+        # ✅ 修复5.1: 删除了原有的硬编码 if col == 'max_top1_pnl_ratio' 分支，完全依赖标准映射逻辑
         if col not in cands.columns: continue
         v = cands[col]
         if op == '>=': fail = v.fillna(-np.inf) < threshold
@@ -210,7 +205,9 @@ def layer4_neighborhood(df, varying_params, primary_obj, config):
     target_counts, neighbor_counts, surviving_counts = np.zeros(n_rows, dtype=int), np.zeros(n_rows,
                                                                                              dtype=int), np.zeros(
         n_rows, dtype=int)
-    health_rates, obj_means, obj_cvs = np.full(n_rows, np.nan), np.full(n_rows, np.nan), np.full(n_rows, np.nan)
+
+    # ✅ 修复5.5: 新增 obj_stds 数组直接存储标准差
+    health_rates, obj_means, obj_cvs, obj_stds = np.full(n_rows, np.nan), np.full(n_rows, np.nan), np.full(n_rows, np.nan), np.full(n_rows, np.nan)
     cliffs, passes = np.zeros(n_rows, dtype=bool), np.zeros(n_rows, dtype=bool)
 
     ignored = config.get('ignore_params', [])
@@ -269,7 +266,8 @@ def layer4_neighborhood(df, varying_params, primary_obj, config):
         if len(obj_vals) >= 2:
             mu, sd = obj_vals.mean(), obj_vals.std(ddof=1)
             cv = abs(sd / mu) if abs(mu) > 1e-9 else np.inf
-            obj_means[idx], obj_cvs[idx] = mu, cv
+            # ✅ 修复5.5: 同步保存真实的标准差
+            obj_means[idx], obj_cvs[idx], obj_stds[idx] = mu, cv, sd
 
         # 强制废除悬崖判断，将惩罚权移交给 LCB
         cliffs[idx] = False
@@ -282,6 +280,8 @@ def layer4_neighborhood(df, varying_params, primary_obj, config):
         'L4_SURVIVING_NEIGHBOR_COUNT'] = target_counts, neighbor_counts, surviving_counts
     out['L4_NEIGHBOR_HEALTH_RATE'], out['L4_NEIGHBOR_OBJ_MEAN'], out[
         'L4_NEIGHBOR_OBJ_CV'] = health_rates, obj_means, obj_cvs
+    # ✅ 修复5.5: 直接将算好的标准差附带到列中输出
+    out['L4_NEIGHBOR_OBJ_STD'] = obj_stds
     out['L4_CLIFF'], out['L4_PASS'] = cliffs, passes
     return out
 
@@ -299,13 +299,15 @@ def layer5_time_stability(df, config):
 def compute_final_score(df):
     out = df.copy()
     out['FINAL_SCORE'] = np.nan
-    valid_mask = out['L4_NEIGHBOR_OBJ_MEAN'].notna()
+    # ✅ 修复5.5: 直接要求均值和标准差均有效（不为NaN），彻底拒绝孤岛参数
+    valid_mask = out['L4_NEIGHBOR_OBJ_MEAN'].notna() & out['L4_NEIGHBOR_OBJ_STD'].notna()
     if not valid_mask.any(): return out
 
-    nbrs_mean = out.loc[valid_mask, 'L4_NEIGHBOR_OBJ_MEAN'].fillna(0)
-    nbrs_health = out.loc[valid_mask, 'L4_NEIGHBOR_HEALTH_RATE'].fillna(0)
-    nbrs_cv = out.loc[valid_mask, 'L4_NEIGHBOR_OBJ_CV'].fillna(0)
-    nbrs_std = nbrs_cv * np.abs(nbrs_mean)
+    nbrs_mean = out.loc[valid_mask, 'L4_NEIGHBOR_OBJ_MEAN']
+    nbrs_health = out.loc[valid_mask, 'L4_NEIGHBOR_HEALTH_RATE']
+    # ✅ 修复5.5: 直接采用真实的标准差，不再从CV反推，杜绝 fillna(0) 带来的数学畸变
+    nbrs_std = out.loc[valid_mask, 'L4_NEIGHBOR_OBJ_STD']
+
     lcb = nbrs_mean - 1.5 * nbrs_std
     out.loc[valid_mask, 'FINAL_SCORE'] = lcb * nbrs_health
     return out
