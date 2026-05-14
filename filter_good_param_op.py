@@ -616,6 +616,38 @@ def evaluate(results_path, side='LONG'):
     print_rejection_summary(df, 'L1_PASS', 'L1_REASONS', 'L1 硬生存底线')
     print_top_candidates(df, cfg['PRIMARY_OBJ'], varying, top_n=5)
 
+    # ══════════════════════════════════════════════════════════════════
+    # 新增：保存通过所有筛选的参数至本地文件
+    # ══════════════════════════════════════════════════════════════════
+    if 'L5_PASS' in df.columns:
+        passed_df = df[df['L5_PASS']].copy()
+
+        if len(passed_df) > 0:
+            # 按照综合评分 LCB 和 主目标 降序排列
+            if 'FINAL_SCORE' in passed_df.columns:
+                passed_df = passed_df.sort_values(
+                    by=['FINAL_SCORE', cfg['PRIMARY_OBJ']],
+                    ascending=[False, False]
+                )
+
+            # 构造输出路径：在原文件同目录下，添加 _PASSED 后缀
+            base_dir = os.path.dirname(results_path)
+            file_name = os.path.basename(results_path)
+            save_name = file_name.replace('.csv', '_PASSED.csv')
+            save_path = os.path.join(base_dir, save_name)
+
+            # 导出到CSV文件，保留所有指标以便复查
+            passed_df.to_csv(save_path, index=False, encoding='utf-8-sig')
+
+            print("\n" + "═" * 70)
+            print(f"💾 成功！已将 {len(passed_df)} 组通过最终筛选的参数保存至：")
+            print(f"   ► {save_path}")
+            print("═" * 70)
+        else:
+            print("\n" + "═" * 70)
+            print("⚠️ 没有参数通过所有筛选，未生成导出文件。")
+            print("═" * 70)
+
     return df
 
 if __name__ == "__main__":
