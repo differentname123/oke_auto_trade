@@ -1415,24 +1415,133 @@ def get_combine_data():
     else:
         print("\n⚠️ 没有生成任何有效的指标结果。")
         return pd.DataFrame()
-# ==========================================
-# 🔴 底部入口：全自动遍历你指定的错位列表
-# ==========================================
+
+
+def score_and_print_top_combinations(final_metrics_df, top_n=5, min_trades=30):
+    """
+    对组合测算结果进行“抗过拟合”综合评分，并打印前 N 名的绩效报告
+    :param min_trades: 最小交易笔数阈值，低于此值的组合将被一票否决，视为统计无效
+    """
+    if final_metrics_df is None or final_metrics_df.empty:
+        print("⚠️ 数据为空，无法进行打分和排名。")
+        return
+
+    df = final_metrics_df.copy()
+
+    # 1. 安全处理 NaN 值
+    df['sortino_ratio'] = df['sortino_ratio'].fillna(0).clip(upper=15)  # 限制极值，防止偶然高分破坏评价体系
+    df['annual_return'] = df['annual_return'].fillna(0)
+    df['max_drawdown'] = df['max_drawdown'].fillna(1)
+    df['monthly_positive_ratio'] = df['monthly_positive_ratio'].fillna(0)
+    df['top1_pnl_ratio'] = df['top1_pnl_ratio'].fillna(1)
+    df['total_closed_trades'] = df['total_closed_trades'].fillna(0)
+
+    # 计算水下时间占比
+    days_passed = df['days_passed'].fillna(1).replace(0, 1)  # 防除零报错
+    df['uw_ratio'] = df['max_time_under_water_days'].fillna(days_passed) / days_passed
+
+    # 2. 构建【抗过拟合鲁棒性评分 (Robustness Score)】
+
+    # [基础分] Sortino 决定风险调整后的底色 (假设常规优秀的 Sortino 在 2~5 之间)
+    base_score = df['sortino_ratio'] * 20
+
+    # [稳定性加分] 高月度胜率意味着利润分布均匀，不靠天吃饭
+    stability_bonus = (df['monthly_positive_ratio'] * 100) * 1.0
+
+    # [回撤与水下惩罚] 严惩回撤深度，并惩罚资金长时间处于水下不创新高
+    drawdown_penalty = (df['max_drawdown'] * 100) * 10.0
+    underwater_penalty = (df['uw_ratio'] * 100) * 55
+
+    # [防过拟合核心惩罚] 单笔利润过度集中，说明是靠“运气单”撑起来的，重罚！
+    luck_penalty = (df['top1_pnl_ratio'] * 100) * 2.0
+
+    # 综合计算得分
+    df['composite_score'] = stability_bonus
+
+    # 3. 统计学一票否决：交易笔数过少的直接打入冷宫 (-9999分)
+    df.loc[df['total_closed_trades'] < min_trades, 'composite_score'] = -9999
+
+    # 4. 按综合得分降序排列，取前 N 名
+    top_df = df.sort_values(by='composite_score', ascending=False).head(top_n)
+
+    print(f"\n🛡️ [实盘基因筛选：Top {len(top_df)} 强鲁棒性策略排行榜] 🛡️")
+    print("=" * 85)
+
+    # 5. 遍历并格式化输出
+    for i, (idx, row) in enumerate(top_df.iterrows(), 1):
+
+        def safe_get(key, default=0.0):
+            val = row.get(key, default)
+            return default if pd.isna(val) else val
+
+        score = safe_get('composite_score', 0.0)
+
+        # 如果排名前列的还是负分，说明没有好参数
+        if score == -9999:
+            print(f"\n 第 {i} 名: 无合格策略 (所有策略均未达到最低交易笔数阈值 {min_trades} 笔)")
+            continue
+
+        long_name = row.get('long_param_name', 'Unknown')
+        short_name = row.get('short_param_name', 'Unknown')
+        btc_window = row.get('param_BTC_TREND_WINDOW', 'Unknown')
+
+        trades = int(safe_get('total_closed_trades', 0))
+        win_rate = safe_get('win_rate', 0.0) * 100
+        pl_ratio = safe_get('profit_loss_ratio', 0.0)
+
+        total_ret = safe_get('total_return', 0.0) * 100
+        annual_ret = safe_get('annual_return', 0.0) * 100
+
+        max_dd = safe_get('max_drawdown', 0.0) * 100
+        max_uw = safe_get('max_time_under_water_days', 0.0)
+        uw_ratio_val = safe_get('uw_ratio', 0.0) * 100
+        avg_uw = safe_get('avg_recovery_time_days', 0.0)
+
+        sortino = safe_get('sortino_ratio', 0.0)
+        monthly_win_ratio = safe_get('monthly_positive_ratio', 0.0) * 100
+
+        hhi = safe_get('asset_hhi', 0.0)
+        top1_pnl = safe_get('top1_pnl_ratio', 0.0) * 100
+
+        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "🏅"
+
+        print(f"\n {medal} 排名: 第 {i} 名 | 鲁棒评分: {score:.2f} (侧重防过拟合)")
+        print(f" 🧬 组合基因: 做多 [{long_name}] + 做空 [{short_name}] (趋势窗口: {btc_window})")
+        print(f"   ├─ 交易统计: {trades} 笔平仓 | 胜率: {win_rate:.1f}% | 盈亏比: {pl_ratio:.2f}")
+
+        t_sign = "+" if total_ret > 0 else ""
+        a_sign = "+" if annual_ret > 0 else ""
+        print(f"   ├─ 收益状况: 总收益: {t_sign}{total_ret:.1f}% | 年化收益: {a_sign}{annual_ret:.1f}%")
+
+        print(
+            f"   ├─ 回撤体验: 最大回撤: {max_dd:.1f}% | 最长水下期: {max_uw:.1f}天 (占比 {uw_ratio_val:.1f}%) | 平均恢复: {avg_uw:.1f}天")
+
+        # 特别高亮展示防过拟合相关的指标
+        print(f"   ├─ 稳健指标: Sortino: {sortino:.3f} | 盈利月占比: {monthly_win_ratio:.1f}%")
+        print(f"   └─ 集中度险: 币种HHI: {hhi:.3f} | 最赚1笔占比: {top1_pnl:.1f}% (越低越不靠运气)")
+        print("-" * 85)
+
+
 if __name__ == "__main__":
 
 
-    get_combine_data()
+    #
+    # # get_combine_data()
+    #
+    # output_file = r"W:\project\python_project\oke_auto_trade\param_search_results\combined_metrics_results.csv"
+    # df = pd.read_csv(output_file)
+    # score_and_print_top_combinations(df, top_n=10)
 
-    #
-    # # 定义需要依次回测的时间错位列表
-    # offsets = ['30min', '1h', '2h', '3h','0h']
-    #
-    # for offset in offsets:
-    #     print(f"\n\n{'=' * 80}")
-    #     print(f"🌟 正在启动全局相位测试，当前测试阶段: [ 错位 {offset} ]")
-    #     print(f"{'=' * 80}")
-    #
-    #     # 依次回测，并传入当前的 offset
-    #     run_grid_search(time_offset=offset, max_workers=15)
-    #
-    # print("\n🎉 所有时间错位测试已全部执行完毕！请前往 results 文件夹对比各相位的 CSV 表现。")
+
+    # 定义需要依次回测的时间错位列表
+    offsets = ['30min', '1h', '2h', '3h','0h']
+
+    for offset in offsets:
+        print(f"\n\n{'=' * 80}")
+        print(f"🌟 正在启动全局相位测试，当前测试阶段: [ 错位 {offset} ]")
+        print(f"{'=' * 80}")
+
+        # 依次回测，并传入当前的 offset
+        run_grid_search(time_offset=offset, max_workers=15)
+
+    print("\n🎉 所有时间错位测试已全部执行完毕！请前往 results 文件夹对比各相位的 CSV 表现。")
