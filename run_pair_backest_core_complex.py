@@ -5,7 +5,7 @@ import itertools
 import pandas as pd
 import numpy as np
 from datetime import timedelta
-
+from tqdm import tqdm
 # ==========================================
 # 🌐 全局配置与交易模式控制
 # ==========================================
@@ -1092,7 +1092,7 @@ def fast_combined_replay(long_events_file, short_events_file, global_price_df, i
     """
     极速多空信号缝合与复利推演引擎 (V3.1 完美防弹版：彻底榨干性能 + 修复防幽灵BUG + 免疫 NaN 污染)
     """
-    print(f"🚀 开始极速推演 BOTH 模式 (引擎 V3.1版)...")
+    # print(f"🚀 开始极速推演 BOTH 模式 (引擎 V3.1版)...")
 
     # 1. 读取并合并事件流
     df_long = pd.read_csv(long_events_file) if long_events_file else pd.DataFrame()
@@ -1225,7 +1225,7 @@ def fast_combined_replay(long_events_file, short_events_file, global_price_df, i
     # 生成绝对严谨的时间轴资金曲线
     # ==========================================
     logs_df = pd.DataFrame(replay_logs)
-    print(f"   ► 正在重构合并后的资金曲线...")
+    # print(f"   ► 正在重构合并后的资金曲线...")
 
     if pos_records and cash_records:
         df_pos = pd.DataFrame([p[1] for p in pos_records], index=[p[0] for p in pos_records])
@@ -1243,7 +1243,7 @@ def fast_combined_replay(long_events_file, short_events_file, global_price_df, i
     curve_df = pd.DataFrame({'equity': equity_values}, index=global_prices_index)
     curve_df.index.name = 'time'
 
-    print(f"✅ BOTH 模式重演完成！最终资金: {curve_df['equity'].iloc[-1]:.2f}")
+    # print(f"✅ BOTH 模式重演完成！最终资金: {curve_df['equity'].iloc[-1]:.2f}")
 
     return logs_df, curve_df
 
@@ -1296,84 +1296,120 @@ def print_performance_report(metrics):
     print("-" * 78)
 
 
+def process_single_combination(task_args):
+    """
+    处理单个组合的核心逻辑，供子进程调用
+    """
+    (long_param_name, short_param_name, long_btc_trend,
+     long_file, short_file, global_price_df) = task_args
+
+    try:
+        # 极速缝合并重演
+        combined_logs, combined_curve = fast_combined_replay(
+            long_events_file=long_file,
+            short_events_file=short_file,
+            global_price_df=global_price_df,
+            initial_capital=10000.0,
+            fee_rate=0.0005
+        )
+
+        combined_name = f"{long_param_name}_AND_{short_param_name}"
+
+        # 把合并后的结果喂给指标计算函数
+        metrics = calculate_comprehensive_metrics(
+            logs_df=combined_logs,
+            curve_df=combined_curve,
+            price_df=global_price_df,
+            custom_params={'COMBINED': combined_name, 'BTC_TREND_WINDOW': long_btc_trend},
+            param_name=combined_name,
+            final_equity_override=combined_curve['equity'].iloc[-1]
+        )
+
+        # 补充组合来源记录
+        metrics['long_param_name'] = long_param_name
+        metrics['short_param_name'] = short_param_name
+        metrics['param_BTC_TREND_WINDOW'] = long_btc_trend
+
+        # 返回成功标志和数据
+        return (True, metrics)
+
+    except Exception as e:
+        # 返回失败标志和报错信息
+        error_msg = f"❌ 处理组合 {long_param_name} + {short_param_name} 时报错: {e}"
+        return (False, error_msg)
+
+
+# ==========================================
+# 2. 主函数逻辑
+# ==========================================
 def get_combine_data():
-    # 基础文件路径
+    # 基础文件路径 (注意：请确保所在环境路径无误)
     good_long_df_file = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_LONG_ONLY_dynamic_pool_offset_0h_with_Benchmark_PASSED.csv'
     good_short_df_file = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_SHORT_ONLY_dynamic_pool_offset_0h_with_Benchmark_PASSED.csv'
     events_dir = r"W:\project\python_project\oke_auto_trade\param_search_results\event_streams"
     output_file = r"W:\project\python_project\oke_auto_trade\param_search_results\combined_metrics_results.csv"
 
+    print("加载基础配置表...")
     good_long_df = pd.read_csv(good_long_df_file)
     good_short_df = pd.read_csv(good_short_df_file)
 
-    # 1. 正常获取你的全局价格表
+    # 正常获取你的全局价格表
     yearly_data_cache, global_price_df, _ = prepare_environment(YEARLY_POOL_CONFIG)
 
-    all_metrics = []  # 用于收集所有组合的指标
+    print(f"开始构建计算任务，Long策略数量: {len(good_long_df)}, Short策略数量: {len(good_short_df)}")
 
-    print(f"开始组合测算，Long策略数量: {len(good_long_df)}, Short策略数量: {len(good_short_df)}")
+    tasks = []
 
-    # 2. 遍历做多的参数列表
+    # 3. 预先构建所有的任务参数列表
     for idx_l, row_l in good_long_df.iterrows():
         long_param_name = row_l['param_name']
         long_btc_trend = row_l['param_BTC_TREND_WINDOW']
 
-        # 在做空参数列表中寻找 BTC_TREND_WINDOW 相同的行
         matching_shorts = good_short_df[good_short_df['param_BTC_TREND_WINDOW'] == long_btc_trend]
 
-        # 3. 遍历匹配到的做空参数
         for idx_s, row_s in matching_shorts.iterrows():
             short_param_name = row_s['param_name']
 
-            # 动态构建对应的 events.csv 文件路径
-            long_file = os.path.join(events_dir, f"LONG_ONLY_{long_param_name}_0h_events.csv")
+            long_file = os.path.join(events_dir, f"LONG_ONLY_{long_param_name}_events.csv")
             short_file = os.path.join(events_dir, f"SHORT_ONLY_{short_param_name}_events.csv")
 
-            # 增加容错：检查文件是否存在
+            # 在分配任务前执行文件存在性检查，避免无意义的进程调度开销
             if not os.path.exists(long_file) or not os.path.exists(short_file):
-                print(f"⚠️ 文件缺失，跳过组合: {long_param_name} + {short_param_name}")
+                print(f"⚠️ 文件缺失，已跳过组合: {long_param_name} + {short_param_name}")
                 continue
 
-            try:
-                # 4. 极速缝合并重演！
-                combined_logs, combined_curve = fast_combined_replay(
-                    long_events_file=long_file,
-                    short_events_file=short_file,
-                    global_price_df=global_price_df,
-                    initial_capital=10000.0,
-                    fee_rate=0.0005
-                )
+            # 将参数打包进元组，准备塞入进程池
+            task_args = (long_param_name, short_param_name, long_btc_trend,
+                         long_file, short_file, global_price_df)
+            tasks.append(task_args)
 
-                combined_name = f"{long_param_name}_AND_{short_param_name}"
+    total_tasks = len(tasks)
+    print(f"任务构建完毕，总计需测算组合数: {total_tasks}。开始启动并发处理...")
 
-                # 5. 把合并后的结果喂给指标计算函数
-                metrics = calculate_comprehensive_metrics(
-                    logs_df=combined_logs,
-                    curve_df=combined_curve,
-                    price_df=global_price_df,
-                    custom_params={'COMBINED': combined_name, 'BTC_TREND_WINDOW': long_btc_trend},
-                    param_name=combined_name,
-                    final_equity_override=combined_curve['equity'].iloc[-1]
-                )
+    all_metrics = []
 
-                # 为了后续排查方便，将组合来源记录在 metrics 中
-                metrics['long_param_name'] = long_param_name
-                metrics['short_param_name'] = short_param_name
-                metrics['param_BTC_TREND_WINDOW'] = long_btc_trend
+    # 4. 开启多进程池 (并行量设定为 10)
+    if tasks:
+        # max_workers=10 指定开启10个并行进程
+        with ProcessPoolExecutor(max_workers=20) as executor:
+            # 提交所有任务
+            future_to_task = {executor.submit(process_single_combination, task): task for task in tasks}
 
-                all_metrics.append(metrics)
+            # 使用 tqdm 包装 as_completed，获取优雅的进度条显示
+            for future in tqdm(as_completed(future_to_task), total=total_tasks, desc="并行测算进度"):
+                success, result = future.result()
 
-                # 可选：如果组合太多，一直打印可能会刷屏，你可以注释掉这里
-                # print_performance_report(metrics)
+                if success:
+                    all_metrics.append(result)
+                else:
+                    # 如果失败，result 里面装的是报错字符串
+                    print(result)
 
-            except Exception as e:
-                print(f"❌ 处理组合 {long_param_name} + {short_param_name} 时报错: {e}")
-
-    # 6. 将所有的 metrics 转换为 df 进行保存
+    # 5. 数据保存
     if all_metrics:
         final_metrics_df = pd.DataFrame(all_metrics)
         final_metrics_df.to_csv(output_file, index=False)
-        print(f"\n✅ 测算完成！共成功测试 {len(final_metrics_df)} 种组合。")
+        print(f"\n✅ 测算完成！共成功生成 {len(final_metrics_df)} 条有效指标。")
         print(f"📁 结果已保存至: {output_file}")
         return final_metrics_df
     else:
