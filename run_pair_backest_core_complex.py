@@ -1098,10 +1098,250 @@ def run_grid_search(time_offset='0h', max_workers=15):
     return aggregated_df
 
 
+def fast_combined_replay(long_events_file, short_events_file, global_price_df, initial_capital=10000.0,
+                         fee_rate=0.0005):
+    """
+    极速多空信号缝合与复利推演引擎 (V2 修复版：精细化成本追踪与防幽灵仓位)
+    """
+    print(f"🚀 开始极速推演 BOTH 模式 (引擎 V2版)...")
+
+    # 1. 读取并合并事件流
+    df_long = pd.read_csv(long_events_file) if long_events_file else pd.DataFrame()
+    df_short = pd.read_csv(short_events_file) if short_events_file else pd.DataFrame()
+
+    df_all = pd.concat([df_long, df_short], ignore_index=True)
+    if df_all.empty:
+        print("⚠️ 警告：多空事件流均为空！")
+        return pd.DataFrame(), pd.DataFrame()
+
+    df_all['time'] = pd.to_datetime(df_all['time'])
+    df_all.sort_values('time', inplace=True)
+
+    # 2. 虚拟账户状态初始化
+    cash = float(initial_capital)
+    # 🟢 修复1：加强状态机的记忆，记录真实带有正负号的 amount 和 cost_price
+    positions = {}  # 格式: {coin: {'amount': 0.0, 'cost_price': 0.0, 'side': None}}
+
+    replay_logs = []
+
+    # 用于直接快照，摒弃二次循环
+    pos_records = []
+    cash_records = []
+
+    # 3. 按时间截面分组重演
+    grouped_events = df_all.groupby('time')
+
+    for t, group in grouped_events:
+        if t in global_price_df.index:
+            prices_row = global_price_df.loc[t]
+        else:
+            prices_row = global_price_df.asof(t)
+
+        # ==========================================
+        # 计算发信号这一刻的【期初总净值】
+        # ==========================================
+        current_equity = cash
+        for c, pos_info in positions.items():
+            amt = pos_info['amount']  # 空头是负数，直接相加
+            if abs(amt) > 1e-9 and c in prices_row:
+                current_equity += amt * prices_row[c]
+
+        closes = group[group['event'] == 'CLOSE']
+        opens = group[group['event'] == 'OPEN']
+
+        # ==========================================
+        # 执行平仓 (释放资金并计算精准 PNL)
+        # ==========================================
+        for _, row in closes.iterrows():
+            c = row['coin']
+            if c not in positions or abs(positions[c]['amount']) < 1e-9:
+                continue
+
+            # 🟢 调出记忆的开仓数据
+            amt = abs(positions[c]['amount'])
+            cost_price = positions[c]['cost_price']
+            side = positions[c]['side']
+            price = row['price']
+
+            val = amt * price
+            fee = val * fee_rate
+
+            if side == 'LONG':
+                cash += (val - fee)
+                pnl = amt * (price - cost_price) - fee
+            else:
+                cash -= (val + fee)
+                pnl = amt * (cost_price - price) - fee
+
+            # 彻底清空仓位状态
+            positions[c] = {'amount': 0.0, 'cost_price': 0.0, 'side': None}
+
+            replay_logs.append({
+                "time": t, "action": row['action'], "coin": c,
+                "direction": row['direction'], "event": "CLOSE",
+                "price": price, "amount": amt, "value": val, "fee": fee,
+                "pnl": pnl  # 🟢 修复1：录入真实的盈亏数字
+            })
+
+        # ==========================================
+        # 执行开仓 (应用组合后的资金池)
+        # ==========================================
+        for _, row in opens.iterrows():
+            c = row['coin']
+            weight = row['target_weight']
+            price = row['price']
+            direction = row['direction']
+
+            target_val = current_equity * weight
+
+            if direction == 'LONG':
+                buy_val = target_val / (1 + fee_rate) if cash >= target_val / (1 + fee_rate) else cash / (1 + fee_rate)
+                if buy_val > 1.0:
+                    fee = buy_val * fee_rate
+                    buy_amount = buy_val / price
+                    cost_price = price + (fee / buy_amount)
+
+                    # 记忆多头仓位
+                    positions[c] = {'amount': buy_amount, 'cost_price': cost_price, 'side': direction}
+                    cash -= (buy_val + fee)
+
+                    replay_logs.append({
+                        "time": t, "action": row['action'], "coin": c,
+                        "direction": direction, "event": "OPEN",
+                        "price": price, "amount": buy_amount, "value": buy_val, "fee": fee
+                    })
+            else:  # SHORT
+                sell_val = target_val / (1 + fee_rate)
+                if sell_val > 1.0:
+                    fee = sell_val * fee_rate
+                    sell_amount = sell_val / price
+                    cost_price = price - (fee / sell_amount)
+
+                    # 记忆空头仓位 (录入负数 amount 方便算市值)
+                    positions[c] = {'amount': -sell_amount, 'cost_price': cost_price, 'side': direction}
+                    cash += (sell_val - fee)
+
+                    replay_logs.append({
+                        "time": t, "action": row['action'], "coin": c,
+                        "direction": direction, "event": "OPEN",
+                        "price": price, "amount": sell_amount, "value": sell_val, "fee": fee
+                    })
+
+        # 🟢 修复2：截面计算完，直接在这里打“确定性快照”
+        current_pos_snapshot = {c: info['amount'] for c, info in positions.items() if abs(info['amount']) > 1e-9}
+        pos_records.append((t, current_pos_snapshot))
+        cash_records.append((t, cash))
+
+    # ==========================================
+    # 生成绝对严谨的时间轴资金曲线
+    # ==========================================
+    logs_df = pd.DataFrame(replay_logs)
+    print(f"   ► 正在重构合并后的资金曲线 (修复防幽灵BUG)...")
+
+    if pos_records and cash_records:
+        df_pos = pd.DataFrame([p[1] for p in pos_records], index=[p[0] for p in pos_records])
+        df_cash = pd.Series([c[1] for c in cash_records], index=[c[0] for c in cash_records])
+
+        # 利用 reindex 纯净地向未来填充状态（0.0 就是 0.0，完美解决幽灵仓位）
+        df_pos = df_pos.reindex(global_price_df.index, method='ffill').fillna(0.0)
+        df_cash = df_cash.reindex(global_price_df.index, method='ffill').fillna(initial_capital)
+
+        coins_in_matrix = [c for c in df_pos.columns if c in global_price_df.columns]
+        equity_values = df_cash + (df_pos[coins_in_matrix] * global_price_df[coins_in_matrix]).sum(axis=1)
+    else:
+        equity_values = pd.Series(initial_capital, index=global_price_df.index)
+
+    curve_df = pd.DataFrame({'equity': equity_values}, index=global_price_df.index)
+    curve_df.index.name = 'time'
+
+    print(f"✅ BOTH 模式重演完成！最终资金: {curve_df['equity'].iloc[-1]:.2f}")
+
+    return logs_df, curve_df
+
+
+def print_performance_report(metrics):
+    """
+    将 metrics 字典转化为高逼格的终端控制台输出
+    """
+
+    # 安全获取并处理潜在的 NaN 值，防止报错
+    def safe_get(key, default=0.0):
+        val = metrics.get(key, default)
+        return default if val is None or np.isnan(val) else val
+
+    # 提取并计算格式化所需的变量
+    trades = int(safe_get('total_closed_trades', 0))
+    win_rate = safe_get('win_rate', 0.0) * 100
+    pl_ratio = safe_get('profit_loss_ratio', 0.0)
+
+    total_ret = safe_get('total_return', 0.0) * 100
+    annual_ret = safe_get('annual_return', 0.0) * 100
+
+    max_dd = safe_get('max_drawdown', 0.0) * 100
+    max_uw = safe_get('max_time_under_water_days', 0.0)
+    avg_uw = safe_get('avg_recovery_time_days', 0.0)
+
+    # 计算最长水下期占总回测时间的百分比
+    days_passed = safe_get('days_passed', 1)
+    uw_ratio = (max_uw / days_passed) * 100 if days_passed > 0 else 0.0
+
+    sortino = safe_get('sortino_ratio', 0.0)
+    monthly_win_ratio = safe_get('monthly_positive_ratio', 0.0) * 100
+
+    hhi = safe_get('asset_hhi', 0.0)
+    top1_pnl = safe_get('top1_pnl_ratio', 0.0) * 100
+
+    # 开始打印酷炫日志
+    print("\n [📊 核心基础绩效]")
+    print(f"   ├─ 交易统计: {trades} 笔平仓 | 胜率: {win_rate:.1f}% | 盈亏比: {pl_ratio:.2f}")
+
+    # 收益区分正负颜色标志（这里用 +/- 直观显示）
+    t_sign = "+" if total_ret > 0 else ""
+    a_sign = "+" if annual_ret > 0 else ""
+    print(f"   ├─ 收益状况: 总收益: {t_sign}{total_ret:.1f}% | 年化收益: {a_sign}{annual_ret:.1f}%")
+
+    print(
+        f"   ├─ 回撤体验: 最大回撤: {max_dd:.1f}% | 最长水下期: {max_uw:.1f}天 (占回测总时长 {uw_ratio:.1f}%) | 平均恢复: {avg_uw:.1f}天")
+    print(f"   ├─ 风险调整: sortino_ratio(主目标): {sortino:.3f} | 盈利月占比: {monthly_win_ratio:.1f}%")
+    print(f"   └─ 集中度险: 币种HHI: {hhi:.3f} | 最赚1笔占比: {top1_pnl:.1f}%")
+    print("-" * 78)
+
 # ==========================================
 # 🔴 底部入口：全自动遍历你指定的错位列表
 # ==========================================
 if __name__ == "__main__":
+
+    # # 1. 正常获取你的全局价格表 (这一步你只需要调用你原有的 prepare_environment 获取)
+    # yearly_data_cache, global_price_df, _ = prepare_environment(YEARLY_POOL_CONFIG)
+    #
+    # # 2. 假设你找到了做多的天选参数日志 和 做空的天选参数日志
+    # long_file = r"...\param_search_results\event_streams\LONG_ONLY_Grid_No.15_events.csv"
+    # short_file = r"...\param_search_results\event_streams\SHORT_ONLY_Grid_No.82_events.csv"
+    #
+    # # 3. 极速缝合并重演！
+    # combined_logs, combined_curve = fast_combined_replay(
+    #     long_events_file=long_file,
+    #     short_events_file=short_file,
+    #     global_price_df=global_price_df,
+    #     initial_capital=10000.0,
+    #     fee_rate=0.0005
+    # )
+    #
+    # # 4. 把合并后的结果直接喂给你的指标计算函数
+    # metrics = calculate_comprehensive_metrics(
+    #     logs_df=combined_logs,
+    #     curve_df=combined_curve,
+    #     price_df=global_price_df,
+    #     custom_params={'COMBINED': 'Long_15_Short_82'},
+    #     param_name="Super_Both_Strategy",
+    #     final_equity_override=combined_curve['equity'].iloc[-1]
+    # )
+    #
+    # # 🔴 调用打印函数，享受视觉上的极致体验！
+    # print_performance_report(metrics)
+
+
+
     # 定义需要依次回测的时间错位列表
     offsets = ['30min', '1h', '2h', '3h','0h']
 
