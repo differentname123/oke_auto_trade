@@ -9,7 +9,7 @@ from datetime import timedelta
 # ==========================================
 # 🌐 全局配置与交易模式控制
 # ==========================================
-GLOBAL_TRADE_MODE = 'LONG_ONLY'
+GLOBAL_TRADE_MODE = 'SHORT_ONLY'
 INITIAL_CAPITAL = 10000.0
 FEE_RATE = 0.0005
 
@@ -1043,9 +1043,9 @@ def run_grid_search(time_offset='0h', max_workers=15):
     # 🔴 [核心修改]: 保存的 CSV 文件名称动态体现 time_offset
     filename = f"grid_search_{total_combos}_{GLOBAL_TRADE_MODE}_dynamic_pool_offset_{time_offset}.csv"
     save_path = os.path.join(save_dir, filename)
-    if os.path.exists(save_path):
-        print(f"⚠️ 注意：已存在同名结果文件 {filename}，即将覆盖！如需保留请先备份或改名。")
-        return
+    # if os.path.exists(save_path):
+    #     print(f"⚠️ 注意：已存在同名结果文件 {filename}，即将覆盖！如需保留请先备份或改名。")
+    #     return
 
     print(f"\n   ► 包含交易年份: {pool_years}")
     print(f"   ► 参数维度: {len(keys)} 维 ({', '.join(keys)})")
