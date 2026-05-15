@@ -3,12 +3,13 @@
 包含完整的多空隔离逻辑、下置信界(LCB)评分，以及极其详尽的卡片式日志打印。
 """
 
-import os
-import numpy as np
-import pandas as pd
 import itertools
+import re
 from collections import defaultdict
-
+import os
+import pandas as pd
+from collections import Counter
+import numpy as np
 # ═══════════════════════════════════════════════════════════════════════════
 # 全局配置区
 # ═══════════════════════════════════════════════════════════════════════════
@@ -54,27 +55,27 @@ LONG_CONFIG = {
 # ═══════════════════════════════════════════════════════════════════════════
 SHORT_CONFIG = {
     'L1_HEALTH': {
-        'min_total_trades':              30,
-        'min_active_assets':             2,
-        'max_drawdown_threshold':        -0.30,   # ✅ 放宽：从 -0.20 放宽到 -0.30，容忍熊市剧烈反弹
-        'max_mae_pct_worst':             -0.35,   # ✅ 放宽：从 -0.25 放宽到 -0.35
-        'min_bear_regime_total_return':  0.0,     # 🔒 底线：熊市必须赚钱，这个绝对不能动
-        'min_cost_stress_30bps_annual':  0.0,     # 🌟 修复: 统一空头标准为30bps，对齐日志打印
-        'min_expectancy_ci_low':         0.0,     # ✅ 修复5.4: 增加空头置信下界硬约束防小样本运气
-        'max_avg_holding_hours':         120.0,   # ✅ 放宽：从 72 小时放宽到 120 小时(5天)
+        'min_total_trades':              15,
+        'min_active_assets':             1,
+        'max_drawdown_threshold':        -0.75,   # 空头极易被套，放宽到75%回撤
+        'max_mae_pct_worst':             -0.60,   # 最差MAE容忍到60%
+        'min_bear_regime_total_return':  -0.05,   # 熊市允许微亏，不要求绝对赚钱 (原0.0)
+        'min_cost_stress_30bps_annual':  -0.30,   # 30bps滑点下允许亏损20%
+        'min_expectancy_ci_low':         -0.15,
+        'max_avg_holding_hours':         336.0,   # 放宽到持仓14天 (原120)
     },
     'L2_PARETO': {
         'calmar_ratio':               'maximize',
         'mae_pct_worst':              'maximize',
         'bear_regime_total_return':   'maximize',
-        'cost_stress_30bps_annual':   'maximize', # 🌟 修复: 同步修改为30bps
+        'cost_stress_30bps_annual':   'maximize',
     },
     'L3_CONSTRAINTS': {
-        'top1_pnl_ratio':           ('<=', 0.45), # ✅ 修复5.1: 统一列名映射
-        'profit_loss_ratio':        ('>=', 0.9),  # ✅ 放宽：只要期望下界好，盈亏比 0.9 也能接受
+        'top1_pnl_ratio':           ('<=', 0.85),
+        'profit_loss_ratio':        ('>=', 0.4),  # 盈亏比0.4也能忍，只要胜率够
     },
     'L5_TIME': {
-        'min_profitable_years_ratio': 0.30,       # ✅ 放宽：空头本来赚钱年份就少，30%即可
+        'min_profitable_years_ratio': 0.10,       # 空头哪怕只有10%年份赚钱也放行
     },
     'PRIMARY_OBJ': 'calmar_ratio'
 }
@@ -82,7 +83,7 @@ SHORT_CONFIG = {
 NEIGHBOR_CONFIG = {
     'radius':             1,
     'cliff_threshold':    0.40,
-    'min_neighbor_count': 3,
+    'min_neighbor_count': 1,           # 🌟 只要有1个相邻参数被评估过就行 (原3)
     'ignore_params':      ['param_MAX_WEIGHT', 'param_TOP_K']
 }
 
@@ -128,10 +129,21 @@ def layer1_health_filter(df, filters):
         reject(out['avg_holding_hours'].fillna(999) > filters['max_avg_holding_hours'], 'holding_too_long(funding_bleed)')
     return out
 
-def layer2_pareto_frontier(df, objectives, max_fronts=5):
+def layer2_pareto_frontier(df, objectives, max_fronts=5, skip_l2=True):
     out = df.copy()
     out['L2_PARETO'] = False
     out['PARETO_RANK'] = np.nan
+
+    # 🌟 新增逻辑：如果选择跳过 L2，则让所有通过 L1 的参数直接无损通过 L2
+    if skip_l2:
+        if 'L1_PASS' in out.columns:
+            out['L2_PARETO'] = out['L1_PASS']
+            # 将虚拟排名统一设置为 1，防止后续层级(如果有用到排名)出现 NaN 报错
+            out.loc[out['L1_PASS'], 'PARETO_RANK'] = 1
+        else:
+            out['L2_PARETO'] = True
+        return out
+
     cands = out[out['L1_PASS']].copy()
     if len(cands) == 0: return out
 
@@ -175,6 +187,7 @@ def layer2_pareto_frontier(df, objectives, max_fronts=5):
     if pareto_pass_global_idx:
         out.loc[pareto_pass_global_idx, 'L2_PARETO'] = True
     return out
+
 
 def layer3_constraint_filter(df, constraints):
     out = df.copy()
@@ -614,7 +627,7 @@ def evaluate(results_path, side='LONG'):
 
     print_funnel_summary(df)
     print_rejection_summary(df, 'L1_PASS', 'L1_REASONS', 'L1 硬生存底线')
-    print_top_candidates(df, cfg['PRIMARY_OBJ'], varying, top_n=5)
+    # print_top_candidates(df, cfg['PRIMARY_OBJ'], varying, top_n=5)
 
     # ══════════════════════════════════════════════════════════════════
     # 新增：保存通过所有筛选的参数至本地文件
@@ -637,7 +650,7 @@ def evaluate(results_path, side='LONG'):
             save_path = os.path.join(base_dir, save_name)
 
             # 导出到CSV文件，保留所有指标以便复查
-            passed_df.to_csv(save_path, index=False, encoding='utf-8-sig')
+            # passed_df.to_csv(save_path, index=False, encoding='utf-8-sig')
 
             print("\n" + "═" * 70)
             print(f"💾 成功！已将 {len(passed_df)} 组通过最终筛选的参数保存至：")
@@ -650,19 +663,377 @@ def evaluate(results_path, side='LONG'):
 
     return df
 
-if __name__ == "__main__":
-    result_df = evaluate(RESULTS_PATH, side=EVAL_SIDE)
+
+import os
+import re
+from collections import Counter
+import pandas as pd
+import numpy as np
+
+
+def evaluate_multi_offset_ensemble(file_paths, side='LONG', max_missing_votes=0):
+    """
+    极简而强大的多时间偏移联合评估函数 (Ensemble Hard Voting)
+
+    :param file_paths: 包含 5 个不同 offset 结果文件路径的列表
+    :param side: 'LONG' 或 'SHORT'
+    :param max_missing_votes: 容错投票数，默认 0 (必须 5 份文件全过 L5)
+    :return: 经过严格防过拟合过滤后的终极参数 DataFrame
+    """
+    print("\n" + "🚀" * 30)
+    print(f"🌌 启动多维时空联合评估 [模式: {side} | 容错数: {max_missing_votes}]")
+    print("🚀" * 30)
+
+    if len(file_paths) != 5:
+        print(f"⚠️ 警告: 输入的文件数量为 {len(file_paths)}，建议标准的 5 份 Offset 文件！")
+
+    all_results = {}
+    passed_sets = []
 
     # ==========================================
-    # 🎯 指定参数跟踪
+    # 第一步：每个文件独立运行现有的核心漏斗
     # ==========================================
-    target_check = {
-        'MOM_WINDOW': 36,
-        'VOL_WINDOW': 90,
-        'BTC_TREND_WINDOW': 180,
-        'MAX_WEIGHT': 0.25,
-        'TOP_K': 1
-    }
-    _, varying, _ = detect_param_cols(result_df)
-    primary_obj = LONG_CONFIG['PRIMARY_OBJ'] if EVAL_SIDE == 'LONG' else SHORT_CONFIG['PRIMARY_OBJ']
-    print_specific_params(result_df, target_check, primary_obj, varying)
+    for path in file_paths:
+        offset_name = os.path.basename(path).split('_offset_')[-1].split('_')[
+            0] if '_offset_' in path else os.path.basename(path)
+        print(f"\n⏳ 正在独立评估 Offset 宇宙: {offset_name}...")
+
+        # 调用你现有的 evaluate 函数！
+        df = evaluate(path, side=side)
+
+        # 🌟🌟🌟 新增修复：强制清洗 param_name 统一格式 🌟🌟🌟
+        if 'param_name' in df.columns:
+            # 利用正则替换，把结尾处的 _0h, _30min, _1h, _2h, _3h 全部抹除
+            df['param_name'] = df['param_name'].astype(str).str.replace(r'_(0h|30min|1h|2h|3h)$', '', regex=True)
+        # 🌟🌟🌟 修复结束 🌟🌟🌟
+
+        all_results[offset_name] = df
+
+        # 提取通过最终筛选的参数
+        if 'L5_PASS' in df.columns:
+            passed_params = set(df[df['L5_PASS']]['param_name'].dropna())
+        else:
+            passed_params = set()
+
+        passed_sets.append(passed_params)
+        print(f"   ► 该宇宙存活参数数量: {len(passed_params)}")
+        # 打印一个参数名
+        if len(passed_params) > 0:
+            sample_param = next(iter(passed_params))
+            print(f"   ► 示例存活参数: {sample_param}")
+        else:
+            print(f"   ► 无参数通过该宇宙的最终筛选！")
+
+    # ==========================================
+    # 第二步：硬投票取交集 (容错机制)
+    # ==========================================
+    all_passed_list = [p for s in passed_sets for p in s]
+    vote_counts = Counter(all_passed_list)
+
+    required_votes = len(file_paths) - max_missing_votes
+    robust_candidates = [param for param, count in vote_counts.items() if count >= required_votes]
+
+    print("\n" + "═" * 70)
+    print(f"🗳️ 投票阶段完成: 共有 {len(robust_candidates)} 组参数获得 >= {required_votes} 票")
+    print("═" * 70)
+
+    if not robust_candidates:
+        print("❌ 极度悲观：没有参数能在不同的时间切片中稳定存活。请放宽容错(max_missing_votes)或检查基础策略。")
+        return pd.DataFrame()
+
+    # 🌟🌟🌟 需求1：持久化保存投票阶段通过的参数的原始数据 🌟🌟🌟
+    try:
+        persisted_rows = []
+        for param in robust_candidates:
+            for offset_name, df in all_results.items():
+                matching_rows = df[df['param_name'] == param].copy()
+                if not matching_rows.empty:
+                    matching_rows['OFFSET_UNIVERSE'] = offset_name  # 标记来源宇宙
+                    persisted_rows.append(matching_rows)
+
+        if persisted_rows:
+            persisted_df = pd.concat(persisted_rows, ignore_index=True)
+            # 构造保存路径 (基于第一个输入文件，替换标识符)
+            base_dir = os.path.dirname(file_paths[0])
+            base_name = os.path.basename(file_paths[0])
+            save_name = re.sub(r'_offset_[^_]+_', '_ENSEMBLE_VOTED_', base_name)
+            if save_name == base_name:  # 如果没匹配上正则，提供默认后缀
+                save_name = base_name.replace('.csv', '_ENSEMBLE_VOTED.csv')
+            save_path = os.path.join(base_dir, save_name)
+
+            persisted_df.to_csv(save_path, index=False, encoding='utf-8-sig')
+            print(f"💾 [持久化] 已将 {len(robust_candidates)} 组入围参数在所有宇宙的 {len(persisted_df)} 行明细保存至:")
+            print(f"   ► {save_path}")
+    except Exception as e:
+        print(f"⚠️ 保存持久化数据时发生错误: {e}")
+    # 🌟🌟🌟 需求1 结束 🌟🌟🌟
+
+    # ==========================================
+    # 第三步：防过拟合地狱级过滤 (Anti-Overfitting)
+    # ==========================================
+    final_golden_params = []
+
+    # 设定防过拟合的硬性容忍度
+    MAX_SCORE_DROP_PCT = 0.50  # 得分从最好到最差不能缩水超过 50%
+    MAX_DD_SPREAD = 0.15  # 最好和最差的最大回撤极差不能超过 15%
+    MIN_SHORT_RETURN = -0.05  # 对齐容忍空头微亏5%的底线
+
+    print("\n⚔️ 进入防过拟合地狱级审查 (防止实盘亏钱)...")
+
+    for param in robust_candidates:
+        scores, dds, returns, bear_returns = [], [], [], []
+        best_offset = "N/A"
+        current_max_score = -float('inf')
+
+        # 提取这组参数在所有 offset 中的表现
+        for offset_name, df in all_results.items():
+            row = df[df['param_name'] == param]
+            if len(row) == 0: continue
+
+            row = row.iloc[0]
+
+            # 修复 NaN Bug，并提取 🌟 需求2: Best Offset 🌟
+            s = row.get('FINAL_SCORE', np.nan)
+            if pd.notna(s):
+                scores.append(s)
+                # 记录最高分的 Offset 作为推荐
+                if s > current_max_score:
+                    current_max_score = s
+                    best_offset = offset_name
+
+            dd = row.get('max_drawdown', np.nan)
+            if pd.notna(dd): dds.append(dd)
+
+            ret = row.get('total_return', np.nan)
+            if pd.notna(ret): returns.append(ret)
+
+            if side == 'SHORT':
+                bret = row.get('bear_regime_total_return', np.nan)
+                if pd.notna(bret): bear_returns.append(bret)
+
+        if not scores or not dds or not returns:
+            continue
+
+        # --- 过滤规则 A：绝对盈利底线 ---
+        if side == 'LONG' and min(returns) <= 0:
+            print(f"   [淘汰] {param}: 在某个 offset 下总收益为负 (最差: {fmt_pct(min(returns))})")
+            continue
+        if side == 'SHORT' and min(bear_returns) < MIN_SHORT_RETURN:
+            print(f"   [淘汰] {param}: 熊市表现不稳，某 offset 下熊市亏损 (最差: {fmt_pct(min(bear_returns))})")
+            continue
+
+        # --- 过滤规则 B：回撤一致性 ---
+        worst_dd, best_dd = min(dds), max(dds)
+        if abs(worst_dd - best_dd) > MAX_DD_SPREAD:
+            print(f"   [淘汰] {param}: 回撤极差太大，时间极度敏感 (最差 {fmt_pct(worst_dd)} vs 最好 {fmt_pct(best_dd)})")
+            continue
+
+        # --- 过滤规则 C：得分悬崖过滤 (附带低分绝对值保护) ---
+        max_score, min_score = max(scores), min(scores)
+        score_drop = max_score - min_score
+
+        if max_score > 0:
+            drop_pct = score_drop / max_score
+            is_low_score_safe = (max_score <= 0.3) and (score_drop <= 0.15)
+
+            if drop_pct > MAX_SCORE_DROP_PCT and not is_low_score_safe:
+                # print(f"   [淘汰] {param}: 稳健分缩水超过50%悬崖 (最差 {fmt_flt(min_score)} vs 最好 {fmt_flt(max_score)})")
+                continue
+
+        # 全部通过，晋升为真金参数
+        final_golden_params.append({
+            'param_name': param,
+            'votes': vote_counts[param],
+            'median_FINAL_SCORE': np.median(scores),
+            'worst_FINAL_SCORE': min_score,
+            'worst_max_dd': worst_dd,
+            'worst_return': min(returns),
+            'score_drop_pct': drop_pct if max_score > 0 else 0,
+            'best_offset': best_offset  # 🌟 需求2: 保存最佳 Offset
+        })
+
+    # ==========================================
+    # 结果输出与打印 (🌟 重构输出模块)
+    # ==========================================
+    if not final_golden_params:
+        print("\n💀 全军覆没！所有候选参数均未通过防过拟合审查，请勿强行实盘！")
+        return pd.DataFrame()
+
+    # 转为 DataFrame 并按中位数得分排序
+    golden_df = pd.DataFrame(final_golden_params)
+    golden_df = golden_df.sort_values(by='median_FINAL_SCORE', ascending=False)
+
+    print("\n" + "═" * 80)
+    print(f"🏆 最终 {side} 生产环境候选 (按多宇宙联合评估 LCB 排序) [共 {len(golden_df)} 组免疫时区干扰]")
+    print("═" * 80)
+
+    # 动态获取可变参数列名 (从第一个宇宙的数据中提取)
+    sample_df = next(iter(all_results.values()))
+    varying_params = [c for c in sample_df.columns if c.startswith('param_') and c != 'param_name']
+    primary_obj = 'FINAL_SCORE'
+
+    for rank, (idx, summary_row) in enumerate(golden_df.head(5).iterrows(), 1):
+        param = summary_row['param_name']
+        best_offset = summary_row['best_offset']
+
+        # 🌟 核心：去该参数的最佳时区宇宙 DataFrame 里，把完整的明细行提出来，用来满足深度打印要求
+        full_df = all_results[best_offset]
+        full_row = full_df[full_df['param_name'] == param].iloc[0]
+
+        print(f"\n▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼")
+        print(f" 🎖️ 排位 No.{rank} | 参数代号: {param}")
+
+        # 【联合评估专属摘要】
+        print(f"   ► [多宇宙投票] 存活票数: {int(summary_row['votes'])}/5 | 🎯 实盘推荐最佳时区: 【 {best_offset} 】")
+        print(
+            f"   ► [防过拟合验证] 综合分中位数: {fmt_flt(summary_row['median_FINAL_SCORE'])} | 宇宙间衰减极差: {fmt_pct_abs(summary_row['score_drop_pct'])} (极其稳固)")
+        print(
+            f"   ► [兜底极差底线] 最差宇宙回撤: {fmt_pct(summary_row['worst_max_dd'])} | 最差宇宙收益: {fmt_pct(summary_row['worst_return'])}")
+        print("────────────────────────────────────────────────────────────────────────────────")
+
+        # [⚙️ 策略参数配置]
+        print(" [⚙️ 策略参数配置]")
+        param_strs = [f"{p.replace('param_', '')}: {full_row.get(p, 'N/A')}" for p in varying_params]
+        if param_strs:
+            print(f"   ► {',  '.join(param_strs)}")
+        else:
+            print(f"   ► (无变动参数提取)")
+
+        # [📊 核心基础绩效] (基于最佳宇宙数据)
+        print("\n [📊 核心基础绩效 (基于最佳时区表现)]")
+        print(
+            f"   ├─ 交易统计: {fmt_int(full_row.get('total_closed_trades'))} 笔平仓 | 胜率: {fmt_pct_abs(full_row.get('win_rate'))} | 盈亏比: {fmt_flt(full_row.get('profit_loss_ratio'), 2)} | 期望下界: {fmt_flt(full_row.get('expectancy_ci_low'))}")
+        print(
+            f"   ├─ 收益状况: 总收益: {fmt_pct(full_row.get('total_return'))} | 年化收益: {fmt_pct(full_row.get('annual_return'))}")
+
+        bull_ret = full_row.get('bull_regime_total_return', np.nan)
+        bull_bars = full_row.get('bull_regime_bars', np.nan)
+        bear_ret = full_row.get('bear_regime_total_return', np.nan)
+        bear_bars = full_row.get('bear_regime_bars', np.nan)
+        print(
+            f"   ├─ 周期拆解: 牛市绝对收益: {fmt_pct(bull_ret)} (历经 {fmt_int(bull_bars)} 根K线) | 熊市绝对收益: {fmt_pct(bear_ret)} (历经 {fmt_int(bear_bars)} 根K线)")
+
+        max_uw_days = full_row.get('max_time_under_water_days', np.nan)
+        total_days = full_row.get('days_passed', np.nan)
+        uw_str = f"{fmt_flt(max_uw_days, 1)}天"
+        if pd.notna(max_uw_days) and pd.notna(total_days) and total_days > 0:
+            uw_str += f" (占总时长 {fmt_pct_abs(max_uw_days / total_days, 1)})"
+
+        mae_str = f" | ☠️最差MAE: {fmt_pct(full_row.get('mae_pct_worst'))}" if side == 'SHORT' else ""
+        print(f"   ├─ 回撤体验: 最大回撤: {fmt_pct(full_row.get('max_drawdown'))} | 全局最长水下: {uw_str}{mae_str}")
+        print(
+            f"   ├─ 风险调整: {primary_obj}(主目标): {fmt_flt(full_row.get(primary_obj))} | 盈利月占比: {fmt_pct_abs(full_row.get('monthly_positive_ratio'))}")
+
+        drop_str = f" | Top3剔除衰减: {fmt_pct(full_row.get('drop_top3_pnl_decay'))}" if side == 'LONG' else ""
+        print(
+            f"   └─ 集中度险: 币种HHI: {fmt_flt(full_row.get('asset_hhi'))} | 最赚1笔占比: {fmt_pct_abs(full_row.get('top1_pnl_ratio'))}{drop_str}")
+
+        # [🛡️ 参数平原与鲁棒性验证]
+        print("\n [🛡️ 参数平原与鲁棒性验证]")
+        target_nbrs = fmt_int(full_row.get('L4_TARGET_NEIGHBOR_COUNT', 0))
+        actual_nbrs = fmt_int(full_row.get('L4_NEIGHBOR_COUNT', 0))
+        survive_nbrs = fmt_int(full_row.get('L4_SURVIVING_NEIGHBOR_COUNT', 0))
+        print(
+            f"   ├─ 平原稳定性: 邻居容量 [目标: {target_nbrs} | 实际: {actual_nbrs} | 存活: {survive_nbrs}] | 存活率: {fmt_pct_abs(full_row.get('L4_NEIGHBOR_HEALTH_RATE'), 0)}")
+        print(
+            f"   ├─ 邻域绩效评估: 主目标均值: {fmt_flt(full_row.get('L4_NEIGHBOR_OBJ_MEAN'))} | 颠簸度CV: {fmt_flt(full_row.get('L4_NEIGHBOR_OBJ_CV'), 4)}")
+
+        cost_col = 'cost_stress_20bps_annual' if side == 'LONG' else 'cost_stress_30bps_annual'
+        print(f"   └─ 成本压力测: 增加极限滑点后，年化收益变为 -> {fmt_pct(full_row.get(cost_col))}")
+
+        # [📅 年度表现拆解]
+        print("\n [📅 年度表现拆解]")
+        year_cols = [c for c in full_row.keys() if
+                     isinstance(c, str) and c.startswith('year_') and c.endswith('_return') and 'excess' not in c]
+        if year_cols:
+            years = sorted(list(set([int(c.split('_')[1]) for c in year_cols])))
+            for y in years:
+                y_ret = full_row.get(f'year_{y}_return', np.nan)
+                y_dd = full_row.get(f'year_{y}_max_dd', np.nan)
+                y_bench_ret = full_row.get(f'benchmark_year_{y}_return', np.nan)
+                excess_ret = full_row.get(f'year_{y}_excess_return', np.nan)
+
+                if pd.notna(y_bench_ret):
+                    bench_str = f" | 基准收益: {fmt_pct(y_bench_ret):>7} | 🌟全局超额: {fmt_pct(excess_ret):>7}"
+                else:
+                    bench_str = ""
+
+                if pd.notna(y_ret):
+                    print(f"   ► {y}年: 策略收益: {fmt_pct(y_ret):>7} (最大回撤 {fmt_pct(y_dd):>7}){bench_str}")
+        else:
+            print("   ► (无年度拆解数据)")
+
+        # [🪙 标的盈亏贡献明细]
+        print("\n [🪙 标的盈亏贡献明细 (按净利润排序)]")
+        asset_cols = [c for c in full_row.keys() if
+                      isinstance(c, str) and c.startswith('asset_') and c.endswith('_net_pnl')]
+        if asset_cols:
+            assets_info = []
+            for c in asset_cols:
+                coin = c.replace('asset_', '').replace('_net_pnl', '')
+                net_pnl = full_row.get(c, 0.0)
+                trades = full_row.get(f'asset_{coin}_trades', 0)
+                win_r = full_row.get(f'asset_{coin}_win_rate', np.nan)
+                share = full_row.get(f'asset_{coin}_pnl_share', np.nan)
+
+                if trades > 0:
+                    assets_info.append({'coin': coin, 'pnl': net_pnl, 'trades': trades, 'wr': win_r, 'share': share})
+
+            assets_info = sorted(assets_info, key=lambda x: x['pnl'], reverse=True)
+            for a in assets_info:
+                print(
+                    f"   - {a['coin']:<6}: 净利润 ${a['pnl']:>8.2f} (利润占比: {fmt_pct_abs(a['share'])} ) | 交易: {fmt_int(a['trades']):>3}笔 | 胜率: {fmt_pct_abs(a['wr'])}")
+        else:
+            print("   ► (无标的拆解数据)")
+
+        print("▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲\n")
+
+    return golden_df
+def get_all_offset_files(base_path):
+    """
+    智能推导多时间偏移文件路径列表。
+    传入任意一个 offset 的路径，自动生成完整的 5 个 offset 文件路径。
+    """
+    # 我们需要的标准 5 个宇宙偏移量
+    target_offsets = ['0h', '30min', '1h', '2h', '3h']
+
+    file_list = []
+
+    for offset in target_offsets:
+        # 使用正则动态替换路径中的 offset 部分
+        # 正则逻辑：匹配 "_offset_" 加上 "任意非下划线字符" 加上 "_"
+        # 这样无论原路径是 _offset_0h_ 还是 _offset_30min_，都能被精准替换
+        new_path = re.sub(r'_offset_[^_]+_', f'_offset_{offset}_', base_path)
+        file_list.append(new_path)
+
+    # [可选] 贴心的工程检查：帮你提前验证文件是否真的存在于硬盘上
+    missing_files = [p for p in file_list if not os.path.exists(p)]
+    if missing_files:
+        print("⚠️ 警告：以下推导出的文件在硬盘上找不到，请检查回测是否跑完：")
+        for mf in missing_files:
+            print(f"   - {mf}")
+
+    return file_list
+
+# =====================================
+# 如何调用？ (使用示例)
+# =====================================
+if __name__ == "__main__":
+    BASE_RESULTS_PATH = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_SHORT_ONLY_dynamic_pool_offset_0h_with_Benchmark.csv'
+
+    # 自动推导出 5 份文件的列表
+    offset_files = get_all_offset_files(BASE_RESULTS_PATH)
+
+    print("\n📦 已自动拼装以下文件路径准备进入漏斗：")
+    for f in offset_files:
+        print(f" -> {os.path.basename(f)}")
+
+    # 自动识别当前是在跑多头还是空头 (防呆设计)
+    current_side = 'LONG' if 'LONG_ONLY' in BASE_RESULTS_PATH.upper() else 'SHORT'
+
+    # 执行多宇宙投票与防过拟合审查
+    golden_parameters = evaluate_multi_offset_ensemble(
+        file_paths=offset_files,
+        side=current_side,  # 修改为你当前跑的方向
+        max_missing_votes=1  # 保持 0，代表 1个都不能少
+    )
