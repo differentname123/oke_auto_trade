@@ -1344,8 +1344,8 @@ def process_single_combination(task_args):
 # ==========================================
 def get_combine_data():
     # 基础文件路径 (注意：请确保所在环境路径无误)
-    good_long_df_file = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_LONG_ONLY_dynamic_pool_offset_0h_with_Benchmark_PASSED.csv'
-    good_short_df_file = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_SHORT_ONLY_dynamic_pool_offset_0h_with_Benchmark_PASSED.csv'
+    good_long_df_file = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_LONG_ONLY_dynamic_pool_ENSEMBLE_VOTED_with_Benchmark.csv'
+    good_short_df_file = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_SHORT_ONLY_dynamic_pool_ENSEMBLE_VOTED_with_Benchmark.csv'
     events_dir = r"W:\project\python_project\oke_auto_trade\param_search_results\event_streams"
     output_file = r"W:\project\python_project\oke_auto_trade\param_search_results\combined_metrics_results.csv"
 
@@ -1362,13 +1362,16 @@ def get_combine_data():
 
     # 3. 预先构建所有的任务参数列表
     for idx_l, row_l in good_long_df.iterrows():
-        long_param_name = row_l['param_name']
         long_btc_trend = row_l['param_BTC_TREND_WINDOW']
+        OFFSET_UNIVERSE = row_l['OFFSET_UNIVERSE']
+        long_param_name = f"{row_l['param_name']}_{OFFSET_UNIVERSE}"
 
-        matching_shorts = good_short_df[good_short_df['param_BTC_TREND_WINDOW'] == long_btc_trend]
-
+        matching_shorts = good_short_df[
+            (good_short_df['param_BTC_TREND_WINDOW'] == long_btc_trend) &
+            (good_short_df['OFFSET_UNIVERSE'] == OFFSET_UNIVERSE)
+            ]
         for idx_s, row_s in matching_shorts.iterrows():
-            short_param_name = row_s['param_name']
+            short_param_name = f"{row_s['param_name']}_{OFFSET_UNIVERSE}"
 
             long_file = os.path.join(events_dir, f"LONG_ONLY_{long_param_name}_events.csv")
             short_file = os.path.join(events_dir, f"SHORT_ONLY_{short_param_name}_events.csv")
@@ -1526,22 +1529,22 @@ if __name__ == "__main__":
 
 
     #
-    # # get_combine_data()
+    get_combine_data()
     #
     # output_file = r"W:\project\python_project\oke_auto_trade\param_search_results\combined_metrics_results.csv"
     # df = pd.read_csv(output_file)
     # score_and_print_top_combinations(df, top_n=10)
 
-
-    # 定义需要依次回测的时间错位列表
-    offsets = ['30min', '1h', '2h', '3h','0h']
-
-    for offset in offsets:
-        print(f"\n\n{'=' * 80}")
-        print(f"🌟 正在启动全局相位测试，当前测试阶段: [ 错位 {offset} ]")
-        print(f"{'=' * 80}")
-
-        # 依次回测，并传入当前的 offset
-        run_grid_search(time_offset=offset, max_workers=15)
-
-    print("\n🎉 所有时间错位测试已全部执行完毕！请前往 results 文件夹对比各相位的 CSV 表现。")
+    #
+    # # 定义需要依次回测的时间错位列表
+    # offsets = ['30min', '1h', '2h', '3h','0h']
+    #
+    # for offset in offsets:
+    #     print(f"\n\n{'=' * 80}")
+    #     print(f"🌟 正在启动全局相位测试，当前测试阶段: [ 错位 {offset} ]")
+    #     print(f"{'=' * 80}")
+    #
+    #     # 依次回测，并传入当前的 offset
+    #     run_grid_search(time_offset=offset, max_workers=15)
+    #
+    # print("\n🎉 所有时间错位测试已全部执行完毕！请前往 results 文件夹对比各相位的 CSV 表现。")

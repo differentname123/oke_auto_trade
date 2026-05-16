@@ -8,8 +8,7 @@ import zipfile  # <--- 新增这行导入，用于校验压缩包完整性
 TARGET_FILES = ["kline_data/BTC_ETH_1m.csv", "kline_data/DOGE_SOL_1m.csv", "kline_data/TON_XRP_1m.csv"]
 # 自动解析列表涉及到的币，并拼接成 USDT 交易对 (例如: BTCUSDT, ETHUSDT)
 SYMBOLS = [
-    "BTCUSDT", "ETHUSDT", "XRPUSDT", "LTCUSDT", "BCHUSDT",
-    "EOSUSDT", "ADAUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT"
+    "BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT"
 ]
 
 # for f in TARGET_FILES:
@@ -22,8 +21,8 @@ SYMBOLS = [
 
 INTERVAL = "1m"  # K线级别
 MARKET = "futures/um"  # 市场类型：现货填"spot"，U本位填"futures/um"
-START_DATE = "2020-01-01"  # 开始日期 (YYYY-MM-DD)
-END_DATE = "2026-04-26"  # 结束日期 (YYYY-MM-DD)
+START_DATE = "2025-01-01"  # 开始日期 (YYYY-MM-DD)
+END_DATE = "2026-05-26"  # 结束日期 (YYYY-MM-DD)
 SAVE_DIR = "./binance_data"  # ZIP文件临时保存路径
 MAX_WORKERS = 20  # 并发下载线程数（建议 5-10）
 # ==========================================
@@ -85,7 +84,7 @@ def main():
 
     # 遍历解析出的所有交易对
     for symbol in SYMBOLS:
-        merged_file = f"kline_data/{symbol}_{INTERVAL}_merged.csv"
+        merged_file = f"kline_data/{symbol}_{INTERVAL}_{START_DATE}_merged.csv"
         # 确保最终输出目录存在
         os.makedirs(os.path.dirname(merged_file), exist_ok=True)
 

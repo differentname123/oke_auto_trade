@@ -129,7 +129,7 @@ def layer1_health_filter(df, filters):
         reject(out['avg_holding_hours'].fillna(999) > filters['max_avg_holding_hours'], 'holding_too_long(funding_bleed)')
     return out
 
-def layer2_pareto_frontier(df, objectives, max_fronts=5, skip_l2=True):
+def layer2_pareto_frontier(df, objectives, max_fronts=5, skip_l2=False):
     out = df.copy()
     out['L2_PARETO'] = False
     out['PARETO_RANK'] = np.nan
@@ -1019,7 +1019,7 @@ def get_all_offset_files(base_path):
 # 如何调用？ (使用示例)
 # =====================================
 if __name__ == "__main__":
-    BASE_RESULTS_PATH = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_SHORT_ONLY_dynamic_pool_offset_0h_with_Benchmark.csv'
+    BASE_RESULTS_PATH = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_LONG_ONLY_dynamic_pool_offset_0h_with_Benchmark.csv'
 
     # 自动推导出 5 份文件的列表
     offset_files = get_all_offset_files(BASE_RESULTS_PATH)
