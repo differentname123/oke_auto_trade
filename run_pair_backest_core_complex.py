@@ -1344,8 +1344,8 @@ def process_single_combination(task_args):
 # ==========================================
 def get_combine_data():
     # 基础文件路径 (注意：请确保所在环境路径无误)
-    good_long_df_file = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_LONG_ONLY_dynamic_pool_ENSEMBLE_VOTED_with_Benchmark.csv'
-    good_short_df_file = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_SHORT_ONLY_dynamic_pool_ENSEMBLE_VOTED_with_Benchmark.csv'
+    good_long_df_file = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_LONG_ONLY_dynamic_pool_GOLDEN_IMMUNE_with_Benchmark.csv'
+    good_short_df_file = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_SHORT_ONLY_dynamic_pool_GOLDEN_IMMUNE_with_Benchmark.csv'
     events_dir = r"W:\project\python_project\oke_auto_trade\param_search_results\event_streams"
     output_file = r"W:\project\python_project\oke_auto_trade\param_search_results\combined_metrics_results.csv"
 

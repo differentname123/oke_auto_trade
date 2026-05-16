@@ -1,3 +1,6 @@
+import os
+import re
+
 import pandas as pd
 import numpy as np
 
@@ -181,10 +184,141 @@ def evaluate_and_print_top5(csv_path):
         print(
             f"   └─ 运气剥离: 币种HHI: {row['asset_hhi']:.3f} | 去除最赚3笔后衰减: {drop_top3 * 100:.1f}% | 负期望币种数: {neg_assets} 个")
         print("-" * 85)
+def print_advanced_report(metrics_dict):
+    """
+    高逼格、高信息密度的策略表现深度打印函数
+    支持动态解析不固定数量的年份和币种
+    """
 
+    # 辅助函数：安全获取并处理潜在的 NaN 值
+    def safe_get(key, default=0.0):
+        val = metrics_dict.get(key, default)
+        if pd.isna(val) or val is None:
+            return default
+        return val
+
+    # ==========================================
+    # 1. 提取策略参数
+    # ==========================================
+    mom = safe_get('param_MOM_WINDOW', 0)
+    vol = safe_get('param_VOL_WINDOW', 0)
+    btc_win = safe_get('param_BTC_TREND_WINDOW', 0)
+    max_w = safe_get('param_MAX_WEIGHT', 0.0)
+    top_k = safe_get('param_TOP_K', 0)
+
+    print("\n [⚙️ 策略参数配置]")
+    print(
+        f"   ► MOM_WINDOW: {mom},  VOL_WINDOW: {vol},  BTC_TREND_WINDOW: {btc_win},  MAX_WEIGHT: {max_w},  TOP_K: {top_k}\n")
+
+    # ==========================================
+    # 2. 提取并计算核心绩效
+    # ==========================================
+    trades = int(safe_get('total_closed_trades', 0))
+    win_rate = safe_get('win_rate', 0.0) * 100
+    pl_ratio = safe_get('profit_loss_ratio', 0.0)
+    exp_ci = safe_get('expectancy_ci_low', 0.0)
+
+    tot_ret = safe_get('total_return', 0.0) * 100
+    ann_ret = safe_get('annual_return', 0.0) * 100
+
+    bull_ret = safe_get('bull_regime_total_return', 0.0) * 100
+    bull_bars = int(safe_get('bull_regime_bars', 0))
+    bear_ret = safe_get('bear_regime_total_return', 0.0) * 100
+    bear_bars = int(safe_get('bear_regime_bars', 0))
+
+    max_dd = safe_get('max_drawdown', 0.0) * 100
+    max_uw = safe_get('max_time_under_water_days', 0.0)
+    days_passed = safe_get('days_passed', 1)
+    uw_ratio = (max_uw / days_passed) * 100 if days_passed > 0 else 0.0
+
+    # 主目标得分 (如果有 composite_score 则用，否则用 sortino_ratio 代替)
+    final_score = safe_get('composite_score', safe_get('sortino_ratio', 0.0))
+    monthly_win = safe_get('monthly_positive_ratio', 0.0) * 100
+
+    hhi = safe_get('asset_hhi', 0.0)
+    top1_pnl = safe_get('top1_pnl_ratio', 0.0) * 100
+    top3_decay = safe_get('drop_top3_pnl_decay', 0.0) * 100
+
+    print(" [📊 核心基础绩效 (基于最佳时区表现)]")
+    print(f"   ├─ 交易统计: {trades} 笔平仓 | 胜率: {win_rate:.1f}% | 盈亏比: {pl_ratio:.2f} | 期望下界: {exp_ci:.3f}")
+    print(f"   ├─ 收益状况: 总收益: {tot_ret:+.1f}% | 年化收益: {ann_ret:+.1f}%")
+    print(
+        f"   ├─ 周期拆解: 牛市绝对收益: {bull_ret:+.1f}% (历经 {bull_bars} 根K线) | 熊市绝对收益: {bear_ret:+.1f}% (历经 {bear_bars} 根K线)")
+    print(f"   ├─ 回撤体验: 最大回撤: {max_dd:.1f}% | 全局最长水下: {max_uw:.1f}天 (占总时长 {uw_ratio:.1f}%)")
+    print(f"   ├─ 风险调整: FINAL_SCORE(主目标): {final_score:.3f} | 盈利月占比: {monthly_win:.1f}%")
+    print(f"   └─ 集中度险: 币种HHI: {hhi:.3f} | 最赚1笔占比: {top1_pnl:.1f}% | Top3剔除衰减: {top3_decay:+.1f}%\n")
+
+    # ==========================================
+    # 3. 动态解析年度表现拆解
+    # ==========================================
+    print(" [📅 年度表现拆解]")
+    # 正则提取所有含有 year_xxxx_return 的键，从而动态支持任意年份区间
+    years = sorted(list(set([
+        int(re.search(r'year_(\d{4})_return', k).group(1))
+        for k in metrics_dict.keys() if re.match(r'year_\d{4}_return', k)
+    ])))
+
+    for y in years:
+        y_ret = safe_get(f'year_{y}_return', 0.0) * 100
+        y_dd = safe_get(f'year_{y}_max_dd', 0.0) * 100
+        b_ret = safe_get(f'benchmark_year_{y}_return', 0.0) * 100
+        # 如果 csv 中有全局超额就拿，没有就直接减出来
+        exc = safe_get(f'year_{y}_excess_return', y_ret / 100 - b_ret / 100) * 100
+
+        print(
+            f"   ► {y}年: 策略收益: {y_ret:>7.1f}% (最大回撤 {y_dd:>6.1f}%) | 基准收益: {b_ret:>+6.1f}% | 🌟全局超额: {exc:>+6.1f}%")
+
+    # ==========================================
+    # 4. 动态解析标的盈亏贡献明细
+    # ==========================================
+    print("\n [🪙 标的盈亏贡献明细 (按净利润排序)]")
+    assets_data = []
+    # 正则提取所有的币种名称 asset_XXX_net_pnl
+    for k in metrics_dict.keys():
+        match = re.match(r'asset_([A-Z]+)_net_pnl', k)
+        if match:
+            coin = match.group(1)
+            net_pnl = safe_get(f'asset_{coin}_net_pnl', 0.0)
+            pnl_share = safe_get(f'asset_{coin}_pnl_share', 0.0) * 100
+            trades_c = int(safe_get(f'asset_{coin}_trades', 0))
+            win_rate_c = safe_get(f'asset_{coin}_win_rate', 0.0) * 100
+            assets_data.append((coin, net_pnl, pnl_share, trades_c, win_rate_c))
+
+    # 按净利润从高到低排序
+    assets_data.sort(key=lambda x: x[1], reverse=True)
+
+    for coin, pnl, share, trd, wr in assets_data:
+        if trd > 0:  # 只有实际产生过交易的币种才展示
+            print(
+                f"   - {coin:<5} : 净利润 $ {pnl:>7.2f} (利润占比: {share:>4.1f}% ) | 交易: {trd:>3}笔 | 胜率: {wr:.1f}%")
+
+    print("▲" * 78)
 
 if __name__ == "__main__":
-    # 将这里替换为你实际的 CSV 文件路径
-    CSV_FILE_PATH = r"W:\project\python_project\oke_auto_trade\param_search_results\combined_metrics_results.csv"
+    result_csv =   r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_1_LONG_ONLY_dynamic_pool_offset_2h_with_Benchmark.csv'
+    df1 = pd.read_csv(r'W:\project\python_project\oke_auto_trade\param_search_results\event_streams\LONG_ONLY_Grid_No.1_2h_events.csv')
 
-    evaluate_and_print_top5(CSV_FILE_PATH)
+
+    if os.path.exists(result_csv):
+        df_results = pd.read_csv(result_csv)
+        if not df_results.empty:
+
+            # 找到 param_name 为 Grid_No.31396_1h的行
+            # best_row = df_results[df_results['param_name'] == 'Grid_No.108599_0h'].iloc[0]
+
+            # # 假设你想看 sortino_ratio 排名第一的策略结果
+            best_row = df_results.sort_values(by='sortino_ratio', ascending=False).iloc[0]
+
+            # 把 Series 转为字典喂给高级打印函数
+            best_metrics_dict = best_row.to_dict()
+
+            print_advanced_report(best_metrics_dict)
+    else:
+        print("未找到结果文件，请确保已经执行完带有 Benchmark 的回测流程。")
+
+
+
+    # # 将这里替换为你实际的 CSV 文件路径
+    # CSV_FILE_PATH = r"W:\project\python_project\oke_auto_trade\param_search_results\combined_metrics_results.csv"
+    #
+    # evaluate_and_print_top5(CSV_FILE_PATH)
