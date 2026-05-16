@@ -741,19 +741,19 @@ def evaluate_multi_offset_ensemble(file_paths, side='LONG', max_missing_votes=0)
         print("❌ 极度悲观：没有参数能在不同的时间切片中稳定存活。请放宽容错(max_missing_votes)或检查基础策略。")
         return pd.DataFrame()
 
-    # 🌟🌟🌟 需求1：持久化保存投票阶段通过的参数的原始数据 🌟🌟🌟
-    try:
-        persisted_rows = []
-        for param in robust_candidates:
-            for offset_name, df in all_results.items():
-                matching_rows = df[df['param_name'] == param].copy()
-                if not matching_rows.empty:
-                    matching_rows['OFFSET_UNIVERSE'] = offset_name  # 标记来源宇宙
-                    persisted_rows.append(matching_rows)
+    # 🚀🚀🚀 性能优化核心：一次性合并所有 DataFrame，彻底消除嵌套循环全表扫描 🚀🚀🚀
+    all_dfs_with_offset = []
+    for offset_name, df_orig in all_results.items():
+        df_temp = df_orig.copy()
+        df_temp['OFFSET_UNIVERSE'] = offset_name
+        all_dfs_with_offset.append(df_temp)
 
-        if persisted_rows:
-            persisted_df = pd.concat(persisted_rows, ignore_index=True)
-            # 构造保存路径 (基于第一个输入文件，替换标识符)
+    master_df = pd.concat(all_dfs_with_offset, ignore_index=True)
+
+    # 🌟🌟🌟 需求1：持久化保存投票阶段通过的参数的原始数据 (向量化极速版) 🌟🌟🌟
+    try:
+        persisted_df = master_df[master_df['param_name'].isin(robust_candidates)].copy()
+        if not persisted_df.empty:
             base_dir = os.path.dirname(file_paths[0])
             base_name = os.path.basename(file_paths[0])
             save_name = re.sub(r'_offset_[^_]+_', '_ENSEMBLE_VOTED_', base_name)
@@ -769,7 +769,7 @@ def evaluate_multi_offset_ensemble(file_paths, side='LONG', max_missing_votes=0)
     # 🌟🌟🌟 需求1 结束 🌟🌟🌟
 
     # ==========================================
-    # 第三步：防过拟合地狱级过滤 (Anti-Overfitting)
+    # 第三步：防过拟合地狱级过滤 (Anti-Overfitting) [向量化重构版]
     # ==========================================
     final_golden_params = []
 
@@ -780,67 +780,46 @@ def evaluate_multi_offset_ensemble(file_paths, side='LONG', max_missing_votes=0)
 
     print("\n⚔️ 进入防过拟合地狱级审查 (防止实盘亏钱)...")
 
-    for param in robust_candidates:
-        scores, dds, returns, bear_returns = [], [], [], []
-        best_offset = "N/A"
-        current_max_score = -float('inf')
+    # 使用 groupby 将原本 O(N^2) 的循环降维成 O(N)
+    grouped = persisted_df.groupby('param_name')
 
-        # 提取这组参数在所有 offset 中的表现
-        for offset_name, df in all_results.items():
-            row = df[df['param_name'] == param]
-            if len(row) == 0: continue
-
-            row = row.iloc[0]
-
-            # 修复 NaN Bug，并提取 🌟 需求2: Best Offset 🌟
-            s = row.get('FINAL_SCORE', np.nan)
-            if pd.notna(s):
-                scores.append(s)
-                # 记录最高分的 Offset 作为推荐
-                if s > current_max_score:
-                    current_max_score = s
-                    best_offset = offset_name
-
-            dd = row.get('max_drawdown', np.nan)
-            if pd.notna(dd): dds.append(dd)
-
-            ret = row.get('total_return', np.nan)
-            if pd.notna(ret): returns.append(ret)
-
-            if side == 'SHORT':
-                bret = row.get('bear_regime_total_return', np.nan)
-                if pd.notna(bret): bear_returns.append(bret)
+    for param, group in grouped:
+        scores = group['FINAL_SCORE'].dropna().tolist()
+        dds = group['max_drawdown'].dropna().tolist()
+        returns = group['total_return'].dropna().tolist()
 
         if not scores or not dds or not returns:
             continue
 
-        # --- 过滤规则 A：绝对盈利底线 ---
-        if side == 'LONG' and min(returns) <= 0:
-            print(f"   [淘汰] {param}: 在某个 offset 下总收益为负 (最差: {fmt_pct(min(returns))})")
-            continue
-        if side == 'SHORT' and min(bear_returns) < MIN_SHORT_RETURN:
-            print(f"   [淘汰] {param}: 熊市表现不稳，某 offset 下熊市亏损 (最差: {fmt_pct(min(bear_returns))})")
+        if side == 'SHORT':
+            bear_returns = group['bear_regime_total_return'].dropna().tolist()
+            if bear_returns and min(bear_returns) < MIN_SHORT_RETURN:
+                # print(f"   [淘汰] {param}: 熊市表现不稳...")
+                continue
+        elif side == 'LONG' and min(returns) <= 0:
+            # print(f"   [淘汰] {param}: 在某个 offset 下总收益为负...")
             continue
 
-        # --- 过滤规则 B：回撤一致性 ---
         worst_dd, best_dd = min(dds), max(dds)
         if abs(worst_dd - best_dd) > MAX_DD_SPREAD:
-            print(f"   [淘汰] {param}: 回撤极差太大，时间极度敏感 (最差 {fmt_pct(worst_dd)} vs 最好 {fmt_pct(best_dd)})")
+            # print(f"   [淘汰] {param}: 回撤极差太大...")
             continue
 
-        # --- 过滤规则 C：得分悬崖过滤 (附带低分绝对值保护) ---
         max_score, min_score = max(scores), min(scores)
         score_drop = max_score - min_score
 
+        drop_pct = 0
         if max_score > 0:
             drop_pct = score_drop / max_score
             is_low_score_safe = (max_score <= 0.3) and (score_drop <= 0.15)
 
             if drop_pct > MAX_SCORE_DROP_PCT and not is_low_score_safe:
-                # print(f"   [淘汰] {param}: 稳健分缩水超过50%悬崖 (最差 {fmt_flt(min_score)} vs 最好 {fmt_flt(max_score)})")
                 continue
 
-        # 全部通过，晋升为真金参数
+        # 获取当前参数得分最高的那一行的 OFFSET_UNIVERSE
+        best_idx = group['FINAL_SCORE'].idxmax()
+        best_offset = group.loc[best_idx, 'OFFSET_UNIVERSE'] if pd.notna(best_idx) else "N/A"
+
         final_golden_params.append({
             'param_name': param,
             'votes': vote_counts[param],
@@ -867,18 +846,48 @@ def evaluate_multi_offset_ensemble(file_paths, side='LONG', max_missing_votes=0)
     print(f"🏆 最终 {side} 生产环境候选 (按多宇宙联合评估 LCB 排序) [共 {len(golden_df)} 组免疫时区干扰]")
     print("═" * 80)
 
+    # 🌟🌟🌟 新增需求：持久化保存最终【免疫时区干扰】参数的原始数据 🌟🌟🌟
+    try:
+        golden_params_list = golden_df['param_name'].tolist()
+        golden_persisted_df = master_df[master_df['param_name'].isin(golden_params_list)].copy()
+
+        if not golden_persisted_df.empty:
+            # 构造保存路径 (基于第一个输入文件，替换标识符)
+            base_dir = os.path.dirname(file_paths[0])
+            base_name = os.path.basename(file_paths[0])
+            save_name_golden = re.sub(r'_offset_[^_]+_', '_GOLDEN_IMMUNE_', base_name)
+            if save_name_golden == base_name:  # 如果没匹配上正则，提供默认后缀
+                save_name_golden = base_name.replace('.csv', '_GOLDEN_IMMUNE.csv')
+            save_path_golden = os.path.join(base_dir, save_name_golden)
+
+            golden_persisted_df.to_csv(save_path_golden, index=False, encoding='utf-8-sig')
+            print(
+                f"💾 [持久化-终极] 已将 {len(golden_params_list)} 组【免疫时区干扰】参数在所有宇宙的 {len(golden_persisted_df)} 行明细保存至:")
+            print(f"   ► {save_path_golden}")
+    except Exception as e:
+        print(f"⚠️ 保存终极持久化数据时发生错误: {e}")
+    # 🌟🌟🌟 新增需求 结束 🌟🌟🌟
+
     # 动态获取可变参数列名 (从第一个宇宙的数据中提取)
     sample_df = next(iter(all_results.values()))
     varying_params = [c for c in sample_df.columns if c.startswith('param_') and c != 'param_name']
     primary_obj = 'FINAL_SCORE'
 
+    # 🌟 建立复合索引字典，用于极速 O(1) 提取完整行 🌟
+    master_df_indexed = master_df.set_index(['param_name', 'OFFSET_UNIVERSE'])
+
     for rank, (idx, summary_row) in enumerate(golden_df.head(5).iterrows(), 1):
         param = summary_row['param_name']
         best_offset = summary_row['best_offset']
 
-        # 🌟 核心：去该参数的最佳时区宇宙 DataFrame 里，把完整的明细行提出来，用来满足深度打印要求
-        full_df = all_results[best_offset]
-        full_row = full_df[full_df['param_name'] == param].iloc[0]
+        # 🌟 极速 O(1) 提取该参数在最佳时区宇宙的完整明细行
+        try:
+            full_row = master_df_indexed.loc[(param, best_offset)]
+            # 防止索引重复导致返回DataFrame，强制取第一行转换为Series
+            if isinstance(full_row, pd.DataFrame):
+                full_row = full_row.iloc[0]
+        except KeyError:
+            continue  # 以防万一找不到
 
         print(f"\n▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼")
         print(f" 🎖️ 排位 No.{rank} | 参数代号: {param}")
@@ -1035,5 +1044,5 @@ if __name__ == "__main__":
     golden_parameters = evaluate_multi_offset_ensemble(
         file_paths=offset_files,
         side=current_side,  # 修改为你当前跑的方向
-        max_missing_votes=1  # 保持 0，代表 1个都不能少
+        max_missing_votes=0  # 保持 0，代表 1个都不能少
     )
