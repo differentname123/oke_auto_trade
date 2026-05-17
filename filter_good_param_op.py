@@ -106,6 +106,19 @@ def layer1_health_filter(df, filters):
             out.loc[mask, 'L1_REASONS'] = out.loc[mask, 'L1_REASONS'] + reason + '; '
             out.loc[mask, 'L1_PASS']    = False
 
+    # 计算理论最大敞口
+    exposure = (out['param_TOP_K'] * out['param_MAX_WEIGHT']).clip(lower=0.01)
+
+    # 引擎真实回撤 = 账户最大回撤 / 资金利用率
+    out['engine_max_drawdown'] = out['max_drawdown'] / exposure
+
+    # 1. 拦截总账户回撤过大的 (保命)
+    reject(out['max_drawdown'].fillna(-1) < filters.get('max_drawdown_threshold', -1), 'dd_too_deep')
+
+    # 2. [新增] 拦截策略引擎本身极度烂的 (杀伪装者，比如设定不得低于 -60%)
+    reject(out['engine_max_drawdown'].fillna(-1) < filters.get('min_engine_drawdown', -0.60), 'engine_alpha_failed')
+
+
     if 'total_closed_trades' in out.columns:
         reject(out['total_closed_trades'].fillna(0) < filters.get('min_total_trades', 0), 'too_few_trades')
     if 'active_assets' in out.columns:
@@ -936,7 +949,11 @@ def evaluate_multi_offset_ensemble(file_paths, side='LONG', max_missing_votes=0)
         drop_str = f" | Top3剔除衰减: {fmt_pct(full_row.get('drop_top3_pnl_decay'))}" if side == 'LONG' else ""
         print(
             f"   └─ 集中度险: 币种HHI: {fmt_flt(full_row.get('asset_hhi'))} | 最赚1笔占比: {fmt_pct_abs(full_row.get('top1_pnl_ratio'))}{drop_str}")
+        exposure = full_row.get('param_TOP_K', 1) * full_row.get('param_MAX_WEIGHT', 1)
+        annual_return = full_row.get('annual_return', 0)
+        roce = annual_return / max(exposure, 0.01)
 
+        print(f"   ├─ 资金效率: 资金利用率 {fmt_pct_abs(exposure)} | 实际资本回报率(ROCE): {fmt_pct(roce)}")
         # [🛡️ 参数平原与鲁棒性验证]
         print("\n [🛡️ 参数平原与鲁棒性验证]")
         target_nbrs = fmt_int(full_row.get('L4_TARGET_NEIGHBOR_COUNT', 0))
