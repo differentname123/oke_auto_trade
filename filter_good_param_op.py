@@ -1024,10 +1024,105 @@ def get_all_offset_files(base_path):
 
     return file_list
 
+
+def analyze_parameter_attractors(golden_file_path):
+    """
+    第一性原理：参数空间密度直方图与吸引子分析
+    用于探测哪些参数是市场的底层物理规律（强吸引子），哪些是容易导致过拟合的冗余自由度。
+    """
+    if not os.path.exists(golden_file_path):
+        print(f"❌ 找不到文件: {golden_file_path}")
+        return
+
+    # 1. 读取多宇宙免疫的 Golden 结果数据
+    try:
+        df = pd.read_csv(golden_file_path, encoding='utf-8-sig')
+    except Exception as e:
+        print(f"读取文件失败: {e}")
+        return
+
+    # 2. 数据去重：因为多 offset 导致同一个 param_name 有多行，我们只需要它的独立参数组合
+    if 'param_name' not in df.columns:
+        print("❌ 数据中缺失 'param_name' 列！")
+        return
+
+    unique_params = df.drop_duplicates(subset='param_name').copy()
+    total_survivors = len(unique_params)
+
+    if total_survivors == 0:
+        print("⚠️ 数据集为空，没有幸存参数。")
+        return
+
+    print("\n" + "═" * 80)
+    print(f"🌌 GOLDEN 参数宇宙 [吸引子与敏感度] 深度分析")
+    print(f"   ► 共有 {total_survivors} 组独立幸存参数参与密度测算")
+    print("═" * 80)
+
+    # 3. 自动提取所有的 param_ 列
+    param_cols = [c for c in unique_params.columns if c.startswith('param_') and c != 'param_name']
+
+    # 4. 逐个维度进行第一性原理扫描
+    for p in param_cols:
+        param_clean_name = p.replace('param_', '')
+        print(f"\n[ 🔍 维度: {param_clean_name} ]")
+
+        # 统计频次并按参数大小排序
+        counts = unique_params[p].value_counts().sort_index()
+        percentages = (counts / total_survivors) * 100
+
+        # 计算集中度指标 (Top1 和 Top2 占比)
+        sorted_pct = percentages.sort_values(ascending=False)
+        top1_pct = sorted_pct.iloc[0] if len(sorted_pct) > 0 else 0
+        top2_pct = sorted_pct.iloc[:2].sum() if len(sorted_pct) > 1 else top1_pct
+
+        # 智能诊断参数敏感度
+        if top1_pct >= 60 or top2_pct >= 80:
+            sensitivity = "🔴 高度敏感 (核心吸引子)"
+            action = f"建议：未来实盘或回测可直接固定在核心取值附近，降维打击。"
+        elif top1_pct >= 35 or top2_pct >= 55:
+            sensitivity = "🟡 中度敏感 (区域收敛)"
+            action = f"建议：围绕当前高频取值进行小范围微调。"
+        else:
+            sensitivity = "🟢 极度钝化 (自由度极高/非敏感)"
+            action = f"建议：此参数对最终存活率无决定性影响。为防止拟合，请将其硬编码为经验常规值。"
+
+        print(f"   ├─ 状态诊断: {sensitivity}")
+        print("   ├─ 分布图谱:")
+
+        # 打印 ASCII 文本直方图
+        for val, count in counts.items():
+            pct = percentages[val]
+            bar_len = int(pct / 2)  # 每 2% 画一个方块
+            bar = "█" * bar_len
+
+            # 格式化输出 (适配浮点数和整数)
+            if isinstance(val, float) and val.is_integer():
+                val_str = f"{int(val)}"
+            elif isinstance(val, float):
+                val_str = f"{val:.3f}"
+            else:
+                val_str = f"{val}"
+
+            print(f"   │  {val_str:>8} : {count:>4} 组 ({pct:>5.1f}%) | {bar}")
+
+        print(f"   └─ {action}")
+
+    print("\n" + "═" * 80)
+    print("💡 降维行动指南：")
+    print("   1. 将【高度敏感】的参数视为市场的底层物理规律（如特定的动量/趋势周期）。")
+    print("   2. 将【极度钝化】的参数直接固定，这不仅能将回测算力降低几个数量级，更能从数学上彻底斩断此处的数据挖掘空间。")
+    print("═" * 80 + "\n")
+
+
 # =====================================
 # 如何调用？ (使用示例)
 # =====================================
 if __name__ == "__main__":
+    # FILE_PATH = r"W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_LONG_ONLY_dynamic_pool_GOLDEN_IMMUNE_with_Benchmark.csv"
+    # analyze_parameter_attractors(FILE_PATH)
+
+
+
     BASE_RESULTS_PATH = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_LONG_ONLY_dynamic_pool_offset_0h_with_Benchmark.csv'
 
     # 自动推导出 5 份文件的列表
