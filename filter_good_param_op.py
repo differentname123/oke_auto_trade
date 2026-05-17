@@ -106,19 +106,6 @@ def layer1_health_filter(df, filters):
             out.loc[mask, 'L1_REASONS'] = out.loc[mask, 'L1_REASONS'] + reason + '; '
             out.loc[mask, 'L1_PASS']    = False
 
-    # 计算理论最大敞口
-    exposure = (out['param_TOP_K'] * out['param_MAX_WEIGHT']).clip(lower=0.01)
-
-    # 引擎真实回撤 = 账户最大回撤 / 资金利用率
-    out['engine_max_drawdown'] = out['max_drawdown'] / exposure
-
-    # 1. 拦截总账户回撤过大的 (保命)
-    reject(out['max_drawdown'].fillna(-1) < filters.get('max_drawdown_threshold', -1), 'dd_too_deep')
-
-    # 2. [新增] 拦截策略引擎本身极度烂的 (杀伪装者，比如设定不得低于 -60%)
-    reject(out['engine_max_drawdown'].fillna(-1) < filters.get('min_engine_drawdown', -0.60), 'engine_alpha_failed')
-
-
     if 'total_closed_trades' in out.columns:
         reject(out['total_closed_trades'].fillna(0) < filters.get('min_total_trades', 0), 'too_few_trades')
     if 'active_assets' in out.columns:
@@ -142,7 +129,7 @@ def layer1_health_filter(df, filters):
         reject(out['avg_holding_hours'].fillna(999) > filters['max_avg_holding_hours'], 'holding_too_long(funding_bleed)')
     return out
 
-def layer2_pareto_frontier(df, objectives, max_fronts=5, skip_l2=False):
+def layer2_pareto_frontier(df, objectives, max_fronts=5, skip_l2=True):
     out = df.copy()
     out['L2_PARETO'] = False
     out['PARETO_RANK'] = np.nan
@@ -949,11 +936,7 @@ def evaluate_multi_offset_ensemble(file_paths, side='LONG', max_missing_votes=0)
         drop_str = f" | Top3剔除衰减: {fmt_pct(full_row.get('drop_top3_pnl_decay'))}" if side == 'LONG' else ""
         print(
             f"   └─ 集中度险: 币种HHI: {fmt_flt(full_row.get('asset_hhi'))} | 最赚1笔占比: {fmt_pct_abs(full_row.get('top1_pnl_ratio'))}{drop_str}")
-        exposure = full_row.get('param_TOP_K', 1) * full_row.get('param_MAX_WEIGHT', 1)
-        annual_return = full_row.get('annual_return', 0)
-        roce = annual_return / max(exposure, 0.01)
 
-        print(f"   ├─ 资金效率: 资金利用率 {fmt_pct_abs(exposure)} | 实际资本回报率(ROCE): {fmt_pct(roce)}")
         # [🛡️ 参数平原与鲁棒性验证]
         print("\n [🛡️ 参数平原与鲁棒性验证]")
         target_nbrs = fmt_int(full_row.get('L4_TARGET_NEIGHBOR_COUNT', 0))
@@ -1135,8 +1118,7 @@ def analyze_parameter_attractors(golden_file_path):
 # 如何调用？ (使用示例)
 # =====================================
 if __name__ == "__main__":
-    # FILE_PATH = r"W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_LONG_ONLY_dynamic_pool_GOLDEN_IMMUNE_with_Benchmark.csv"
-    # analyze_parameter_attractors(FILE_PATH)
+
 
 
 
@@ -1158,3 +1140,7 @@ if __name__ == "__main__":
         side=current_side,  # 修改为你当前跑的方向
         max_missing_votes=0  # 保持 0，代表 1个都不能少
     )
+
+
+    FILE_PATH = r"W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_LONG_ONLY_dynamic_pool_GOLDEN_IMMUNE_with_Benchmark.csv"
+    analyze_parameter_attractors(FILE_PATH)
