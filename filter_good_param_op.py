@@ -129,7 +129,7 @@ def layer1_health_filter(df, filters):
         reject(out['avg_holding_hours'].fillna(999) > filters['max_avg_holding_hours'], 'holding_too_long(funding_bleed)')
     return out
 
-def layer2_pareto_frontier(df, objectives, max_fronts=5, skip_l2=True):
+def layer2_pareto_frontier(df, objectives, max_fronts=5, skip_l2=False):
     out = df.copy()
     out['L2_PARETO'] = False
     out['PARETO_RANK'] = np.nan
@@ -936,6 +936,20 @@ def evaluate_multi_offset_ensemble(file_paths, side='LONG', max_missing_votes=0)
         drop_str = f" | Top3剔除衰减: {fmt_pct(full_row.get('drop_top3_pnl_decay'))}" if side == 'LONG' else ""
         print(
             f"   └─ 集中度险: 币种HHI: {fmt_flt(full_row.get('asset_hhi'))} | 最赚1笔占比: {fmt_pct_abs(full_row.get('top1_pnl_ratio'))}{drop_str}")
+
+        # 假设你在打印区 (在原有打印代码逻辑中插入即可，不需要作为过滤条件)
+        strat_annual_ret = full_row.get('annual_return', 0)
+        strat_max_dd = abs(full_row.get('max_drawdown', 1))
+        strat_calmar = strat_annual_ret / strat_max_dd if strat_max_dd != 0 else 0
+
+        # 基准的卡玛估算 (因为你只有基准的总收益，可以简单算个年化均值 / 基准全局最大回撤)
+        bench_total_ret = full_row.get('benchmark_global_return', 0)
+        bench_max_dd = abs(full_row.get('benchmark_global_max_dd', 1))
+        # 粗略估算基准年化 (假设6年)
+        bench_annual_ret = (1 + bench_total_ret) ** (1 / 6) - 1
+        bench_calmar = bench_annual_ret / bench_max_dd if bench_max_dd != 0 else 0
+
+        print(f"   ├─ Alpha 铁证: 策略卡玛比率 {strat_calmar:.2f} VS 基准卡玛估值 {bench_calmar:.2f}")
 
         # [🛡️ 参数平原与鲁棒性验证]
         print("\n [🛡️ 参数平原与鲁棒性验证]")
