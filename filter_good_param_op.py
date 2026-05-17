@@ -55,27 +55,25 @@ LONG_CONFIG = {
 # ═══════════════════════════════════════════════════════════════════════════
 SHORT_CONFIG = {
     'L1_HEALTH': {
-        'min_total_trades':              15,
+        'min_total_trades':              10,      # 从 15 调低到 10，给低频低成本参数放行
         'min_active_assets':             1,
-        'max_drawdown_threshold':        -0.75,   # 空头极易被套，放宽到75%回撤
-        'max_mae_pct_worst':             -0.60,   # 最差MAE容忍到60%
-        'min_bear_regime_total_return':  -0.05,   # 熊市允许微亏，不要求绝对赚钱 (原0.0)
-        'min_cost_stress_30bps_annual':  -0.30,   # 30bps滑点下允许亏损20%
-        'min_expectancy_ci_low':         -0.15,
-        'max_avg_holding_hours':         336.0,   # 放宽到持仓14天 (原120)
+        'max_drawdown_threshold':        -0.85,   # 空头允许极端行情下回撤至 -85%（对比基准的-100%已经是巨大提升）
+        'max_mae_pct_worst':             -0.75,   # 放宽最差 MAE
+        'min_bear_regime_total_return':  -0.20,   # 单一宇宙熊市允许亏损 20%（原值 -0.05 太苛刻）
+        'min_cost_stress_30bps_annual':  -0.45,   # 允许极端摩擦下年化亏损
+        'min_expectancy_ci_low':         -0.30,   # 放宽置信下界
+        'max_avg_holding_hours':         504.0,   # 允许持仓放宽至 21 天，捕捉深熊大趋势
     },
     'L2_PARETO': {
         'calmar_ratio':               'maximize',
-        'mae_pct_worst':              'maximize',
         'bear_regime_total_return':   'maximize',
-        'cost_stress_30bps_annual':   'maximize',
     },
     'L3_CONSTRAINTS': {
-        'top1_pnl_ratio':           ('<=', 0.85),
-        'profit_loss_ratio':        ('>=', 0.4),  # 盈亏比0.4也能忍，只要胜率够
+        'top1_pnl_ratio':           ('<==', 0.95), # 允许单一边缘币种贡献核心利润，空头往往靠一两个妖币暴跌赚钱
+        'profit_loss_ratio':        ('>=', 0.35),
     },
     'L5_TIME': {
-        'min_profitable_years_ratio': 0.10,       # 空头哪怕只有10%年份赚钱也放行
+        'min_profitable_years_ratio': 0.0,        # 完全放开年度胜率，空头只要在2022、2023大熊市能赚钱即可
     },
     'PRIMARY_OBJ': 'calmar_ratio'
 }
@@ -774,8 +772,8 @@ def evaluate_multi_offset_ensemble(file_paths, side='LONG', max_missing_votes=0)
     final_golden_params = []
 
     # 设定防过拟合的硬性容忍度
-    MAX_SCORE_DROP_PCT = 0.50  # 得分从最好到最差不能缩水超过 50%
-    MAX_DD_SPREAD = 0.15  # 最好和最差的最大回撤极差不能超过 15%
+    MAX_DD_SPREAD = 0.30 if side == 'SHORT' else 0.15
+    MAX_SCORE_DROP_PCT = 0.70 if side == 'SHORT' else 0.50
     MIN_SHORT_RETURN = -0.05  # 对齐容忍空头微亏5%的底线
 
     print("\n⚔️ 进入防过拟合地狱级审查 (防止实盘亏钱)...")
@@ -1156,5 +1154,5 @@ if __name__ == "__main__":
     )
 
 
-    FILE_PATH = r"W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_LONG_ONLY_dynamic_pool_GOLDEN_IMMUNE_with_Benchmark.csv"
-    analyze_parameter_attractors(FILE_PATH)
+    # FILE_PATH = r"W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_SHORT_ONLY_dynamic_pool_GOLDEN_IMMUNE_with_Benchmark.csv"
+    # analyze_parameter_attractors(FILE_PATH)

@@ -99,23 +99,32 @@ def evaluate_and_print_top5(csv_path):
     top50_candidates = filtered.sort_values('robust_score', ascending=False).head(50)
     valid_candidates = []
 
-    # 提取唯一的趋势窗口并排序，用于验证择时开关的敏感度
-    btc_windows = sorted(df['param_BTC_TREND_WINDOW'].unique())
+    # 🔴 [修改点 1] 提取多头和空头各自唯一的趋势窗口并排序
+    long_btc_windows = sorted(df['long_BTC_TREND_WINDOW'].dropna().unique())
+    short_btc_windows = sorted(df['short_BTC_TREND_WINDOW'].dropna().unique())
 
     for idx, row in top50_candidates.iterrows():
-        current_btc = row['param_BTC_TREND_WINDOW']
-        btc_idx = btc_windows.index(current_btc)
+        current_long_btc = row['long_BTC_TREND_WINDOW']
+        current_short_btc = row['short_BTC_TREND_WINDOW']
 
-        # 提取当前大盘择时开关的 ±1 步长邻域
-        neighbor_btc_vals = [current_btc]
-        if btc_idx > 0: neighbor_btc_vals.append(btc_windows[btc_idx - 1])
-        if btc_idx < len(btc_windows) - 1: neighbor_btc_vals.append(btc_windows[btc_idx + 1])
+        long_idx = long_btc_windows.index(current_long_btc)
+        short_idx = short_btc_windows.index(current_short_btc)
 
-        # 构建邻域查询：严格锁定长短多空基因，只扰动 BTC 择时开关
+        # 🔴 [修改点 2] 分别提取多头和空头大盘择时开关的 ±1 步长邻域
+        neighbor_long_vals = [current_long_btc]
+        if long_idx > 0: neighbor_long_vals.append(long_btc_windows[long_idx - 1])
+        if long_idx < len(long_btc_windows) - 1: neighbor_long_vals.append(long_btc_windows[long_idx + 1])
+
+        neighbor_short_vals = [current_short_btc]
+        if short_idx > 0: neighbor_short_vals.append(short_btc_windows[short_idx - 1])
+        if short_idx < len(short_btc_windows) - 1: neighbor_short_vals.append(short_btc_windows[short_idx + 1])
+
+        # 🔴 [修改点 3] 构建二维邻域查询：锁定其他参数基因，分别扰动多空 BTC 择时开关
         neighbor_mask = (
-            df['param_BTC_TREND_WINDOW'].isin(neighbor_btc_vals) &
-            (df['long_param_name'] == row['long_param_name']) &
-            (df['short_param_name'] == row['short_param_name'])
+                df['long_BTC_TREND_WINDOW'].isin(neighbor_long_vals) &
+                df['short_BTC_TREND_WINDOW'].isin(neighbor_short_vals) &
+                (df['long_param_name'] == row['long_param_name']) &
+                (df['short_param_name'] == row['short_param_name'])
         )
         neighbors = df[neighbor_mask]
 
@@ -157,7 +166,10 @@ def evaluate_and_print_top5(csv_path):
         score = row['robust_score']
         long_param = row.get('long_param_name', 'Unknown')
         short_param = row.get('short_param_name', 'Unknown')
-        trend_win = int(row.get('param_BTC_TREND_WINDOW', 0))
+
+        # 🔴 [修改点 4] 提取分别的长短趋势窗口
+        long_trend_win = int(row.get('long_BTC_TREND_WINDOW', 0))
+        short_trend_win = int(row.get('short_BTC_TREND_WINDOW', 0))
 
         # 核心指标提取
         exp_low = row.get('expectancy_ci_low', 0)
@@ -173,7 +185,8 @@ def evaluate_and_print_top5(csv_path):
 
         # 打印输出卡片
         print(f" {rank_medal} 排名: 第 {i + 1} 名 | 综合体感分: {score:.2f} (侧重无痛执行与防拟合)")
-        print(f" 🧬 组合基因: 做多 [{long_param}] + 做空 [{short_param}] (趋势窗口: {trend_win})")
+        # 🔴 [修改点 5] 分开展示长短窗口
+        print(f" 🧬 组合基因: 做多 [{long_param}](趋势:{long_trend_win}) + 做空 [{short_param}](趋势:{short_trend_win})")
         print(
             f"   ├─ 交易核心: {int(row['total_closed_trades'])}笔平仓 | 胜率: {row['win_rate'] * 100:.1f}% | 盈亏比: {row['profit_loss_ratio']:.2f} | 净期望下界: {exp_low:.4f}")
         print(
@@ -295,7 +308,7 @@ def print_advanced_report(metrics_dict):
     print("▲" * 78)
 
 if __name__ == "__main__":
-    result_csv =   r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_1_LONG_ONLY_dynamic_pool_offset_2h_with_Benchmark.csv'
+    result_csv =   r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_LONG_ONLY_dynamic_pool_offset_0h_with_Benchmark.csv'
     df1 = pd.read_csv(r'W:\project\python_project\oke_auto_trade\param_search_results\event_streams\LONG_ONLY_Grid_No.1_2h_events.csv')
 
 
@@ -304,10 +317,32 @@ if __name__ == "__main__":
         if not df_results.empty:
 
             # 找到 param_name 为 Grid_No.31396_1h的行
-            # best_row = df_results[df_results['param_name'] == 'Grid_No.108599_0h'].iloc[0]
+            best_row = df_results[df_results['param_name'] == 'Grid_No.33094_0h'].iloc[0]
 
             # # 假设你想看 sortino_ratio 排名第一的策略结果
-            best_row = df_results.sort_values(by='sortino_ratio', ascending=False).iloc[0]
+            # best_row = df_results.sort_values(by='sortino_ratio', ascending=False).iloc[0]
+
+            # 把 Series 转为字典喂给高级打印函数
+            best_metrics_dict = best_row.to_dict()
+
+            print_advanced_report(best_metrics_dict)
+    else:
+        print("未找到结果文件，请确保已经执行完带有 Benchmark 的回测流程。")
+
+
+    result_csv =   r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_SHORT_ONLY_dynamic_pool_offset_0h_with_Benchmark.csv'
+    df1 = pd.read_csv(r'W:\project\python_project\oke_auto_trade\param_search_results\event_streams\LONG_ONLY_Grid_No.1_2h_events.csv')
+
+
+    if os.path.exists(result_csv):
+        df_results = pd.read_csv(result_csv)
+        if not df_results.empty:
+
+            # 找到 param_name 为 Grid_No.31396_1h的行
+            best_row = df_results[df_results['param_name'] == 'Grid_No.69042_0h'].iloc[0]
+
+            # # 假设你想看 sortino_ratio 排名第一的策略结果
+            # best_row = df_results.sort_values(by='sortino_ratio', ascending=False).iloc[0]
 
             # 把 Series 转为字典喂给高级打印函数
             best_metrics_dict = best_row.to_dict()
@@ -319,6 +354,6 @@ if __name__ == "__main__":
 
 
     # # 将这里替换为你实际的 CSV 文件路径
-    # CSV_FILE_PATH = r"W:\project\python_project\oke_auto_trade\param_search_results\combined_metrics_results.csv"
-    #
-    # evaluate_and_print_top5(CSV_FILE_PATH)
+    CSV_FILE_PATH = r"W:\project\python_project\oke_auto_trade\param_search_results\combined_metrics_results.csv"
+
+    evaluate_and_print_top5(CSV_FILE_PATH)

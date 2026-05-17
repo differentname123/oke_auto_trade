@@ -214,28 +214,34 @@ def _compute_mae_mfe(logs_df, price_df):
         c, t, p, amt, event, direction = log['coin'], log['time'], log['price'], log['amount'], log.get('event',
                                                                                                         None), log.get(
             'direction', 'LONG')
+
+        # 🔴 核心修改：复合键防覆盖
+        pos_key = f"{c}_{direction}"
+
         if event == 'OPEN':
-            states[c] = {'qty': amt, 'entry_p': p, 'entry': t, 'side': direction}
+            # 将真实币种名 c 也存进去，供后续查 price_df 使用
+            states[pos_key] = {'qty': amt, 'entry_p': p, 'entry': t, 'side': direction, 'coin': c}
         elif event == 'CLOSE':
-            if c in states and states[c].get('qty', 0) > 0:
-                entry_t = states[c]['entry']
-                entry_p = states[c]['entry_p']
-                side = states[c]['side']
+            if pos_key in states and states[pos_key].get('qty', 0) > 0:
+                entry_t = states[pos_key]['entry']
+                entry_p = states[pos_key]['entry_p']
+                side = states[pos_key]['side']
+                real_c = states[pos_key]['coin']
+
                 out['holding_h'].append((t - entry_t).total_seconds() / 3600.0)
-                if f"{c}_high" in price_df.columns and f"{c}_low" in price_df.columns:
+                if f"{real_c}_high" in price_df.columns and f"{real_c}_low" in price_df.columns:
                     period = price_df.loc[entry_t:t]
                     if not period.empty and entry_p > 0:
-                        ph = float(period[f"{c}_high"].max())
-                        pl = float(period[f"{c}_low"].min())
+                        ph = float(period[f"{real_c}_high"].max())
+                        pl = float(period[f"{real_c}_low"].min())
                         if side == 'LONG':
                             out['mfe'].append((ph - entry_p) / entry_p)
                             out['mae'].append((pl - entry_p) / entry_p)
                         else:
                             out['mfe'].append((entry_p - pl) / entry_p)
                             out['mae'].append((entry_p - ph) / entry_p)
-                states[c] = {'qty': 0, 'entry_p': 0, 'entry': None, 'side': None}
+                states[pos_key] = {'qty': 0, 'entry_p': 0, 'entry': None, 'side': None, 'coin': None}
     return out
-
 
 # ==========================================
 # 完整指标计算 (保留原逻辑, 但传入全局 df)
@@ -1088,13 +1094,8 @@ def run_grid_search(time_offset='0h', max_workers=15):
     return aggregated_df
 
 
-def fast_combined_replay(long_events_file, short_events_file, global_price_df, initial_capital=10000.0, fee_rate=0.0005):
-    """
-    极速多空信号缝合与复利推演引擎 (V3.1 完美防弹版：彻底榨干性能 + 修复防幽灵BUG + 免疫 NaN 污染)
-    """
-    # print(f"🚀 开始极速推演 BOTH 模式 (引擎 V3.1版)...")
-
-    # 1. 读取并合并事件流
+def fast_combined_replay(long_events_file, short_events_file, global_price_df, initial_capital=10000.0,
+                         fee_rate=0.0005):
     df_long = pd.read_csv(long_events_file) if long_events_file else pd.DataFrame()
     df_short = pd.read_csv(short_events_file) if short_events_file else pd.DataFrame()
 
@@ -1106,50 +1107,49 @@ def fast_combined_replay(long_events_file, short_events_file, global_price_df, i
     df_all['time'] = pd.to_datetime(df_all['time'])
     df_all.sort_values('time', inplace=True)
 
-    # 2. 虚拟账户状态初始化
     cash = float(initial_capital)
-    positions = {}  # 格式: {coin: {'amount': 0.0, 'cost_price': 0.0, 'side': None}}
+    positions = {}
 
     replay_logs = []
     pos_records = []
     cash_records = []
 
-    # 3. 按时间截面分组重演
     grouped_events = df_all.groupby('time')
     global_prices_index = global_price_df.index
 
     for t, group in grouped_events:
-        # 转为原生字典进行 O(1) 极速查询
         if t in global_prices_index:
             prices_dict = global_price_df.loc[t].to_dict()
         else:
             prices_dict = global_price_df.asof(t).to_dict()
 
-        # ==========================================
-        # 计算发信号这一刻的【期初总净值】
-        # ==========================================
+        # 🔴 核心修复：精确计算当前净值(current_equity) 与 已占用绝对敞口(used_exposure)
         current_equity = cash
-        for c, pos_info in positions.items():
-            amt = pos_info['amount']
+        used_exposure = 0.0
+
+        for pos_key, pos_info in positions.items():
+            c = pos_key.split('_')[0]
+            amt = pos_info['amount']  # 注意：持仓多头金额为正，空头为负
             price = prices_dict.get(c)
-            # 🛡️ 审查人修复：确保 price 不是 None 且不是 NaN (利用 price == price 判断 NaN)
             if price is not None and price == price:
                 current_equity += amt * price
+                used_exposure += abs(amt) * price  # 不管多空，都占用账户净值总敞口
+
+        # 当前剩余可用购买力 (严防杠杆超发)
+        free_exposure = max(0.0, current_equity - used_exposure)
 
         closes = group[group['event'] == 'CLOSE']
         opens = group[group['event'] == 'OPEN']
 
-        # ==========================================
-        # 执行平仓 (使用 itertuples 提速 50 倍)
-        # ==========================================
+        # 🔴 平仓逻辑
         for row in closes.itertuples(index=False):
-            c = row.coin
-            if c not in positions:
+            pos_key = f"{row.coin}_{row.direction}"
+            if pos_key not in positions:
                 continue
 
-            amt = abs(positions[c]['amount'])
-            cost_price = positions[c]['cost_price']
-            side = positions[c]['side']
+            amt = abs(positions[pos_key]['amount'])
+            cost_price = positions[pos_key]['cost_price']
+            side = positions[pos_key]['side']
             price = row.price
 
             val = amt * price
@@ -1162,76 +1162,78 @@ def fast_combined_replay(long_events_file, short_events_file, global_price_df, i
                 cash -= (val + fee)
                 pnl = amt * (cost_price - price) - fee
 
-            # 🚀 提速点：彻底删除字典键，减小字典体积
-            del positions[c]
+            del positions[pos_key]
+
+            # 平仓后，释放相应的可用购买力
+            free_exposure += val
 
             replay_logs.append({
-                "time": t, "action": row.action, "coin": c,
+                "time": t, "action": row.action, "coin": row.coin,
                 "direction": row.direction, "event": "CLOSE",
                 "price": price, "amount": amt, "value": val, "fee": fee,
                 "pnl": pnl
             })
 
-        # ==========================================
-        # 执行开仓
-        # ==========================================
+        # 🔴 核心修复：开仓逻辑 (严格受限于 free_exposure)
         for row in opens.itertuples(index=False):
             c = row.coin
             weight = row.target_weight
             price = row.price
             direction = row.direction
+            pos_key = f"{c}_{direction}"
 
             target_val = current_equity * weight
 
-            if direction == 'LONG':
-                buy_val = target_val / (1 + fee_rate) if cash >= target_val / (1 + fee_rate) else cash / (1 + fee_rate)
-                if buy_val > 1.0:
-                    fee = buy_val * fee_rate
-                    buy_amount = buy_val / price
+            # 获取实际允许开仓的最大名义价值
+            allowed_val = min(target_val, free_exposure)
+            actual_trade_val = allowed_val / (1 + fee_rate)
+
+            if actual_trade_val > 1.0:
+                fee = actual_trade_val * fee_rate
+
+                if direction == 'LONG':
+                    buy_amount = actual_trade_val / price
                     cost_price = price + (fee / buy_amount)
 
-                    positions[c] = {'amount': buy_amount, 'cost_price': cost_price, 'side': direction}
-                    cash -= (buy_val + fee)
+                    positions[pos_key] = {'amount': buy_amount, 'cost_price': cost_price, 'side': direction}
+                    cash -= (actual_trade_val + fee)
 
                     replay_logs.append({
                         "time": t, "action": row.action, "coin": c,
                         "direction": direction, "event": "OPEN",
-                        "price": price, "amount": buy_amount, "value": buy_val, "fee": fee
+                        "price": price, "amount": buy_amount, "value": actual_trade_val, "fee": fee
                     })
-            else:  # SHORT
-                sell_val = target_val / (1 + fee_rate)
-                if sell_val > 1.0:
-                    fee = sell_val * fee_rate
-                    sell_amount = sell_val / price
+                else:  # SHORT
+                    sell_amount = actual_trade_val / price
                     cost_price = price - (fee / sell_amount)
 
-                    positions[c] = {'amount': -sell_amount, 'cost_price': cost_price, 'side': direction}
-                    cash += (sell_val - fee)
+                    positions[pos_key] = {'amount': -sell_amount, 'cost_price': cost_price, 'side': direction}
+                    cash += (actual_trade_val - fee)
 
                     replay_logs.append({
                         "time": t, "action": row.action, "coin": c,
                         "direction": direction, "event": "OPEN",
-                        "price": price, "amount": sell_amount, "value": sell_val, "fee": fee
+                        "price": price, "amount": sell_amount, "value": actual_trade_val, "fee": fee
                     })
 
-        # ==========================================
-        # 🛡️ 审查人修复：无条件记录当前截面快照，哪怕全是空仓，也要为 ffill 打下截断锚点
-        # ==========================================
-        current_pos_snapshot = {c: info['amount'] for c, info in positions.items()}
+                # 开仓成功后，同步扣减剩余购买力，防止同周期下一个标的把敞口打爆
+                free_exposure -= actual_trade_val
+
+        # 🔴 快照生成逻辑 (保持不变)
+        current_pos_snapshot = {}
+        for pos_key, info in positions.items():
+            coin_name = pos_key.split('_')[0]
+            current_pos_snapshot[coin_name] = current_pos_snapshot.get(coin_name, 0.0) + info['amount']
+
         pos_records.append((t, current_pos_snapshot))
         cash_records.append((t, cash))
 
-    # ==========================================
-    # 生成绝对严谨的时间轴资金曲线
-    # ==========================================
     logs_df = pd.DataFrame(replay_logs)
-    # print(f"   ► 正在重构合并后的资金曲线...")
 
     if pos_records and cash_records:
         df_pos = pd.DataFrame([p[1] for p in pos_records], index=[p[0] for p in pos_records])
         df_cash = pd.Series([c[1] for c in cash_records], index=[c[0] for c in cash_records])
 
-        # 这里 ffill 遇到前方的空字典会被完美转为 0.0，彻底消除幽灵仓位
         df_pos = df_pos.reindex(global_prices_index, method='ffill').fillna(0.0)
         df_cash = df_cash.reindex(global_prices_index, method='ffill').fillna(initial_capital)
 
@@ -1243,10 +1245,7 @@ def fast_combined_replay(long_events_file, short_events_file, global_price_df, i
     curve_df = pd.DataFrame({'equity': equity_values}, index=global_prices_index)
     curve_df.index.name = 'time'
 
-    # print(f"✅ BOTH 模式重演完成！最终资金: {curve_df['equity'].iloc[-1]:.2f}")
-
     return logs_df, curve_df
-
 
 def print_performance_report(metrics):
     """
@@ -1297,14 +1296,11 @@ def print_performance_report(metrics):
 
 
 def process_single_combination(task_args):
-    """
-    处理单个组合的核心逻辑，供子进程调用
-    """
-    (long_param_name, short_param_name, long_btc_trend,
+    # 🔴 新增 short_btc_trend 拆包
+    (long_param_name, short_param_name, long_btc_trend, short_btc_trend,
      long_file, short_file, global_price_df) = task_args
 
     try:
-        # 极速缝合并重演
         combined_logs, combined_curve = fast_combined_replay(
             long_events_file=long_file,
             short_events_file=short_file,
@@ -1315,35 +1311,32 @@ def process_single_combination(task_args):
 
         combined_name = f"{long_param_name}_AND_{short_param_name}"
 
-        # 把合并后的结果喂给指标计算函数
         metrics = calculate_comprehensive_metrics(
             logs_df=combined_logs,
             curve_df=combined_curve,
             price_df=global_price_df,
-            custom_params={'COMBINED': combined_name, 'BTC_TREND_WINDOW': long_btc_trend},
+            custom_params={'COMBINED': combined_name},
             param_name=combined_name,
             final_equity_override=combined_curve['equity'].iloc[-1]
         )
 
-        # 补充组合来源记录
         metrics['long_param_name'] = long_param_name
         metrics['short_param_name'] = short_param_name
-        metrics['param_BTC_TREND_WINDOW'] = long_btc_trend
 
-        # 返回成功标志和数据
+        # 🔴 分开记录各自的 BTC_TREND_WINDOW
+        metrics['long_BTC_TREND_WINDOW'] = long_btc_trend
+        metrics['short_BTC_TREND_WINDOW'] = short_btc_trend
+
         return (True, metrics)
 
     except Exception as e:
-        # 返回失败标志和报错信息
         error_msg = f"❌ 处理组合 {long_param_name} + {short_param_name} 时报错: {e}"
         return (False, error_msg)
-
 
 # ==========================================
 # 2. 主函数逻辑
 # ==========================================
 def get_combine_data():
-    # 基础文件路径 (注意：请确保所在环境路径无误)
     good_long_df_file = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_LONG_ONLY_dynamic_pool_GOLDEN_IMMUNE_with_Benchmark.csv'
     good_short_df_file = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_SHORT_ONLY_dynamic_pool_GOLDEN_IMMUNE_with_Benchmark.csv'
     events_dir = r"W:\project\python_project\oke_auto_trade\param_search_results\event_streams"
@@ -1353,36 +1346,34 @@ def get_combine_data():
     good_long_df = pd.read_csv(good_long_df_file)
     good_short_df = pd.read_csv(good_short_df_file)
 
-    # 正常获取你的全局价格表
     yearly_data_cache, global_price_df, _ = prepare_environment(YEARLY_POOL_CONFIG)
-
     print(f"开始构建计算任务，Long策略数量: {len(good_long_df)}, Short策略数量: {len(good_short_df)}")
 
     tasks = []
 
-    # 3. 预先构建所有的任务参数列表
     for idx_l, row_l in good_long_df.iterrows():
         long_btc_trend = row_l['param_BTC_TREND_WINDOW']
         OFFSET_UNIVERSE = row_l['OFFSET_UNIVERSE']
         long_param_name = f"{row_l['param_name']}_{OFFSET_UNIVERSE}"
 
+        # 🔴 核心修改：仅通过时间相位约束匹配，放开 param_BTC_TREND_WINDOW 校验
         matching_shorts = good_short_df[
-            (good_short_df['param_BTC_TREND_WINDOW'] == long_btc_trend) &
             (good_short_df['OFFSET_UNIVERSE'] == OFFSET_UNIVERSE)
-            ]
+        ]
+
         for idx_s, row_s in matching_shorts.iterrows():
+            short_btc_trend = row_s['param_BTC_TREND_WINDOW']  # 提取 short 的参数
             short_param_name = f"{row_s['param_name']}_{OFFSET_UNIVERSE}"
 
             long_file = os.path.join(events_dir, f"LONG_ONLY_{long_param_name}_events.csv")
             short_file = os.path.join(events_dir, f"SHORT_ONLY_{short_param_name}_events.csv")
 
-            # 在分配任务前执行文件存在性检查，避免无意义的进程调度开销
             if not os.path.exists(long_file) or not os.path.exists(short_file):
-                print(f"⚠️ 文件缺失，已跳过组合: {long_param_name} + {short_param_name}")
+                # 如果文件很多没跑完，静默跳过即可，不用打印太多干扰视线
                 continue
 
-            # 将参数打包进元组，准备塞入进程池
-            task_args = (long_param_name, short_param_name, long_btc_trend,
+            # 🔴 核心修改：将长短周期一并塞入 task_args
+            task_args = (long_param_name, short_param_name, long_btc_trend, short_btc_trend,
                          long_file, short_file, global_price_df)
             tasks.append(task_args)
 
@@ -1391,24 +1382,16 @@ def get_combine_data():
 
     all_metrics = []
 
-    # 4. 开启多进程池 (并行量设定为 10)
     if tasks:
-        # max_workers=10 指定开启10个并行进程
         with ProcessPoolExecutor(max_workers=20) as executor:
-            # 提交所有任务
             future_to_task = {executor.submit(process_single_combination, task): task for task in tasks}
-
-            # 使用 tqdm 包装 as_completed，获取优雅的进度条显示
             for future in tqdm(as_completed(future_to_task), total=total_tasks, desc="并行测算进度"):
                 success, result = future.result()
-
                 if success:
                     all_metrics.append(result)
                 else:
-                    # 如果失败，result 里面装的是报错字符串
                     print(result)
 
-    # 5. 数据保存
     if all_metrics:
         final_metrics_df = pd.DataFrame(all_metrics)
         final_metrics_df.to_csv(output_file, index=False)
@@ -1418,7 +1401,6 @@ def get_combine_data():
     else:
         print("\n⚠️ 没有生成任何有效的指标结果。")
         return pd.DataFrame()
-
 
 def score_and_print_top_combinations(final_metrics_df, top_n=5, min_trades=30):
     """
