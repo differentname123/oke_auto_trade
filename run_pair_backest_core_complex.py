@@ -1340,7 +1340,7 @@ def get_combine_data():
     good_long_df_file = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_LONG_ONLY_dynamic_pool_GOLDEN_IMMUNE_with_Benchmark.csv'
     good_short_df_file = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_SHORT_ONLY_dynamic_pool_GOLDEN_IMMUNE_with_Benchmark.csv'
     events_dir = r"W:\project\python_project\oke_auto_trade\param_search_results\event_streams"
-    output_file = r"W:\project\python_project\oke_auto_trade\param_search_results\combined_metrics_results.csv"
+    output_file = r"W:\project\python_project\oke_auto_trade\param_search_results\combined_metrics_results_op.csv"
 
     print("加载基础配置表...")
     good_long_df = pd.read_csv(good_long_df_file)

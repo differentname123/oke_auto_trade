@@ -317,7 +317,7 @@ if __name__ == "__main__":
         if not df_results.empty:
 
             # 找到 param_name 为 Grid_No.31396_1h的行
-            best_row = df_results[df_results['param_name'] == 'Grid_No.33094_0h'].iloc[0]
+            best_row = df_results[df_results['param_name'] == 'Grid_No.117146_0h'].iloc[0]
 
             # # 假设你想看 sortino_ratio 排名第一的策略结果
             # best_row = df_results.sort_values(by='sortino_ratio', ascending=False).iloc[0]
@@ -339,7 +339,7 @@ if __name__ == "__main__":
         if not df_results.empty:
 
             # 找到 param_name 为 Grid_No.31396_1h的行
-            best_row = df_results[df_results['param_name'] == 'Grid_No.69042_0h'].iloc[0]
+            best_row = df_results[df_results['param_name'] == 'Grid_No.69393_0h'].iloc[0]
 
             # # 假设你想看 sortino_ratio 排名第一的策略结果
             # best_row = df_results.sort_values(by='sortino_ratio', ascending=False).iloc[0]
@@ -354,6 +354,6 @@ if __name__ == "__main__":
 
 
     # # 将这里替换为你实际的 CSV 文件路径
-    CSV_FILE_PATH = r"W:\project\python_project\oke_auto_trade\param_search_results\combined_metrics_results.csv"
+    CSV_FILE_PATH = r"W:\project\python_project\oke_auto_trade\param_search_results\combined_metrics_results_op.csv"
 
     evaluate_and_print_top5(CSV_FILE_PATH)

@@ -35,7 +35,7 @@ LONG_CONFIG = {
         'max_drop_top3_pnl_decay':       0.70,
         'bootstrap_positive_prob':      0.95,
         'rolling_12m_return_min': -0.20,
-
+        'min_e_ratio':                   1.05,    # 🌟 新增：多头 E-Ratio 进场优势要求
     },
     'L2_PARETO': {
         'sortino_ratio':              'maximize',
@@ -66,6 +66,7 @@ SHORT_CONFIG = {
         'min_cost_stress_30bps_annual':  -0.45,   # 允许极端摩擦下年化亏损
         'min_expectancy_ci_low':         -0.30,   # 放宽置信下界
         'max_avg_holding_hours':         504.0,   # 允许持仓放宽至 21 天，捕捉深熊大趋势
+        'min_e_ratio':                   0.90,    # 🌟 新增：空头 E-Ratio 容忍度略大，但不能深套抗单
     },
     'L2_PARETO': {
         'calmar_ratio':               'maximize',
@@ -101,6 +102,10 @@ def layer1_health_filter(df, filters):
     out = df.copy()
     out['L1_PASS']    = True
     out['L1_REASONS'] = ''
+
+    # 🌟 预处理：计算进场微观优势 E-Ratio (Edge Ratio)
+    if 'mfe_pct_mean' in out.columns and 'mae_pct_mean' in out.columns:
+        out['E_RATIO'] = out['mfe_pct_mean'] / (out['mae_pct_mean'].abs() + 1e-6)
 
     def reject(mask, reason):
         if mask.any():
@@ -138,9 +143,13 @@ def layer1_health_filter(df, filters):
         reject(out['rolling_12m_return_min'].fillna(-1) < filters['rolling_12m_return_min'],
                'recent_12m_return_too_low')
 
+    # 🌟 新增：增加 E-Ratio 的微观进场优势筛选逻辑
+    if 'E_RATIO' in out.columns and 'min_e_ratio' in filters:
+        reject(out['E_RATIO'].fillna(0) < filters['min_e_ratio'], 'poor_micro_entry_edge')
+
     return out
 
-def layer2_pareto_frontier(df, objectives, max_fronts=5, skip_l2=True):
+def layer2_pareto_frontier(df, objectives, max_fronts=5, skip_l2=False):
     out = df.copy()
     out['L2_PARETO'] = False
     out['PARETO_RANK'] = np.nan
@@ -413,7 +422,7 @@ def print_top_candidates(df, primary_obj, varying_params, top_n=5):
 
         # [📊 核心基础绩效]
         print("\n [📊 核心基础绩效]")
-        print(f"   ├─ 交易统计: {fmt_int(row.get('total_closed_trades'))} 笔平仓 | 胜率: {fmt_pct_abs(row.get('win_rate'))} | 盈亏比: {fmt_flt(row.get('profit_loss_ratio'), 2)} | 期望下界: {fmt_flt(row.get('expectancy_ci_low'))}")
+        print(f"   ├─ 交易统计: {fmt_int(row.get('total_closed_trades'))} 笔平仓 | 胜率: {fmt_pct_abs(row.get('win_rate'))} | 盈亏比: {fmt_flt(row.get('profit_loss_ratio'), 2)} | 期望下界: {fmt_flt(row.get('expectancy_ci_low'))} | E-Ratio: {fmt_flt(row.get('E_RATIO'), 2)}")
         print(f"   ├─ 收益状况: 总收益: {fmt_pct(row.get('total_return'))} | 年化收益: {fmt_pct(row.get('annual_return'))}")
 
         # 🌟 修复后的牛熊环境绝对收益与K线耗时
@@ -545,7 +554,7 @@ def print_specific_params(df, target_params, primary_obj, varying_params):
     print(f"   └─ L5 时间稳定: {l5}")
 
     print("\n [📊 核心基础绩效]")
-    print(f"   ├─ 交易统计: {fmt_int(row.get('total_closed_trades'))} 笔平仓 | 胜率: {fmt_pct_abs(row.get('win_rate'))} | 盈亏比: {fmt_flt(row.get('profit_loss_ratio'), 2)} | 期望下界: {fmt_flt(row.get('expectancy_ci_low'))}")
+    print(f"   ├─ 交易统计: {fmt_int(row.get('total_closed_trades'))} 笔平仓 | 胜率: {fmt_pct_abs(row.get('win_rate'))} | 盈亏比: {fmt_flt(row.get('profit_loss_ratio'), 2)} | 期望下界: {fmt_flt(row.get('expectancy_ci_low'))} | E-Ratio: {fmt_flt(row.get('E_RATIO'), 2)}")
     print(f"   ├─ 收益状况: 总收益: {fmt_pct(row.get('total_return'))} | 年化收益: {fmt_pct(row.get('annual_return'))}")
 
     bull_ret = row.get('bull_regime_total_return', np.nan)
@@ -931,7 +940,7 @@ def evaluate_multi_offset_ensemble(file_paths, side='LONG', max_missing_votes=0)
         # [📊 核心基础绩效] (基于最佳宇宙数据)
         print("\n [📊 核心基础绩效 (基于最佳时区表现)]")
         print(
-            f"   ├─ 交易统计: {fmt_int(full_row.get('total_closed_trades'))} 笔平仓 | 胜率: {fmt_pct_abs(full_row.get('win_rate'))} | 盈亏比: {fmt_flt(full_row.get('profit_loss_ratio'), 2)} | 期望下界: {fmt_flt(full_row.get('expectancy_ci_low'))}")
+            f"   ├─ 交易统计: {fmt_int(full_row.get('total_closed_trades'))} 笔平仓 | 胜率: {fmt_pct_abs(full_row.get('win_rate'))} | 盈亏比: {fmt_flt(full_row.get('profit_loss_ratio'), 2)} | 期望下界: {fmt_flt(full_row.get('expectancy_ci_low'))} | E-Ratio: {fmt_flt(full_row.get('E_RATIO'), 2)}")
         print(
             f"   ├─ 收益状况: 总收益: {fmt_pct(full_row.get('total_return'))} | 年化收益: {fmt_pct(full_row.get('annual_return'))}")
 
@@ -1156,7 +1165,7 @@ if __name__ == "__main__":
 
 
 
-    BASE_RESULTS_PATH = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_SHORT_ONLY_dynamic_pool_offset_0h_with_Benchmark.csv'
+    BASE_RESULTS_PATH = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_LONG_ONLY_dynamic_pool_offset_0h_with_Benchmark.csv'
 
     # 自动推导出 5 份文件的列表
     offset_files = get_all_offset_files(BASE_RESULTS_PATH)
@@ -1172,7 +1181,7 @@ if __name__ == "__main__":
     golden_parameters = evaluate_multi_offset_ensemble(
         file_paths=offset_files,
         side=current_side,  # 修改为你当前跑的方向
-        max_missing_votes=1  # 保持 0，代表 1个都不能少
+        max_missing_votes=0  # 保持 0，代表 1个都不能少
     )
 
 
