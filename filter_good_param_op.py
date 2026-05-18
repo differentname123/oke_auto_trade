@@ -61,7 +61,7 @@ SHORT_CONFIG = {
         'min_total_trades':              10,      # 从 15 调低到 10，给低频低成本参数放行
         'min_active_assets':             1,
         'max_drawdown_threshold':        -0.85,   # 空头允许极端行情下回撤至 -85%（对比基准的-100%已经是巨大提升）
-        'max_mae_pct_worst':             -0.75,   # 放宽最差 MAE
+        'max_mae_pct_worst':             -0.4,   # 放宽最差 MAE
         'min_bear_regime_total_return':  -0.20,   # 单一宇宙熊市允许亏损 20%（原值 -0.05 太苛刻）
         'min_cost_stress_30bps_annual':  -0.45,   # 允许极端摩擦下年化亏损
         'min_expectancy_ci_low':         -0.30,   # 放宽置信下界
@@ -140,7 +140,7 @@ def layer1_health_filter(df, filters):
 
     return out
 
-def layer2_pareto_frontier(df, objectives, max_fronts=5, skip_l2=False):
+def layer2_pareto_frontier(df, objectives, max_fronts=5, skip_l2=True):
     out = df.copy()
     out['L2_PARETO'] = False
     out['PARETO_RANK'] = np.nan
@@ -1156,7 +1156,7 @@ if __name__ == "__main__":
 
 
 
-    BASE_RESULTS_PATH = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_LONG_ONLY_dynamic_pool_offset_0h_with_Benchmark.csv'
+    BASE_RESULTS_PATH = r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_SHORT_ONLY_dynamic_pool_offset_0h_with_Benchmark.csv'
 
     # 自动推导出 5 份文件的列表
     offset_files = get_all_offset_files(BASE_RESULTS_PATH)
@@ -1172,7 +1172,7 @@ if __name__ == "__main__":
     golden_parameters = evaluate_multi_offset_ensemble(
         file_paths=offset_files,
         side=current_side,  # 修改为你当前跑的方向
-        max_missing_votes=0  # 保持 0，代表 1个都不能少
+        max_missing_votes=1  # 保持 0，代表 1个都不能少
     )
 
 
