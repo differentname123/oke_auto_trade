@@ -64,7 +64,7 @@ def preprocess_minute_data(df_list, time_offset='0h'):
 # ==========================================
 # 2. 核心流式推演引擎 (账本级对齐，包含 Reason)
 # ==========================================
-def generate_historical_trade_logs(df: pd.DataFrame, params: dict, trade_mode: str, initial_capital=10000.0):
+def generate_historical_trade_logs(df: pd.DataFrame, params: dict, trade_mode: str, initial_capital=10000.0, start_trade_date='2026-01-01 00:00:00'):
     """
     流式模拟引擎：生成与回测 100% 一致的 trade_logs DataFrame。
     """
@@ -121,6 +121,9 @@ def generate_historical_trade_logs(df: pd.DataFrame, params: dict, trade_mode: s
 
     min_warmup = max(MOM_WINDOW, VOL_WINDOW, BTC_TREND_WINDOW)
 
+    # 🟢 【新增】：解析指定的发车时间戳
+    start_trade_timestamp = pd.to_datetime(start_trade_date) if start_trade_date else None
+
     # 逐根 K 线流转推演
     for i in range(min_warmup, len(df)):
         current_time = time_index[i]
@@ -151,6 +154,11 @@ def generate_historical_trade_logs(df: pd.DataFrame, params: dict, trade_mode: s
                     valid_vals = current_mom[valid_idx]
                     order = np.argsort(valid_vals, kind='stable')
                     top_short_coins = [coins[idx] for idx in valid_idx[order[:TOP_K]]]
+
+        # 🔴 【核心修改】：时间拦截器。未到发车时间，强制掐断交易候选名单
+        if start_trade_timestamp is not None and current_time < start_trade_timestamp:
+            top_long_coins = []
+            top_short_coins = []
 
         # --- A. 平仓逻辑 ---
         for idx_c in range(n_coins):
@@ -257,17 +265,16 @@ def generate_historical_trade_logs(df: pd.DataFrame, params: dict, trade_mode: s
 
     return pd.DataFrame(trade_logs)
 
-
 # ==========================================
 # 3. 实盘自动化主流水线
 # ==========================================
 def run_live_pipeline(raw_minute_df_list):
     BEST_PARAMS = {
-        'MOM_WINDOW': 24,
-        'VOL_WINDOW': 24,
+        'MOM_WINDOW': 36,
+        'VOL_WINDOW': 90,
         'BTC_TREND_WINDOW': 120,
-        'MAX_WEIGHT': 0.25,
-        'TOP_K': 2
+        'MAX_WEIGHT': 0.4,
+        'TOP_K': 1
     }
     TIME_OFFSET = '0h'
     TRADE_MODE = 'LONG_ONLY'
@@ -297,7 +304,7 @@ def run_live_pipeline(raw_minute_df_list):
     # 3. 导出完整的流水日志 (这与你回测生成的 logs DataFrame 完全一致，可用于 Diff)
     output_path = "live_simulation_logs.csv"
     logs_df.to_csv(output_path, index=False, encoding='utf-8-sig')
-    print(f"✅ 全量交易流水(Ledger)已生成: {output_path}")
+    print(f"✅ 全量交易流水(Ledger)已生成: {output_path}(共 {len(logs_df)} 条记录)")
 
     # 4. 提取当下的实盘发单指令
     latest_kline_time = df_4h_ready.index[-1]
