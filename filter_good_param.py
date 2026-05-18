@@ -317,7 +317,7 @@ if __name__ == "__main__":
         if not df_results.empty:
 
             # 找到 param_name 为 Grid_No.31396_1h的行
-            best_row = df_results[df_results['param_name'] == 'Grid_No.117146_0h'].iloc[0]
+            best_row = df_results[df_results['param_name'] == 'Grid_No.33097_0h'].iloc[0]
 
             # # 假设你想看 sortino_ratio 排名第一的策略结果
             # best_row = df_results.sort_values(by='sortino_ratio', ascending=False).iloc[0]

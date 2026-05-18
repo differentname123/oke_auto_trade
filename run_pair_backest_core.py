@@ -26,9 +26,14 @@ def preprocess_minute_data(df_list, time_offset='0h'):
             df_copy['open_time'] = pd.to_datetime(df_copy['open_time'], unit='ms')
         elif not pd.api.types.is_datetime64_any_dtype(df_copy['open_time']):
             df_copy['open_time'] = pd.to_datetime(df_copy['open_time'])
+        # 新增一列叫做time
+        df_copy['time'] = df_copy['open_time']
+
+
 
         df_copy.set_index('open_time', inplace=True)
         df_copy.sort_index(inplace=True)
+
 
         # 3. 核心对齐：使用与回测一致的重采样逻辑生成高低价
         df_4h_coin = df_copy['close'].resample('4h', offset=time_offset).agg(
