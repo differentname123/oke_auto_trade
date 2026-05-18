@@ -33,6 +33,7 @@ LONG_CONFIG = {
         'min_expectancy_ci_low':         0.0,
         'min_cost_stress_20bps_annual':  0.0,
         'max_drop_top3_pnl_decay':       0.70,
+        'bootstrap_positive_prob':      0.95,
     },
     'L2_PARETO': {
         'sortino_ratio':              'maximize',
@@ -820,6 +821,7 @@ def evaluate_multi_offset_ensemble(file_paths, side='LONG', max_missing_votes=0)
 
         final_golden_params.append({
             'param_name': param,
+            'bootstrap_positive_prob': group['bootstrap_positive_prob'].dropna().iloc[0] if 'bootstrap_positive_prob' in group.columns else np.nan,
             'votes': vote_counts[param],
             'median_FINAL_SCORE': np.median(scores),
             'worst_FINAL_SCORE': min_score,
@@ -896,6 +898,9 @@ def evaluate_multi_offset_ensemble(file_paths, side='LONG', max_missing_votes=0)
             f"   ► [防过拟合验证] 综合分中位数: {fmt_flt(summary_row['median_FINAL_SCORE'])} | 宇宙间衰减极差: {fmt_pct_abs(summary_row['score_drop_pct'])} (极其稳固)")
         print(
             f"   ► [兜底极差底线] 最差宇宙回撤: {fmt_pct(summary_row['worst_max_dd'])} | 最差宇宙收益: {fmt_pct(summary_row['worst_return'])}")
+
+        print(
+            f"   ► [bootstrap_positive_prob] : {fmt_pct(summary_row['bootstrap_positive_prob'])}")
         print("────────────────────────────────────────────────────────────────────────────────")
 
         # [⚙️ 策略参数配置]
