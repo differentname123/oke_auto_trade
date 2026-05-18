@@ -34,6 +34,8 @@ LONG_CONFIG = {
         'min_cost_stress_20bps_annual':  0.0,
         'max_drop_top3_pnl_decay':       0.70,
         'bootstrap_positive_prob':      0.95,
+        'rolling_12m_return_min': -0.20,
+
     },
     'L2_PARETO': {
         'sortino_ratio':              'maximize',
@@ -126,6 +128,16 @@ def layer1_health_filter(df, filters):
         reject(out['bear_regime_total_return'].fillna(-1) < filters['min_bear_regime_total_return'], 'loss_in_bear_regime')
     if 'avg_holding_hours' in out.columns and 'max_avg_holding_hours' in filters:
         reject(out['avg_holding_hours'].fillna(999) > filters['max_avg_holding_hours'], 'holding_too_long(funding_bleed)')
+
+    # 增加bootstrap_positive_prob的筛选逻辑
+    if 'bootstrap_positive_prob' in out.columns and 'bootstrap_positive_prob' in filters:
+        reject(out['bootstrap_positive_prob'].fillna(0) < filters['bootstrap_positive_prob'], 'low_bootstrap_positive_prob')
+
+    # 增加 rolling_12m_return_min 的筛选逻辑
+    if 'rolling_12m_return_min' in out.columns and 'rolling_12m_return_min' in filters:
+        reject(out['rolling_12m_return_min'].fillna(-1) < filters['rolling_12m_return_min'],
+               'recent_12m_return_too_low')
+
     return out
 
 def layer2_pareto_frontier(df, objectives, max_fronts=5, skip_l2=False):
@@ -608,7 +620,8 @@ def evaluate(results_path, side='LONG'):
         raise FileNotFoundError(f"找不到结果文件: {results_path}")
 
     df = pd.read_csv(results_path, encoding='utf-8-sig')
-
+    if 'rolling_12m_return_min' in df.columns:
+        print("⚠️ 检测到旧版本回测结果格式，正在尝试自动升级兼容...")
     print("═" * 70)
     print(f"🚀 CSM 参数评价漏斗系统 [{side} 模式]")
     print("═" * 70)
@@ -822,6 +835,7 @@ def evaluate_multi_offset_ensemble(file_paths, side='LONG', max_missing_votes=0)
         final_golden_params.append({
             'param_name': param,
             'bootstrap_positive_prob': group['bootstrap_positive_prob'].dropna().iloc[0] if 'bootstrap_positive_prob' in group.columns else np.nan,
+            'rolling_12m_return_min': group['rolling_12m_return_min'].dropna().iloc[0] if 'rolling_12m_return_min' in group.columns else np.nan,
             'votes': vote_counts[param],
             'median_FINAL_SCORE': np.median(scores),
             'worst_FINAL_SCORE': min_score,
@@ -901,6 +915,9 @@ def evaluate_multi_offset_ensemble(file_paths, side='LONG', max_missing_votes=0)
 
         print(
             f"   ► [bootstrap_positive_prob] : {fmt_pct(summary_row['bootstrap_positive_prob'])}")
+
+        print(
+            f"   ► [rolling_12m_return_min] : {fmt_pct(summary_row['rolling_12m_return_min'])}")
         print("────────────────────────────────────────────────────────────────────────────────")
 
         # [⚙️ 策略参数配置]
