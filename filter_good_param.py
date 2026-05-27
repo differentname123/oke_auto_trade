@@ -24,6 +24,33 @@ def get_hard_filter_mask(df):
         (df['max_drawdown'] > -0.70)  # 【放宽】避免误杀极端日恢复型策略
     )
 
+def count_inconsistent_rows(df: pd.DataFrame) -> int:
+    # 修正后的正则表达式：匹配数字+单位，且后面紧跟下划线或处于字符串末尾
+    pattern = re.compile(r"(\d+(?:min|h|d))(?=_|$)")
+
+    def is_inconsistent(text):
+        offsets = pattern.findall(str(text))
+        # 如果提取到的 offset 种类大于 1，则说明不一致
+        return len(set(offsets)) > 1
+
+    return int(df["param_name"].apply(is_inconsistent).sum())
+
+
+def filter_different_offsets(df: pd.DataFrame) -> pd.DataFrame:
+    pattern = re.compile(r"(\d+(?:min|h|d))(?=_|$)")
+
+    def is_inconsistent(text):
+        offsets = pattern.findall(str(text))
+        return len(set(offsets)) > 1
+
+    total_rows = len(df)
+    filtered_df = df[df["param_name"].apply(is_inconsistent)].copy()
+    kept_rows = len(filtered_df)
+
+    # 打印统计信息
+    print(f"原始数据共 {total_rows} 行，过滤后保留了 {kept_rows} 行（offset不一致）。")
+
+    return filtered_df
 
 def evaluate_and_print_top5(csv_path):
     print("正在加载回测数据并执行第一性原理过滤...\n")
@@ -34,6 +61,8 @@ def evaluate_and_print_top5(csv_path):
         print(f"❌ 找不到文件: {csv_path}，请检查路径。")
         return
 
+    result = count_inconsistent_rows(df)
+    print(f"🔍 数据完整性检查：共有 {result} 行存在参数命名不一致问题（如同时包含 '1h' 和 '2h'）。建议修正这些行以确保数据质量。\n")
     # 2. 第一层：生死线硬过滤 (直接淘汰脆弱、靠运气、扛不住滑点的拟合参数)
     mask = get_hard_filter_mask(df)
     filtered = df[mask].copy()
@@ -57,23 +86,50 @@ def evaluate_and_print_top5(csv_path):
     # 若 R² > 0.98，扣除 4 分作为反向惩罚，警惕过度拟合
     filtered['score_stab'] = np.where(filtered['log_equity_r2'] > 0.98, base_stab_score - 4, base_stab_score)
 
-    # 【新增】18分：收益质量四联
+    # 【保留】18分：收益质量四联
     rank_sortino = filtered['sortino_ratio'].rank(pct=True)
     rank_tail = filtered['tail_ratio'].rank(pct=True)
     rank_pl = filtered['profit_loss_ratio'].rank(pct=True)
     rank_omega = filtered['omega_ratio'].rank(pct=True)
     filtered['score_quality'] = ((rank_sortino + rank_tail + rank_pl + rank_omega) / 4) * 18
 
-    # 【新增】10分：最差重抽样期望兜底
+    # 【保留】10分：最差重抽样期望兜底
     filtered['score_bootstrap'] = filtered['bootstrap_pnl_mean_p5'].rank(pct=True) * 10
 
-    # 【新增】7分：回撤修复速度 (越小越好)
+    # 【保留】7分：回撤修复速度 (越小越好)
     filtered['score_recovery'] = filtered['avg_recovery_time_days'].rank(pct=True, ascending=False) * 7
 
-    # 【新增】7分：滚动12个月最小收益
-    filtered['score_roll_min'] = filtered['rolling_12m_return_min'].rank(pct=True) * 7
+    # =========================================================================================
+    # 🔴 [修改点开始]：融入结论 1 和 结论 2
+    # =========================================================================================
 
-    # 【新增】5分：手续费占比 (越小越好)
+    # 【修改 - 结论2】15分：提升“滚动12个月最小收益”的权重（原为7分，现提升为15分）
+    # 代表时间遍历性底线，无论何时入场，最差的一年不能击穿心理防线
+    filtered['score_roll_min'] = filtered['rolling_12m_return_min'].rank(pct=True) * 15
+
+    # 【新增 - 结论2】8分：月度正反馈底线（月度赚钱概率，越高越容易坚持）
+    filtered['score_month_win'] = filtered['monthly_positive_ratio'].rank(pct=True) * 8
+
+    # 【新增 - 结论1】15分：剥离最好年份后的生存力（抗牛市依赖症）
+    # 逻辑：提取所有年份的收益，减去收益最高的一年，计算剩余年份的平均收益进行排名
+    year_cols = [c for c in filtered.columns if c.startswith('year_') and c.endswith('_return')]
+    if len(year_cols) > 1:
+        yearly_returns = filtered[year_cols]
+        # (总和 - 最大值) / (年份数 - 1)
+        rest_years_mean = (yearly_returns.sum(axis=1) - yearly_returns.max(axis=1)) / (len(year_cols) - 1)
+        filtered['score_no_best_year'] = rest_years_mean.rank(pct=True) * 15
+    else:
+        filtered['score_no_best_year'] = 0
+        rest_years_mean = pd.Series(0, index=filtered.index)
+
+    # 保存该字段用于后续打印输出展示
+    filtered['rest_years_annual_mean'] = rest_years_mean
+
+    # =========================================================================================
+    # 🔴 [修改点结束]
+    # =========================================================================================
+
+    # 【保留】5分：手续费占比 (越小越好)
     filtered['score_fee_effic'] = filtered['fee_to_pnl_ratio'].rank(pct=True, ascending=False) * 5
 
     # 【保留】15分：极限期望下界
@@ -82,24 +138,25 @@ def evaluate_and_print_top5(csv_path):
     # 【保留】15分：极限滑点抗性
     filtered['score_cost'] = filtered['cost_stress_20bps_annual'].rank(pct=True) * 15
 
-    # 计算综合总分 (总权重大致110分制)
+    # 计算综合总分 (融入了新加的体感模块)
     filtered['robust_score'] = (
             filtered['score_pain'] +
             filtered['score_stab'] +
             filtered['score_quality'] +
             filtered['score_bootstrap'] +
             filtered['score_recovery'] +
-            filtered['score_roll_min'] +
+            filtered['score_roll_min'] +  # 权重提升
+            filtered['score_month_win'] +  # 新增结论2指标
+            filtered['score_no_best_year'] +  # 新增结论1指标
             filtered['score_fee_effic'] +
             filtered['score_exp'] +
             filtered['score_cost']
     )
 
     # 4. 第三层：邻域平原检验 (择时开关抖动测试 Gate Jitter Test)
-    top50_candidates = filtered.sort_values('robust_score', ascending=False).head(50)
+    top50_candidates = filtered.sort_values('robust_score', ascending=False).head(5000)
     valid_candidates = []
 
-    # 🔴 [修改点 1] 提取多头和空头各自唯一的趋势窗口并排序
     long_btc_windows = sorted(df['long_BTC_TREND_WINDOW'].dropna().unique())
     short_btc_windows = sorted(df['short_BTC_TREND_WINDOW'].dropna().unique())
 
@@ -110,7 +167,6 @@ def evaluate_and_print_top5(csv_path):
         long_idx = long_btc_windows.index(current_long_btc)
         short_idx = short_btc_windows.index(current_short_btc)
 
-        # 🔴 [修改点 2] 分别提取多头和空头大盘择时开关的 ±1 步长邻域
         neighbor_long_vals = [current_long_btc]
         if long_idx > 0: neighbor_long_vals.append(long_btc_windows[long_idx - 1])
         if long_idx < len(long_btc_windows) - 1: neighbor_long_vals.append(long_btc_windows[long_idx + 1])
@@ -119,7 +175,6 @@ def evaluate_and_print_top5(csv_path):
         if short_idx > 0: neighbor_short_vals.append(short_btc_windows[short_idx - 1])
         if short_idx < len(short_btc_windows) - 1: neighbor_short_vals.append(short_btc_windows[short_idx + 1])
 
-        # 🔴 [修改点 3] 构建二维邻域查询：锁定其他参数基因，分别扰动多空 BTC 择时开关
         neighbor_mask = (
                 df['long_BTC_TREND_WINDOW'].isin(neighbor_long_vals) &
                 df['short_BTC_TREND_WINDOW'].isin(neighbor_short_vals) &
@@ -151,13 +206,21 @@ def evaluate_and_print_top5(csv_path):
 
     valid_candidates_df = pd.DataFrame(valid_candidates)
 
+    # 过滤掉strat_A_type 和 strat_B_type 相同的组合，避免单一逻辑过拟合
+    valid_candidates_df = valid_candidates_df[valid_candidates_df['strat_A_type'] != valid_candidates_df['strat_B_type']]
+
+    # valid_candidates_df = filter_different_offsets(valid_candidates_df)
+
+    # 过滤掉long_BTC_TREND_WINDOW和short_BTC_TREND_WINDOW不一致的组合，避免参数命名混乱导致的误导
+    # valid_candidates_df = valid_candidates_df[valid_candidates_df['long_BTC_TREND_WINDOW'] == valid_candidates_df['short_BTC_TREND_WINDOW']]
+
     # 5. 第四层：提取最终入围者（取消复杂聚类，直接提取真金不怕火炼的 Top 5）
-    top5 = valid_candidates_df.head(5)
+    top5 = valid_candidates_df.head(50)
 
     print(f"✅ 筛选完成！从 {len(df)} 组数据中提取出【实盘体感与抗压综合最优】的前 {len(top5)} 名：\n")
     print("=" * 85)
 
-    # 6. 格式化输出 (保持原有格式不变)
+    # 6. 格式化输出 (保持原有格式不变，并增补新的体感数据展示)
     medals = ['🥇', '🥈', '🥉', '🏅', '🏅']
 
     for i, (_, row) in enumerate(top5.iterrows()):
@@ -165,13 +228,13 @@ def evaluate_and_print_top5(csv_path):
         rank_medal = medals[i] if i < len(medals) else '🏅'
         score = row['robust_score']
         long_param = row.get('long_param_name', 'Unknown')
+        strat_A_type = row.get('strat_A_type', 'Unknown')
+        strat_B_type = row.get('strat_B_type', 'Unknown')
         short_param = row.get('short_param_name', 'Unknown')
 
-        # 🔴 [修改点 4] 提取分别的长短趋势窗口
         long_trend_win = int(row.get('long_BTC_TREND_WINDOW', 0))
         short_trend_win = int(row.get('short_BTC_TREND_WINDOW', 0))
 
-        # 核心指标提取
         exp_low = row.get('expectancy_ci_low', 0)
         total_ret = row.get('total_return', 0)
         r2 = row.get('log_equity_r2', 0)
@@ -183,20 +246,31 @@ def evaluate_and_print_top5(csv_path):
         drop_top3 = row.get('drop_top3_pnl_decay', 0)
         neg_assets = int(row.get('negative_expectancy_assets', 0))
 
+        # 🔴 提取新增的体感指标
+        rest_years_mean = row.get('rest_years_annual_mean', 0)
+        roll_min = row.get('rolling_12m_return_min', 0)
+        month_win = row.get('monthly_positive_ratio', 0)
+
         # 打印输出卡片
         print(f" {rank_medal} 排名: 第 {i + 1} 名 | 综合体感分: {score:.2f} (侧重无痛执行与防拟合)")
-        # 🔴 [修改点 5] 分开展示长短窗口
-        print(f" 🧬 组合基因: 做多 [{long_param}](趋势:{long_trend_win}) + 做空 [{short_param}](趋势:{short_trend_win})")
+        print(f" 🧬 组合基因: {strat_A_type} [{long_param}](趋势:{long_trend_win}) + {strat_B_type} [{short_param}](趋势:{short_trend_win})")
         print(
             f"   ├─ 交易核心: {int(row['total_closed_trades'])}笔平仓 | 胜率: {row['win_rate'] * 100:.1f}% | 盈亏比: {row['profit_loss_ratio']:.2f} | 净期望下界: {exp_low:.4f}")
+
+        # 🔴 [格式调整]：将新增的体感参数融入输出，同时保持原有的清爽排版
         print(
-            f"   ├─ 收益状况: 总收益: +{total_ret * 100:.1f}% | 年化: +{row['annual_return'] * 100:.1f}% | 资金拟合度(R²): {r2:.2f} | 22年熊市: {ret_2022 * 100:+.1f}%")
+            f"   ├─ 收益状况: 总收益: +{total_ret * 100:.1f}% | 年化: +{row['annual_return'] * 100:.1f}% | 剥离最强年后年化: {rest_years_mean * 100:+.1f}%")
+        print(
+            f"   ├─ 遍历底线: 滚动12月最差: {roll_min * 100:+.1f}% | 月度赚钱概率: {month_win * 100:.1f}% | 22年熊市: {ret_2022 * 100:+.1f}% | 资金R²: {r2:.2f}")
+
         print(
             f"   ├─ 回撤体验: 最大回撤: {row['max_drawdown'] * 100:.1f}% | 最长水下: {row['max_time_under_water_days']:.0f}天 | 最长连亏: {consecutive_losing}个月 | 溃疡指数: {ulcer:.1f}")
         print(f"   ├─ 极限压力: 20bps滑点后年化: +{stress_20 * 100:.1f}% | 手续费占毛利比: {fee_ratio * 100:.1f}%")
         print(
-            f"   └─ 运气剥离: 币种HHI: {row['asset_hhi']:.3f} | 去除最赚3笔后衰减: {drop_top3 * 100:.1f}% | 负期望币种数: {neg_assets} 个")
+            f"   └─ 运气剥离: 币种HHI: {row['asset_hhi']:.3f} | 去除最赚3笔衰减: {drop_top3 * 100:.1f}% | 负期望币种数: {neg_assets} 个")
         print("-" * 85)
+
+
 def print_advanced_report(metrics_dict):
     """
     高逼格、高信息密度的策略表现深度打印函数
@@ -308,52 +382,52 @@ def print_advanced_report(metrics_dict):
     print("▲" * 78)
 
 if __name__ == "__main__":
-    result_csv =   r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_LONG_ONLY_dynamic_pool_offset_0h_with_Benchmark.csv'
-    df1 = pd.read_csv(r'W:\project\python_project\oke_auto_trade\param_search_results\event_streams\LONG_ONLY_Grid_No.1_2h_events.csv')
-
-
-    if os.path.exists(result_csv):
-        df_results = pd.read_csv(result_csv)
-        if not df_results.empty:
-
-            # 找到 param_name 为 Grid_No.31396_1h的行
-            best_row = df_results[df_results['param_name'] == 'Grid_No.33097_0h'].iloc[0]
-
-            # # 假设你想看 sortino_ratio 排名第一的策略结果
-            # best_row = df_results.sort_values(by='sortino_ratio', ascending=False).iloc[0]
-
-            # 把 Series 转为字典喂给高级打印函数
-            best_metrics_dict = best_row.to_dict()
-
-            print_advanced_report(best_metrics_dict)
-    else:
-        print("未找到结果文件，请确保已经执行完带有 Benchmark 的回测流程。")
-
-
-    result_csv =   r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_SHORT_ONLY_dynamic_pool_offset_0h_with_Benchmark.csv'
-    df1 = pd.read_csv(r'W:\project\python_project\oke_auto_trade\param_search_results\event_streams\LONG_ONLY_Grid_No.1_2h_events.csv')
-
-
-    if os.path.exists(result_csv):
-        df_results = pd.read_csv(result_csv)
-        if not df_results.empty:
-
-            # 找到 param_name 为 Grid_No.31396_1h的行
-            best_row = df_results[df_results['param_name'] == 'Grid_No.69393_0h'].iloc[0]
-
-            # # 假设你想看 sortino_ratio 排名第一的策略结果
-            # best_row = df_results.sort_values(by='sortino_ratio', ascending=False).iloc[0]
-
-            # 把 Series 转为字典喂给高级打印函数
-            best_metrics_dict = best_row.to_dict()
-
-            print_advanced_report(best_metrics_dict)
-    else:
-        print("未找到结果文件，请确保已经执行完带有 Benchmark 的回测流程。")
+    # result_csv =   r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_LONG_ONLY_dynamic_pool_offset_0h_with_Benchmark.csv'
+    # df1 = pd.read_csv(r'W:\project\python_project\oke_auto_trade\param_search_results\event_streams\LONG_ONLY_Grid_No.1_2h_events.csv')
+    #
+    #
+    # if os.path.exists(result_csv):
+    #     df_results = pd.read_csv(result_csv)
+    #     if not df_results.empty:
+    #
+    #         # 找到 param_name 为 Grid_No.31396_1h的行
+    #         best_row = df_results[df_results['param_name'] == 'Grid_No.32748_0h'].iloc[0]
+    #
+    #         # # 假设你想看 sortino_ratio 排名第一的策略结果
+    #         # best_row = df_results.sort_values(by='sortino_ratio', ascending=False).iloc[0]
+    #
+    #         # 把 Series 转为字典喂给高级打印函数
+    #         best_metrics_dict = best_row.to_dict()
+    #
+    #         print_advanced_report(best_metrics_dict)
+    # else:
+    #     print("未找到结果文件，请确保已经执行完带有 Benchmark 的回测流程。")
+    #
+    #
+    # result_csv =   r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_LONG_ONLY_dynamic_pool_offset_2h_with_Benchmark.csv'
+    # df1 = pd.read_csv(r'W:\project\python_project\oke_auto_trade\param_search_results\event_streams\LONG_ONLY_Grid_No.1_2h_events.csv')
+    #
+    #
+    # if os.path.exists(result_csv):
+    #     df_results = pd.read_csv(result_csv)
+    #     if not df_results.empty:
+    #
+    #         # 找到 param_name 为 Grid_No.31396_1h的行
+    #         best_row = df_results[df_results['param_name'] == 'Grid_No.33091_2h'].iloc[0]
+    #
+    #         # # 假设你想看 sortino_ratio 排名第一的策略结果
+    #         # best_row = df_results.sort_values(by='sortino_ratio', ascending=False).iloc[0]
+    #
+    #         # 把 Series 转为字典喂给高级打印函数
+    #         best_metrics_dict = best_row.to_dict()
+    #
+    #         print_advanced_report(best_metrics_dict)
+    # else:
+    #     print("未找到结果文件，请确保已经执行完带有 Benchmark 的回测流程。")
 
 
 
     # # 将这里替换为你实际的 CSV 文件路径
-    CSV_FILE_PATH = r"W:\project\python_project\oke_auto_trade\param_search_results\combined_metrics_results_op.csv"
+    CSV_FILE_PATH = r"W:\project\python_project\oke_auto_trade\param_search_results\combined_metrics_results_op_op_op1.csv"
 
     evaluate_and_print_top5(CSV_FILE_PATH)
