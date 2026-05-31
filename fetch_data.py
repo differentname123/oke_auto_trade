@@ -8,9 +8,29 @@ import zipfile  # <--- 新增这行导入，用于校验压缩包完整性
 TARGET_FILES = ["kline_data/BTC_ETH_1m.csv", "kline_data/DOGE_SOL_1m.csv", "kline_data/TON_XRP_1m.csv"]
 # 自动解析列表涉及到的币，并拼接成 USDT 交易对 (例如: BTCUSDT, ETHUSDT)
 SYMBOLS = [
-    "BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT"
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT",
+    "DOGEUSDT", "LINKUSDT", "TRXUSDT", "AAVEUSDT",
+    "TONUSDT", "SKYUSDT", "UNIUSDT", "STXUSDT",
+    "RENDERUSDT", "RUNEUSDT", "PENDLEUSDT", "KASUSDT"
 ]
-
+crypto_scores = {
+  "BTCUSDT": 10.0,
+  "ETHUSDT": 9.0,
+  "SOLUSDT": 8.5,
+  "AAVEUSDT": 7.8,
+  "LINKUSDT": 7.5,
+  "BNBUSDT": 7.2,
+  "UNIUSDT": 7.0,
+  "SKYUSDT": 7.0,
+  "STXUSDT": 6.8,
+  "KASUSDT": 6.5,
+  "DOGEUSDT": 6.5,
+  "RENDERUSDT": 6.2,
+  "RUNEUSDT": 6.0,
+  "TONUSDT": 5.5,
+  "TRXUSDT": 5.5,
+  "PENDLEUSDT": 5.0
+}
 # for f in TARGET_FILES:
 #     # 提取文件名如 'BTC_ETH_1m.csv' -> 'BTC_ETH' -> ['BTC', 'ETH']
 #     base_name = f.split('/')[-1].replace('_1m.csv', '')
@@ -22,7 +42,7 @@ SYMBOLS = [
 INTERVAL = "1m"  # K线级别
 MARKET = "futures/um"  # 市场类型：现货填"spot"，U本位填"futures/um"
 START_DATE = "2025-01-01"  # 开始日期 (YYYY-MM-DD)
-END_DATE = "2026-05-26"  # 结束日期 (YYYY-MM-DD)
+END_DATE = "2026-05-31"  # 结束日期 (YYYY-MM-DD)
 SAVE_DIR = "./binance_data"  # ZIP文件临时保存路径
 MAX_WORKERS = 20  # 并发下载线程数（建议 5-10）
 # ==========================================
