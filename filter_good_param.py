@@ -10,19 +10,20 @@ def get_hard_filter_mask(df):
     第一层：生死线硬过滤规则单独提取，方便后续在邻域平原检验中复用
     """
     return (
-        (df['expectancy_ci_low'] > 0) &  # 95%置信下界期望必须为正
-        (df['bootstrap_pnl_mean_p5'] > 0) &  # Bootstrap 最差5%情况必须盈利
-        (df['cost_stress_20bps_annual'] > 0) &  # 增加双边40bps(单边20bps)摩擦后不能亏损
-        (df['drop_top3_pnl_decay'] < 0.5) &  # 剔除最赚3笔后，利润缩水不能超过50%
-        (df['drop_top5_pnl_decay'] < 0.6) &  # 【新增】剔除最赚5笔后缩水不能超过60%
-        (df['asset_top1_share'] < 0.7) &  # 【新增】保留赢家通吃但拒绝单币赌注
-        (df['negative_expectancy_assets'] <= 1) &  # 【新增】替代 HHI 的核心防御：基本盘不能流血
-        (df['fee_to_pnl_ratio'] < 0.4) &  # 【新增】绝对生死线：拒绝向交易所打工
-        (df['avg_recovery_time_days'] < 60) &  # 【新增】回撤修复速度
-        (df['profitable_years_ratio'] >= 0.7) &  # 必须至少能在大部分年份存活
-        # (df['max_time_under_water_days'] < 180) &  # 限制最长水下时间
-        (df['max_drawdown'] > -0.70)  # 【放宽】避免误杀极端日恢复型策略
+            (df['expectancy_ci_low'] > 0) &  # 95%置信下界期望必须为正
+            (df['bootstrap_pnl_mean_p5'] > 0) &  # Bootstrap 最差5%情况必须盈利
+            (df['cost_stress_20bps_annual'] > 0) &  # 增加双边40bps(单边20bps)摩擦后不能亏损
+            (df['drop_top3_pnl_decay'] < 0.5) &  # 剔除最赚3笔后，利润缩水不能超过50%
+            (df['drop_top5_pnl_decay'] < 0.6) &  # 【新增】剔除最赚5笔后缩水不能超过60%
+            (df['asset_top1_share'] < 0.7) &  # 【新增】保留赢家通吃但拒绝单币赌注
+            (df['negative_expectancy_assets'] <= 1) &  # 【新增】替代 HHI 的核心防御：基本盘不能流血
+            (df['fee_to_pnl_ratio'] < 0.4) &  # 【新增】绝对生死线：拒绝向交易所打工
+            (df['avg_recovery_time_days'] < 60) &  # 【新增】回撤修复速度
+            (df['profitable_years_ratio'] >= 0.7) &  # 必须至少能在大部分年份存活
+            # (df['max_time_under_water_days'] < 180) &  # 限制最长水下时间
+            (df['max_drawdown'] > -0.70)  # 【放宽】避免误杀极端日恢复型策略
     )
+
 
 def count_inconsistent_rows(df: pd.DataFrame) -> int:
     # 修正后的正则表达式：匹配数字+单位，且后面紧跟下划线或处于字符串末尾
@@ -52,8 +53,9 @@ def filter_different_offsets(df: pd.DataFrame) -> pd.DataFrame:
 
     return filtered_df
 
+
 def evaluate_and_print_top5(csv_path):
-    print("正在加载回测数据并执行第一性原理过滤...\n")
+    print("正在加载回测数据并执行家族化第一性原理过滤...\n")
     # 1. 读取数据
     try:
         df = pd.read_csv(csv_path)
@@ -62,214 +64,280 @@ def evaluate_and_print_top5(csv_path):
         return
 
     result = count_inconsistent_rows(df)
-    print(f"🔍 数据完整性检查：共有 {result} 行存在参数命名不一致问题（如同时包含 '1h' 和 '2h'）。建议修正这些行以确保数据质量。\n")
-    # 2. 第一层：生死线硬过滤 (直接淘汰脆弱、靠运气、扛不住滑点的拟合参数)
-    mask = get_hard_filter_mask(df)
-    filtered = df[mask].copy()
-
-    if len(filtered) == 0:
-        print("⚠️ 警告：没有任何参数组合通过基础的防过拟合硬性测试！")
-        return
-
-    # 3. 第二层：【体感 + 鲁棒】打分系统 (满分 100 分，采用分位数排名法)
-
-    # --- 痛点/体感惩罚子项 (越小得分越高，所以 ascending=False) ---
-    rank_ulcer = filtered['ulcer_index'].rank(pct=True, ascending=False)
-    rank_underwater = filtered['max_time_under_water_days'].rank(pct=True, ascending=False)
-    rank_loss_months = filtered['max_consecutive_losing_months'].rank(pct=True, ascending=False)
-
-    # 【保留】25分：综合体感煎熬度惩罚
-    filtered['score_pain'] = ((rank_ulcer + rank_underwater + rank_loss_months) / 3) * 25
-
-    # 【降权与反向惩罚】8分：资金曲线平滑度
-    base_stab_score = filtered['log_equity_r2'].rank(pct=True) * 8
-    # 若 R² > 0.98，扣除 4 分作为反向惩罚，警惕过度拟合
-    filtered['score_stab'] = np.where(filtered['log_equity_r2'] > 0.98, base_stab_score - 4, base_stab_score)
-
-    # 【保留】18分：收益质量四联
-    rank_sortino = filtered['sortino_ratio'].rank(pct=True)
-    rank_tail = filtered['tail_ratio'].rank(pct=True)
-    rank_pl = filtered['profit_loss_ratio'].rank(pct=True)
-    rank_omega = filtered['omega_ratio'].rank(pct=True)
-    filtered['score_quality'] = ((rank_sortino + rank_tail + rank_pl + rank_omega) / 4) * 18
-
-    # 【保留】10分：最差重抽样期望兜底
-    filtered['score_bootstrap'] = filtered['bootstrap_pnl_mean_p5'].rank(pct=True) * 10
-
-    # 【保留】7分：回撤修复速度 (越小越好)
-    filtered['score_recovery'] = filtered['avg_recovery_time_days'].rank(pct=True, ascending=False) * 7
+    print(
+        f"🔍 数据完整性检查：共有 {result} 行存在参数命名不一致问题（如同时包含 '1h' 和 '2h'）。建议修正这些行以确保数据质量。\n")
 
     # =========================================================================================
-    # 🔴 [修改点开始]：融入结论 1 和 结论 2
+    # 🛠️ 第一阶段：基因提取与家族分组（Data Grouping）
     # =========================================================================================
 
-    # 【修改 - 结论2】15分：提升“滚动12个月最小收益”的权重（原为7分，现提升为15分）
-    # 代表时间遍历性底线，无论何时入场，最差的一年不能击穿心理防线
-    filtered['score_roll_min'] = filtered['rolling_12m_return_min'].rank(pct=True) * 15
+    # 辅助正则函数：剥离时间后缀与提取时间后缀
+    def strip_time_suffix(name):
+        return re.sub(r'_\d+(min|h|d)$', '', str(name))
 
-    # 【新增 - 结论2】8分：月度正反馈底线（月度赚钱概率，越高越容易坚持）
-    filtered['score_month_win'] = filtered['monthly_positive_ratio'].rank(pct=True) * 8
+    def get_time_suffix(name):
+        match = re.search(r'_(\d+(min|h|d))$', str(name))
+        return match.group(1) if match else '0h'
 
-    # 【新增 - 结论1】15分：剥离最好年份后的生存力（抗牛市依赖症）
-    # 逻辑：提取所有年份的收益，减去收益最高的一年，计算剩余年份的平均收益进行排名
-    year_cols = [c for c in filtered.columns if c.startswith('year_') and c.endswith('_return')]
+    # 解析宏观核心参数与时间偏移
+    df['core_long'] = df['long_param_name'].apply(strip_time_suffix)
+    df['core_short'] = df['short_param_name'].apply(strip_time_suffix)
+    df['offset_long'] = df['long_param_name'].apply(get_time_suffix)
+    df['offset_short'] = df['short_param_name'].apply(get_time_suffix)
+
+    # 生成唯一家族 ID：策略类型 + 核心长维参数 + 策略类型 + 核心短维参数
+    def make_unified_family_id(row):
+        part1 = f"{row['strat_A_type']}_{row['core_long']}"
+        part2 = f"{row['strat_B_type']}_{row['core_short']}"
+
+        # 🔴【修复】使用 frozenset，天然无序且可哈希，是最完美、可扩展的分组键值对
+        return "_AND_".join(sorted(frozenset([part1, part2])))
+
+    # 应用统一化 ID
+    df['Family_ID'] = df.apply(make_unified_family_id, axis=1)
+
+    family_sizes = df.groupby('Family_ID').size()
+
+    # 2. 统计这些数量各自出现了多少次，并按数量从大到小排序
+    size_distribution = family_sizes.value_counts().sort_index(ascending=False)
+
+    print("\n" + "=" * 50)
+    print(" 📊 家族成员数量分布概览")
+    print("=" * 50)
+
+    for size, count in size_distribution.items():
+        if size == 25:
+            print(f" ✅ [健康] 满编 25 个成员的家族 : {count:4d} 个")
+        elif size == 15:
+            print(f" ⚠️ [撕裂] 只有 15 个成员的家族 : {count:4d} 个 (A_B 顺向截断)")
+        elif size == 10:
+            print(f" ⚠️ [撕裂] 只有 10 个成员的家族 : {count:4d} 个 (B_A 逆向截断)")
+        else:
+            print(f" ❓ [异常] 包含 {size:2d} 个成员的家族 : {count:4d} 个")
+
+    print("=" * 50 + "\n")
+
+    # =========================================================================================
+    # 🔬 第二阶段：单体独立质检与打分（奥卡姆剃刀降维版）
+    # =========================================================================================
+
+    # # [保留的基础硬防线] 过滤掉strat_A_type 和 strat_B_type 相同的组合，避免单一逻辑过拟合
+    # if 'strat_A_type' in df.columns and 'strat_B_type' in df.columns:
+    #     df = df[df['strat_A_type'] != df['strat_B_type']].copy()
+    #
+    # df = df[df['long_BTC_TREND_WINDOW'] == df['short_BTC_TREND_WINDOW']]
+    #
+    # df = df[df['offset_long'] == df['offset_short']]
+
+
+    # 1. 标记生存状态
+    df['is_alive'] = get_hard_filter_mask(df)
+
+    # 2. 剥离最好年份后的生存力 (提取为独立变量，修复单年 Bug)
+    year_cols = [c for c in df.columns if c.startswith('year_') and c.endswith('_return')]
     if len(year_cols) > 1:
-        yearly_returns = filtered[year_cols]
-        # (总和 - 最大值) / (年份数 - 1)
+        yearly_returns = df[year_cols]
         rest_years_mean = (yearly_returns.sum(axis=1) - yearly_returns.max(axis=1)) / (len(year_cols) - 1)
-        filtered['score_no_best_year'] = rest_years_mean.rank(pct=True) * 15
+        score_no_best_year_rank = rest_years_mean.rank(pct=True)
+    elif len(year_cols) == 1:
+        # 🔴【修复】只有一年数据时，直接用该年排名，但权重打对折作为时间不够的惩罚
+        yearly_returns = df[year_cols]
+        rest_years_mean = yearly_returns.iloc[:, 0]
+        score_no_best_year_rank = rest_years_mean.rank(pct=True) * 0.5
     else:
-        filtered['score_no_best_year'] = 0
-        rest_years_mean = pd.Series(0, index=filtered.index)
+        score_no_best_year_rank = pd.Series(0, index=df.index)
+        rest_years_mean = pd.Series(0, index=df.index)
 
-    # 保存该字段用于后续打印输出展示
-    filtered['rest_years_annual_mean'] = rest_years_mean
+    df['rest_years_annual_mean'] = rest_years_mean
+
+    # 🔴【重构】只用 3 个绝对正交的物理维度打分，干掉所有多重共线性的冗余
+
+    # 维度 1：收益风险比效率 (35分) - 仅用 sortino_ratio 涵盖所有平滑度、回撤与水下痛点
+    rank_efficiency = df['sortino_ratio'].rank(pct=True) * 35
+
+    # 维度 2：周期跨越防线 (35分) - 仅用 滚动12月下限 + 剥离最强年，衡量抗周期能力
+    rank_time_robust = (df['rolling_12m_return_min'].rank(pct=True) + score_no_best_year_rank) / 2 * 35
+
+    # 维度 3：极限压力防线 (30分) - 仅用 滑点施压 + Bootstrap重抽样兜底，衡量抗微观物理摩擦能力
+    rank_stress = (df['cost_stress_20bps_annual'].rank(pct=True) + df['bootstrap_pnl_mean_p5'].rank(pct=True)) / 2 * 30
+
+    # 计算全局稳健总分 (纯粹的第一性原理)
+    df['robust_score'] = rank_efficiency + rank_time_robust + rank_stress
 
     # =========================================================================================
-    # 🔴 [修改点结束]
+    # 🛡️ 第三阶段：双层家族评估体系 (均值惩罚模式)
     # =========================================================================================
 
-    # 【保留】5分：手续费占比 (越小越好)
-    filtered['score_fee_effic'] = filtered['fee_to_pnl_ratio'].rank(pct=True, ascending=False) * 5
+    family_results = []
 
-    # 【保留】15分：极限期望下界
-    filtered['score_exp'] = filtered['expectancy_ci_low'].rank(pct=True) * 15
+    for family_id, group in df.groupby('Family_ID'):
+        total_members = len(group)
+        alive_count = group['is_alive'].sum()
+        survival_rate = alive_count / total_members if total_members > 0 else 0
 
-    # 【保留】15分：极限滑点抗性
-    filtered['score_cost'] = filtered['cost_stress_20bps_annual'].rank(pct=True) * 15
-
-    # 计算综合总分 (融入了新加的体感模块)
-    filtered['robust_score'] = (
-            filtered['score_pain'] +
-            filtered['score_stab'] +
-            filtered['score_quality'] +
-            filtered['score_bootstrap'] +
-            filtered['score_recovery'] +
-            filtered['score_roll_min'] +  # 权重提升
-            filtered['score_month_win'] +  # 新增结论2指标
-            filtered['score_no_best_year'] +  # 新增结论1指标
-            filtered['score_fee_effic'] +
-            filtered['score_exp'] +
-            filtered['score_cost']
-    )
-
-    # 4. 第三层：邻域平原检验 (择时开关抖动测试 Gate Jitter Test)
-    top50_candidates = filtered.sort_values('robust_score', ascending=False).head(5000)
-    valid_candidates = []
-
-    long_btc_windows = sorted(df['long_BTC_TREND_WINDOW'].dropna().unique())
-    short_btc_windows = sorted(df['short_BTC_TREND_WINDOW'].dropna().unique())
-
-    for idx, row in top50_candidates.iterrows():
-        current_long_btc = row['long_BTC_TREND_WINDOW']
-        current_short_btc = row['short_BTC_TREND_WINDOW']
-
-        long_idx = long_btc_windows.index(current_long_btc)
-        short_idx = short_btc_windows.index(current_short_btc)
-
-        neighbor_long_vals = [current_long_btc]
-        if long_idx > 0: neighbor_long_vals.append(long_btc_windows[long_idx - 1])
-        if long_idx < len(long_btc_windows) - 1: neighbor_long_vals.append(long_btc_windows[long_idx + 1])
-
-        neighbor_short_vals = [current_short_btc]
-        if short_idx > 0: neighbor_short_vals.append(short_btc_windows[short_idx - 1])
-        if short_idx < len(short_btc_windows) - 1: neighbor_short_vals.append(short_btc_windows[short_idx + 1])
-
-        neighbor_mask = (
-                df['long_BTC_TREND_WINDOW'].isin(neighbor_long_vals) &
-                df['short_BTC_TREND_WINDOW'].isin(neighbor_short_vals) &
-                (df['long_param_name'] == row['long_param_name']) &
-                (df['short_param_name'] == row['short_param_name'])
-        )
-        neighbors = df[neighbor_mask]
-
-        if len(neighbors) == 0:
+        # 第一层：外围抗扰动质检 (生存率必须 >= 80%)
+        if survival_rate < 0.8:
             continue
 
-        # 检验指标 1：硬过滤通过率 ≥ 60%
-        hard_pass_rate = get_hard_filter_mask(neighbors).mean()
+        # 🔴【修复】第二层：提取实盘同源分身组合，且要求它本身必须是存活的！
+        homo_group = group[(group['offset_long'] == group['offset_short']) & (group['is_alive'])]
 
-        # 检验指标 2：expectancy_ci_low 为正的比例 ≥ 70%
-        exp_pos_rate = (neighbors['expectancy_ci_low'] > 0).mean()
+        if len(homo_group) == 0:
+            continue
 
-        # 检验指标 3：ulcer_index 中位数相对中心的恶化幅度 ≤ 40%
-        center_ulcer = row['ulcer_index']
-        median_ulcer = neighbors['ulcer_index'].median()
-        degradation = (median_ulcer - center_ulcer) / center_ulcer if center_ulcer > 0 else 0
+        # 同源单体核心打分 (抛弃双重暴击底线，改用夏普思维：族群均值 - 方差惩罚)
+        homo_scores = homo_group['robust_score']
 
-        if hard_pass_rate >= 0.60 and exp_pos_rate >= 0.70 and degradation <= 0.40:
-            valid_candidates.append(row)
+        mean_score = homo_scores.mean()
+        std_score = homo_scores.std(ddof=0) if len(homo_scores) > 1 else 0
 
-    if not valid_candidates:
-        print("⚠️ 警告：Top 50 参数全部未能通过【择时开关平原检验】，它们对历史拐点极度敏感！建议重新评估策略逻辑。")
+        penalty_factor = 1.0  # 均值模式下系数调整为 1.0
+        family_final_score = mean_score - (penalty_factor * std_score)
+
+        # 为报告准备输出字段：锁定最差同源分身作为实盘保底预期
+        worst_homo_row = homo_group.loc[homo_scores.idxmin()]
+        yield_spread = homo_group['annual_return'].max() - homo_group['annual_return'].min()
+
+        family_results.append({
+            'Family_ID': family_id,
+            'survival_rate': survival_rate,
+            'alive_count': alive_count,
+            'total_members': total_members,
+            'family_final_score': family_final_score,
+            'worst_homo_row': worst_homo_row,
+            'yield_spread': yield_spread,
+            'annual_return_max': round(homo_group['annual_return'].max() * 100, 2),
+            'annual_return_min': round(homo_group['annual_return'].min() * 100, 2)
+        })
+
+    if not family_results:
+        print("⚠️ 警告：没有任何参数家族通过 80% 生存率的【外围抗扰动测试】！请检查数据或放宽初筛标准。")
         return
 
-    valid_candidates_df = pd.DataFrame(valid_candidates)
+    # =========================================================================================
+    # 🌍 第四阶段：家族群落参数平原检验 (Neighborhood Flatland Test)
+    # =========================================================================================
 
-    # 过滤掉strat_A_type 和 strat_B_type 相同的组合，避免单一逻辑过拟合
-    valid_candidates_df = valid_candidates_df[valid_candidates_df['strat_A_type'] != valid_candidates_df['strat_B_type']]
+    # 提取全局唯一的趋势参数池，方便寻找邻居
+    all_long_windows = sorted(df['long_BTC_TREND_WINDOW'].dropna().unique())
+    all_short_windows = sorted(df['short_BTC_TREND_WINDOW'].dropna().unique())
 
-    # valid_candidates_df = filter_different_offsets(valid_candidates_df)
+    valid_families = []
+    family_df_temp = pd.DataFrame(family_results)
 
-    # 过滤掉long_BTC_TREND_WINDOW和short_BTC_TREND_WINDOW不一致的组合，避免参数命名混乱导致的误导
-    # valid_candidates_df = valid_candidates_df[valid_candidates_df['long_BTC_TREND_WINDOW'] == valid_candidates_df['short_BTC_TREND_WINDOW']]
+    for _, f_row in family_df_temp.iterrows():
+        worst_row = f_row['worst_homo_row']
 
-    # 5. 第四层：提取最终入围者（取消复杂聚类，直接提取真金不怕火炼的 Top 5）
-    top5 = valid_candidates_df.head(50)
+        strat_a = worst_row.get('strat_A_type')
+        strat_b = worst_row.get('strat_B_type')
+        core_long = worst_row.get('core_long')
+        core_short = worst_row.get('core_short')
 
-    print(f"✅ 筛选完成！从 {len(df)} 组数据中提取出【实盘体感与抗压综合最优】的前 {len(top5)} 名：\n")
+        curr_long_win = worst_row.get('long_BTC_TREND_WINDOW')
+        curr_short_win = worst_row.get('short_BTC_TREND_WINDOW')
+
+        if pd.isna(curr_long_win) or pd.isna(curr_short_win):
+            continue
+
+        long_idx = all_long_windows.index(curr_long_win) if curr_long_win in all_long_windows else -1
+        short_idx = all_short_windows.index(curr_short_win) if curr_short_win in all_short_windows else -1
+
+        # 找 Long 邻居
+        neighbor_long_vals = [curr_long_win]
+        if long_idx > 0: neighbor_long_vals.append(all_long_windows[long_idx - 1])
+        if long_idx > -1 and long_idx < len(all_long_windows) - 1: neighbor_long_vals.append(
+            all_long_windows[long_idx + 1])
+
+        # 找 Short 邻居
+        neighbor_short_vals = [curr_short_win]
+        if short_idx > 0: neighbor_short_vals.append(all_short_windows[short_idx - 1])
+        if short_idx > -1 and short_idx < len(all_short_windows) - 1: neighbor_short_vals.append(
+            all_short_windows[short_idx + 1])
+
+        # 圈出家族群落圈（同策略类型 + 邻居参数）
+        neighborhood_mask = (
+                (df['strat_A_type'] == strat_a) &
+                (df['strat_B_type'] == strat_b) &
+                (df['core_long'] == core_long) &  # 🔴 新增：严禁其它基因的策略串门！
+                (df['core_short'] == core_short) &  # 🔴 新增：严禁其它基因的策略串门！
+                (df['long_BTC_TREND_WINDOW'].isin(neighbor_long_vals)) &
+                (df['short_BTC_TREND_WINDOW'].isin(neighbor_short_vals))
+        )
+        neighborhood_df = df[neighborhood_mask]
+
+        if len(neighborhood_df) == 0:
+            continue
+
+        # 检验群落存活率 (拆解为总数和存活数)
+        neighborhood_total = len(neighborhood_df)
+        neighborhood_alive = neighborhood_df['is_alive'].sum()
+        neighborhood_survival_rate = neighborhood_alive / neighborhood_total if neighborhood_total > 0 else 0
+
+        # 🔴 只保留群落生态也比较健康（>= 60%）的家族
+        if neighborhood_survival_rate >= 0.60:
+            f_row['neighborhood_survival_rate'] = neighborhood_survival_rate
+            f_row['neighborhood_alive'] = neighborhood_alive  # 记录邻居存活数
+            f_row['neighborhood_total'] = neighborhood_total  # 记录邻居总数
+            valid_families.append(f_row)
+
+    if not valid_families:
+        print("⚠️ 警告：没有任何家族通过【家族群落参数平原检验】！参数全都在悬崖尖峰上。")
+        return
+
+    # =========================================================================================
+    # 🏆 第五阶段：最终降维排序与全景输出
+    # =========================================================================================
+
+    family_df = pd.DataFrame(valid_families)
+    top5_families = family_df.sort_values('family_final_score', ascending=False).head(50)
+
+    print(f"✅ 家族降维筛选完成！一共提取出【实盘底层抗击打与稳健分综合最优】的前 {len(top5_families)} 大参数家族：\n")
     print("=" * 85)
 
-    # 6. 格式化输出 (保持原有格式不变，并增补新的体感数据展示)
     medals = ['🥇', '🥈', '🥉', '🏅', '🏅']
 
-    for i, (_, row) in enumerate(top5.iterrows()):
-        # 基础字段提取
+    for i, (_, f_row) in enumerate(top5_families.iterrows()):
         rank_medal = medals[i] if i < len(medals) else '🏅'
-        score = row['robust_score']
-        long_param = row.get('long_param_name', 'Unknown')
-        strat_A_type = row.get('strat_A_type', 'Unknown')
-        strat_B_type = row.get('strat_B_type', 'Unknown')
-        short_param = row.get('short_param_name', 'Unknown')
+        family_score = f_row['family_final_score']
+        worst_row = f_row['worst_homo_row']
 
-        long_trend_win = int(row.get('long_BTC_TREND_WINDOW', 0))
-        short_trend_win = int(row.get('short_BTC_TREND_WINDOW', 0))
+        # 家族宏观基因重组
+        strat_A_type = worst_row.get('strat_A_type', 'Unknown')
+        strat_B_type = worst_row.get('strat_B_type', 'Unknown')
+        core_long = worst_row.get('core_long', 'Unknown')
+        core_short = worst_row.get('core_short', 'Unknown')
+        trend_long = int(worst_row.get('long_BTC_TREND_WINDOW', 0))
+        trend_short = int(worst_row.get('short_BTC_TREND_WINDOW', 0))
 
-        exp_low = row.get('expectancy_ci_low', 0)
-        total_ret = row.get('total_return', 0)
-        r2 = row.get('log_equity_r2', 0)
-        ret_2022 = row.get('year_2022_return', 0)
-        ulcer = row.get('ulcer_index', 0)
-        consecutive_losing = int(row.get('max_consecutive_losing_months', 0))
-        stress_20 = row.get('cost_stress_20bps_annual', 0)
-        fee_ratio = row.get('fee_to_pnl_ratio', 0)
-        drop_top3 = row.get('drop_top3_pnl_decay', 0)
-        neg_assets = int(row.get('negative_expectancy_assets', 0))
+        # 最差同源提取
+        worst_offset = f"[{worst_row.get('offset_long', '0h')}+{worst_row.get('offset_short', '0h')}]"
 
-        # 🔴 提取新增的体感指标
-        rest_years_mean = row.get('rest_years_annual_mean', 0)
-        roll_min = row.get('rolling_12m_return_min', 0)
-        month_win = row.get('monthly_positive_ratio', 0)
-
-        # 打印输出卡片
-        print(f" {rank_medal} 排名: 第 {i + 1} 名 | 综合体感分: {score:.2f} (侧重无痛执行与防拟合)")
-        print(f" 🧬 组合基因: {strat_A_type} [{long_param}](趋势:{long_trend_win}) + {strat_B_type} [{short_param}](趋势:{short_trend_win})")
+        # 打印输出卡片 (升级至族群全景视角)
+        print(f" {rank_medal} 家族排名: 第 {i + 1} 名 | 家族最终稳健分(Family_Final_Score): {family_score:.2f}")
         print(
-            f"   ├─ 交易核心: {int(row['total_closed_trades'])}笔平仓 | 胜率: {row['win_rate'] * 100:.1f}% | 盈亏比: {row['profit_loss_ratio']:.2f} | 净期望下界: {exp_low:.4f}")
+            f" 🧬 家族宏观基因: {strat_A_type} [{core_long}](趋势:{trend_long}) + {strat_B_type} [{core_short}](趋势:{trend_short})")
 
-        # 🔴 [格式调整]：将新增的体感参数融入输出，同时保持原有的清爽排版
+        # 🔴 [新增展现格式] 加入群落邻居平原存活率
+        # 🔴 [展现格式] 详细展示家族内部与外部群落邻居的存活比例
         print(
-            f"   ├─ 收益状况: 总收益: +{total_ret * 100:.1f}% | 年化: +{row['annual_return'] * 100:.1f}% | 剥离最强年后年化: {rest_years_mean * 100:+.1f}%")
-        print(
-            f"   ├─ 遍历底线: 滚动12月最差: {roll_min * 100:+.1f}% | 月度赚钱概率: {month_win * 100:.1f}% | 22年熊市: {ret_2022 * 100:+.1f}% | 资金R²: {r2:.2f}")
+            f" 🛡️ 抗扰动表现: 本家族存活 {f_row['alive_count']}/{f_row['total_members']} ({f_row['survival_rate'] * 100:.1f}%) | 群落邻居存活: {f_row.get('neighborhood_alive', 0)}/{f_row.get('neighborhood_total', 0)} ({f_row['neighborhood_survival_rate'] * 100:.1f}%)")
 
         print(
-            f"   ├─ 回撤体验: 最大回撤: {row['max_drawdown'] * 100:.1f}% | 最长水下: {row['max_time_under_water_days']:.0f}天 | 最长连亏: {consecutive_losing}个月 | 溃疡指数: {ulcer:.1f}")
-        print(f"   ├─ 极限压力: 20bps滑点后年化: +{stress_20 * 100:.1f}% | 手续费占毛利比: {fee_ratio * 100:.1f}%")
+            f"    同源组合收益极差: {f_row['yield_spread'] * 100:.1f}% | 收益下界: {f_row['annual_return_min']}% | 收益上界: {f_row['annual_return_max']}%")
+        print(f" 📉 实盘保底表现 (源自本家族同源中表现最差的分身: {worst_offset})")
+
+        # 将最丑陋一面的明细数据展示出来
         print(
-            f"   └─ 运气剥离: 币种HHI: {row['asset_hhi']:.3f} | 去除最赚3笔衰减: {drop_top3 * 100:.1f}% | 负期望币种数: {neg_assets} 个")
+            f"   ├─ 单体综合保底分: {worst_row['robust_score']:.2f} | 净期望下界: {worst_row.get('expectancy_ci_low', 0):.4f}")
+        print(
+            f"   ├─ 保底收益: 年化: +{worst_row['annual_return'] * 100:.1f}% | 剥离最强年后年化: {worst_row.get('rest_years_annual_mean', 0) * 100:+.1f}%")
+        print(
+            f"   ├─ 极限回撤: 最大回撤: {worst_row['max_drawdown'] * 100:.1f}% | 最长水下: {worst_row['max_time_under_water_days']:.0f}天 | 22年熊市: {worst_row.get('year_2022_return', 0) * 100:+.1f}%")
+        print(
+            f"   ├─ 压力与交易: 20bps滑点后年化: +{worst_row.get('cost_stress_20bps_annual', 0) * 100:.1f}% | 胜率: {worst_row.get('win_rate', 0) * 100:.1f}% | 盈亏比: {worst_row.get('profit_loss_ratio', 0):.2f}")
+        print(
+            f"   └─ 运气剥离: 负期望币种数: {int(worst_row.get('negative_expectancy_assets', 0))} 个 | 币种HHI: {worst_row.get('asset_hhi', 0):.3f}")
         print("-" * 85)
-
 
 def print_advanced_report(metrics_dict):
     """
@@ -381,52 +449,8 @@ def print_advanced_report(metrics_dict):
 
     print("▲" * 78)
 
+
 if __name__ == "__main__":
-    # result_csv =   r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_LONG_ONLY_dynamic_pool_offset_0h_with_Benchmark.csv'
-    # df1 = pd.read_csv(r'W:\project\python_project\oke_auto_trade\param_search_results\event_streams\LONG_ONLY_Grid_No.1_2h_events.csv')
-    #
-    #
-    # if os.path.exists(result_csv):
-    #     df_results = pd.read_csv(result_csv)
-    #     if not df_results.empty:
-    #
-    #         # 找到 param_name 为 Grid_No.31396_1h的行
-    #         best_row = df_results[df_results['param_name'] == 'Grid_No.32748_0h'].iloc[0]
-    #
-    #         # # 假设你想看 sortino_ratio 排名第一的策略结果
-    #         # best_row = df_results.sort_values(by='sortino_ratio', ascending=False).iloc[0]
-    #
-    #         # 把 Series 转为字典喂给高级打印函数
-    #         best_metrics_dict = best_row.to_dict()
-    #
-    #         print_advanced_report(best_metrics_dict)
-    # else:
-    #     print("未找到结果文件，请确保已经执行完带有 Benchmark 的回测流程。")
-    #
-    #
-    # result_csv =   r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_LONG_ONLY_dynamic_pool_offset_2h_with_Benchmark.csv'
-    # df1 = pd.read_csv(r'W:\project\python_project\oke_auto_trade\param_search_results\event_streams\LONG_ONLY_Grid_No.1_2h_events.csv')
-    #
-    #
-    # if os.path.exists(result_csv):
-    #     df_results = pd.read_csv(result_csv)
-    #     if not df_results.empty:
-    #
-    #         # 找到 param_name 为 Grid_No.31396_1h的行
-    #         best_row = df_results[df_results['param_name'] == 'Grid_No.33091_2h'].iloc[0]
-    #
-    #         # # 假设你想看 sortino_ratio 排名第一的策略结果
-    #         # best_row = df_results.sort_values(by='sortino_ratio', ascending=False).iloc[0]
-    #
-    #         # 把 Series 转为字典喂给高级打印函数
-    #         best_metrics_dict = best_row.to_dict()
-    #
-    #         print_advanced_report(best_metrics_dict)
-    # else:
-    #     print("未找到结果文件，请确保已经执行完带有 Benchmark 的回测流程。")
-
-
-
     # # 将这里替换为你实际的 CSV 文件路径
     CSV_FILE_PATH = r"W:\project\python_project\oke_auto_trade\param_search_results\combined_metrics_results_op_op_op1.csv"
 
