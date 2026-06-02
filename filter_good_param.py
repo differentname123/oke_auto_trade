@@ -54,7 +54,43 @@ def filter_different_offsets(df: pd.DataFrame) -> pd.DataFrame:
     return filtered_df
 
 
-def evaluate_and_print_top5(csv_path):
+# 🔴 [修复]：彻底解决 Numpy 数据类型导致阈值拦截失效的致命 Bug
+def get_true_neighbor_cores(raw_df: pd.DataFrame, core_id: str, tolerance_pct=0.30) -> list:
+    """
+    根据阈值找到所有参数均在合理范围内的邻居。
+    """
+    if raw_df is None or raw_df.empty:
+        return [core_id]
+
+    target_rows = raw_df[raw_df['param_name'] == core_id]
+    if target_rows.empty:
+        return [core_id]
+
+    row = target_rows.iloc[0]
+
+    # 初始化掩码，默认全表符合
+    mask = pd.Series(True, index=raw_df.index)
+
+    # 动态遍历所有底层参数列 (所有以 param_ 开头且数值化的字段)
+    for col in raw_df.columns:
+        if col.startswith('param_') and col != 'param_name':
+            # 🔴 使用 Pandas 原生的数值类型推断，完美兼容 int64 和 float64
+            if pd.api.types.is_numeric_dtype(raw_df[col]):
+                val = row[col]
+                if pd.notna(val):
+                    # 计算容忍度绝对值
+                    margin = abs(val) * tolerance_pct
+                    # 严格检验：当前表中的该参数，必须在原值的 ±margin 范围内
+                    # (加上 1e-9 避免浮点数边界精度问题，如 0.1500000001)
+                    if margin == 0:
+                        mask &= (raw_df[col] == val)
+                    else:
+                        mask &= (abs(raw_df[col] - val) <= margin + 1e-9)
+
+    return raw_df[mask]['param_name'].tolist()
+
+
+def evaluate_and_print_top5(csv_path, raw_dfs_dict=None):
     print("正在加载回测数据并执行家族化第一性原理过滤...\n")
     # 1. 读取数据
     try:
@@ -121,15 +157,6 @@ def evaluate_and_print_top5(csv_path):
     # 🔬 第二阶段：单体独立质检与打分（奥卡姆剃刀降维版）
     # =========================================================================================
 
-    # # [保留的基础硬防线] 过滤掉strat_A_type 和 strat_B_type 相同的组合，避免单一逻辑过拟合
-    # if 'strat_A_type' in df.columns and 'strat_B_type' in df.columns:
-    #     df = df[df['strat_A_type'] != df['strat_B_type']].copy()
-    #
-    # df = df[df['long_BTC_TREND_WINDOW'] == df['short_BTC_TREND_WINDOW']]
-    #
-    # df = df[df['offset_long'] == df['offset_short']]
-
-
     # 1. 标记生存状态
     df['is_alive'] = get_hard_filter_mask(df)
 
@@ -181,6 +208,8 @@ def evaluate_and_print_top5(csv_path):
 
         # 🔴【修复】第二层：提取实盘同源分身组合，且要求它本身必须是存活的！
         homo_group = group[(group['offset_long'] == group['offset_short']) & (group['is_alive'])]
+        homo_group = group[(group['is_alive'])]
+
 
         if len(homo_group) == 0:
             continue
@@ -215,12 +244,8 @@ def evaluate_and_print_top5(csv_path):
         return
 
     # =========================================================================================
-    # 🌍 第四阶段：家族群落参数平原检验 (Neighborhood Flatland Test)
+    # 🌍 第四阶段：家族群落参数平原检验 (Neighborhood Flatland Test) - 🔴 彻底重构
     # =========================================================================================
-
-    # 提取全局唯一的趋势参数池，方便寻找邻居
-    all_long_windows = sorted(df['long_BTC_TREND_WINDOW'].dropna().unique())
-    all_short_windows = sorted(df['short_BTC_TREND_WINDOW'].dropna().unique())
 
     valid_families = []
     family_df_temp = pd.DataFrame(family_results)
@@ -233,36 +258,34 @@ def evaluate_and_print_top5(csv_path):
         core_long = worst_row.get('core_long')
         core_short = worst_row.get('core_short')
 
-        curr_long_win = worst_row.get('long_BTC_TREND_WINDOW')
-        curr_short_win = worst_row.get('short_BTC_TREND_WINDOW')
+        if raw_dfs_dict is not None:
+            raw_df_a = raw_dfs_dict.get(strat_a)
+            raw_df_b = raw_dfs_dict.get(strat_b)
 
-        if pd.isna(curr_long_win) or pd.isna(curr_short_win):
-            continue
+            # 🔴 1. 严格根据阈值找到各自的真实邻居 (所有参数均在合理浮动范围内)
+            valid_cores_a = get_true_neighbor_cores(raw_df_a, core_long, tolerance_pct=0.30)
+            valid_cores_b = get_true_neighbor_cores(raw_df_b, core_short, tolerance_pct=0.30)
+            # if len(valid_cores_a) > 0:
+            #     print()
+            # else:
+            #     print()
+        else:
+            # 兼容未传入原始数据表的情况
+            valid_cores_a = [core_long]
+            valid_cores_b = [core_short]
 
-        long_idx = all_long_windows.index(curr_long_win) if curr_long_win in all_long_windows else -1
-        short_idx = all_short_windows.index(curr_short_win) if curr_short_win in all_short_windows else -1
+        # 🔴 2. 完美匹配策略：两两组合产生出所有邻居候选者的统一 Family_ID
+        # 彻底解决 A+B 和 B+A 的同源镜像匹配问题
+        neighbor_family_ids = set()
+        for ca in valid_cores_a:
+            for cb in valid_cores_b:
+                part1 = f"{strat_a}_{ca}"
+                part2 = f"{strat_b}_{cb}"
+                unified_id = "_AND_".join(sorted(frozenset([part1, part2])))
+                neighbor_family_ids.add(unified_id)
 
-        # 找 Long 邻居
-        neighbor_long_vals = [curr_long_win]
-        if long_idx > 0: neighbor_long_vals.append(all_long_windows[long_idx - 1])
-        if long_idx > -1 and long_idx < len(all_long_windows) - 1: neighbor_long_vals.append(
-            all_long_windows[long_idx + 1])
-
-        # 找 Short 邻居
-        neighbor_short_vals = [curr_short_win]
-        if short_idx > 0: neighbor_short_vals.append(all_short_windows[short_idx - 1])
-        if short_idx > -1 and short_idx < len(all_short_windows) - 1: neighbor_short_vals.append(
-            all_short_windows[short_idx + 1])
-
-        # 圈出家族群落圈（同策略类型 + 邻居参数）
-        neighborhood_mask = (
-                (df['strat_A_type'] == strat_a) &
-                (df['strat_B_type'] == strat_b) &
-                (df['core_long'] == core_long) &  # 🔴 新增：严禁其它基因的策略串门！
-                (df['core_short'] == core_short) &  # 🔴 新增：严禁其它基因的策略串门！
-                (df['long_BTC_TREND_WINDOW'].isin(neighbor_long_vals)) &
-                (df['short_BTC_TREND_WINDOW'].isin(neighbor_short_vals))
-        )
+        # 🔴 3. 根据统一 ID 到大池子里精确捕鱼，绝不越界串台
+        neighborhood_mask = df['Family_ID'].isin(neighbor_family_ids)
         neighborhood_df = df[neighborhood_mask]
 
         if len(neighborhood_df) == 0:
@@ -338,6 +361,7 @@ def evaluate_and_print_top5(csv_path):
         print(
             f"   └─ 运气剥离: 负期望币种数: {int(worst_row.get('negative_expectancy_assets', 0))} 个 | 币种HHI: {worst_row.get('asset_hhi', 0):.3f}")
         print("-" * 85)
+
 
 def print_advanced_report(metrics_dict):
     """
@@ -454,4 +478,12 @@ if __name__ == "__main__":
     # # 将这里替换为你实际的 CSV 文件路径
     CSV_FILE_PATH = r"W:\project\python_project\oke_auto_trade\param_search_results\combined_metrics_results_op_op_op1.csv"
 
-    evaluate_and_print_top5(CSV_FILE_PATH)
+    # 🔴 [加载原始数据字典]：动态映射，传入任意包含全量基础属性参数的表
+    raw_dfs_dict = {
+        'LONG_ONLY': pd.read_csv(
+            r"W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_LONG_ONLY_dynamic_pool_GOLDEN_IMMUNE_with_Benchmark.csv"),
+        'SHORT_ONLY': pd.read_csv(
+            r"W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_SHORT_ONLY_dynamic_pool_GOLDEN_IMMUNE_with_Benchmark.csv")
+    }
+
+    evaluate_and_print_top5(CSV_FILE_PATH, raw_dfs_dict=raw_dfs_dict)
