@@ -336,7 +336,7 @@ def evaluate_and_print_top5(csv_path, raw_dfs_dict=None):
         worst_offset = f"[{worst_row.get('offset_long', '0h')}+{worst_row.get('offset_short', '0h')}]"
 
         # 打印输出卡片 (升级至族群全景视角)
-        print(f" {rank_medal} 家族排名: 第 {i + 1} 名 | 家族最终稳健分(Family_Final_Score): {family_score:.2f}")
+        print(f"第 {i + 1} 组家族 | 家族最终稳健分(Family_Final_Score): {family_score:.2f}")
         print(
             f" 🧬 家族宏观基因: {strat_A_type} [{core_long}](趋势:{trend_long}) + {strat_B_type} [{core_short}](趋势:{trend_short})")
 
@@ -349,19 +349,20 @@ def evaluate_and_print_top5(csv_path, raw_dfs_dict=None):
             f"    同源组合收益极差: {f_row['yield_spread'] * 100:.1f}% | 收益下界: {f_row['annual_return_min']}% | 收益上界: {f_row['annual_return_max']}%")
         print(f" 📉 实盘保底表现 (源自本家族同源中表现最差的分身: {worst_offset})")
 
-        # 将最丑陋一面的明细数据展示出来
+        # 🔴 [核心修改区] 将最丑陋一面的明细数据展示出来：精准暴露四大物理极限
         print(
-            f"   ├─ 单体综合保底分: {worst_row['robust_score']:.2f} | 净期望下界: {worst_row.get('expectancy_ci_low', 0):.4f}")
+            f"   ├─ 核心底线: 综合保底分: {worst_row['robust_score']:.2f} | 95%置信净期望: {worst_row.get('expectancy_ci_low', 0):.4f}")
         print(
-            f"   ├─ 保底收益: 年化: +{worst_row['annual_return'] * 100:.1f}% | 剥离最强年后年化: {worst_row.get('rest_years_annual_mean', 0) * 100:+.1f}%")
+            f"   ├─ 收益与敞口: 保底年化: +{worst_row['annual_return'] * 100:.1f}% (剥离最强年: {worst_row.get('rest_years_annual_mean', 0) * 100:+.1f}%) | 资金在市暴露度: {worst_row.get('time_in_market_pct', 0) * 100:.1f}%")
         print(
-            f"   ├─ 极限回撤: 最大回撤: {worst_row['max_drawdown'] * 100:.1f}% | 最长水下: {worst_row['max_time_under_water_days']:.0f}天 | 22年熊市: {worst_row.get('year_2022_return', 0) * 100:+.1f}%")
+            f"   ├─ 宏观心理折磨: 最大回撤: {worst_row['max_drawdown'] * 100:.1f}% | 最长水下: {worst_row.get('max_time_under_water_days', 0):.0f}天 | 历史最差滚动一年收益: {worst_row.get('rolling_12m_return_min', 0) * 100:.1f}%")
         print(
-            f"   ├─ 压力与交易: 20bps滑点后年化: +{worst_row.get('cost_stress_20bps_annual', 0) * 100:.1f}% | 胜率: {worst_row.get('win_rate', 0) * 100:.1f}% | 盈亏比: {worst_row.get('profit_loss_ratio', 0):.2f}")
+            f"   ├─ 微观执行极限: 单笔极限浮亏(MAE): {worst_row.get('mae_pct_worst', 0) * 100:.1f}% | 均持仓时长: {worst_row.get('avg_holding_hours', 0):.1f}h | 交易所打工率(Fee/PnL): {worst_row.get('fee_to_pnl_ratio', 0) * 100:.1f}%")
         print(
-            f"   └─ 运气剥离: 负期望币种数: {int(worst_row.get('negative_expectancy_assets', 0))} 个 | 币种HHI: {worst_row.get('asset_hhi', 0):.3f}")
+            f"   ├─ 摩擦与防线: 20bps滑点测试年化: +{worst_row.get('cost_stress_20bps_annual', 0) * 100:.1f}% |动量非对称性: 胜率: {worst_row.get('win_rate', 0) * 100:.1f}% | 盈亏比: {worst_row.get('profit_loss_ratio', 0):.2f}")
+        print(
+            f"   └─ 尾部动量捕获(肥尾依赖): 剔除最赚5笔后利润腰斩率: {worst_row.get('drop_top5_pnl_decay', 0) * 100:.1f}% | 负期望币种数: {int(worst_row.get('negative_expectancy_assets', 0))}个 | 币种HHI: {worst_row.get('asset_hhi', 0):.3f}")
         print("-" * 85)
-
 
 def print_advanced_report(metrics_dict):
     """
