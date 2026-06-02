@@ -224,7 +224,7 @@ def evaluate_and_print_top5(csv_path, raw_dfs_dict=None):
         family_final_score = mean_score - (penalty_factor * std_score)
 
         # 为报告准备输出字段：锁定最差同源分身作为实盘保底预期
-        worst_homo_row = homo_group.loc[homo_scores.idxmin()]
+        worst_homo_row = homo_group.loc[homo_scores.idxmax()]
         yield_spread = homo_group['annual_return'].max() - homo_group['annual_return'].min()
 
         family_results.append({
