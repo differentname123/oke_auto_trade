@@ -54,17 +54,27 @@ def filter_different_offsets(df: pd.DataFrame) -> pd.DataFrame:
     return filtered_df
 
 
-# 🔴 [修复]：彻底解决 Numpy 数据类型导致阈值拦截失效的致命 Bug
-def get_true_neighbor_cores(raw_df: pd.DataFrame, core_id: str, tolerance_pct=0.30) -> list:
-    """
-    根据阈值找到所有参数均在合理范围内的邻居。
-    """
-    if raw_df is None or raw_df.empty:
-        return [core_id]
+import pandas as pd
+from typing import Tuple, List, Optional
 
+
+def get_true_neighbor_cores(raw_df: pd.DataFrame, core_id: str, tolerance_pct=0.30) -> Tuple[
+    List[str], Optional[float]]:
+    """
+    根据阈值找到所有参数均在合理范围内的邻居，并返回邻居列表以及最大复合权重乘积。
+
+    返回:
+        - 满足条件的 core_id 列表 (List[str])
+        - 满足条件的邻居中，param_MAX_WEIGHT * param_TOP_K 的最大值 (float 或 None)
+    """
+    # 1. 异常处理：原表为空
+    if raw_df is None or raw_df.empty:
+        return [core_id], None
+
+    # 2. 异常处理：找不到目标 core_id
     target_rows = raw_df[raw_df['param_name'] == core_id]
     if target_rows.empty:
-        return [core_id]
+        return [core_id], None
 
     row = target_rows.iloc[0]
 
@@ -74,20 +84,33 @@ def get_true_neighbor_cores(raw_df: pd.DataFrame, core_id: str, tolerance_pct=0.
     # 动态遍历所有底层参数列 (所有以 param_ 开头且数值化的字段)
     for col in raw_df.columns:
         if col.startswith('param_') and col != 'param_name':
-            # 🔴 使用 Pandas 原生的数值类型推断，完美兼容 int64 和 float64
             if pd.api.types.is_numeric_dtype(raw_df[col]):
                 val = row[col]
                 if pd.notna(val):
-                    # 计算容忍度绝对值
                     margin = abs(val) * tolerance_pct
-                    # 严格检验：当前表中的该参数，必须在原值的 ±margin 范围内
-                    # (加上 1e-9 避免浮点数边界精度问题，如 0.1500000001)
                     if margin == 0:
                         mask &= (raw_df[col] == val)
                     else:
                         mask &= (abs(raw_df[col] - val) <= margin + 1e-9)
 
-    return raw_df[mask]['param_name'].tolist()
+    # 3. 提取筛选后的结果
+    filtered_df = raw_df[mask]
+
+    # 4. 计算最大乘积
+    if filtered_df.empty:
+        max_product = None
+    else:
+        # 🔴 核心改动：向量化计算两个字段的乘积，并取最大值
+        # 即使这两个列中有 NaN，Pandas 的乘积和 max 也会自动跳过 NaN（除非全都是 NaN，此时 max 会返回 NaN）
+        product_series = filtered_df['param_MAX_WEIGHT'] * filtered_df['param_TOP_K']
+        max_product = product_series.max()
+
+        # 如果计算结果是 NaN（比如对应的行数据缺失），将其转换为 None 更好处理
+        if pd.isna(max_product):
+            max_product = None
+
+    # 返回：满足条件的列表，以及最大乘积值
+    return filtered_df['param_name'].tolist(), max_product
 
 
 def evaluate_and_print_top5(csv_path, raw_dfs_dict=None):
@@ -224,7 +247,7 @@ def evaluate_and_print_top5(csv_path, raw_dfs_dict=None):
         family_final_score = mean_score - (penalty_factor * std_score)
 
         # 为报告准备输出字段：锁定最差同源分身作为实盘保底预期
-        worst_homo_row = homo_group.loc[homo_scores.idxmax()]
+        worst_homo_row = homo_group.loc[homo_scores.idxmin()]
         yield_spread = homo_group['annual_return'].max() - homo_group['annual_return'].min()
 
         family_results.append({
@@ -263,8 +286,12 @@ def evaluate_and_print_top5(csv_path, raw_dfs_dict=None):
             raw_df_b = raw_dfs_dict.get(strat_b)
 
             # 🔴 1. 严格根据阈值找到各自的真实邻居 (所有参数均在合理浮动范围内)
-            valid_cores_a = get_true_neighbor_cores(raw_df_a, core_long, tolerance_pct=0.30)
-            valid_cores_b = get_true_neighbor_cores(raw_df_b, core_short, tolerance_pct=0.30)
+            valid_cores_a, max_product_a = get_true_neighbor_cores(raw_df_a, core_long, tolerance_pct=0.30)
+
+            valid_cores_b, max_product_b = get_true_neighbor_cores(raw_df_b, core_short, tolerance_pct=0.30)
+            if max_product_a + max_product_b > 1:
+                continue
+            f_row['max_money_ratio'] = max_product_a + max_product_b
             # if len(valid_cores_a) > 0:
             #     print()
             # else:
@@ -313,7 +340,7 @@ def evaluate_and_print_top5(csv_path, raw_dfs_dict=None):
 
     family_df = pd.DataFrame(valid_families)
     top5_families = family_df.sort_values('family_final_score', ascending=False).head(50)
-
+    top5_families = top5_families.sample(frac=1).reset_index(drop=True)
     print(f"✅ 家族降维筛选完成！一共提取出【实盘底层抗击打与稳健分综合最优】的前 {len(top5_families)} 大参数家族：\n")
     print("=" * 85)
 
@@ -353,7 +380,7 @@ def evaluate_and_print_top5(csv_path, raw_dfs_dict=None):
         print(
             f"   ├─ 核心底线: 综合保底分: {worst_row['robust_score']:.2f} | 95%置信净期望: {worst_row.get('expectancy_ci_low', 0):.4f}")
         print(
-            f"   ├─ 收益与敞口: 保底年化: +{worst_row['annual_return'] * 100:.1f}% (剥离最强年: {worst_row.get('rest_years_annual_mean', 0) * 100:+.1f}%) | 资金在市暴露度: {worst_row.get('time_in_market_pct', 0) * 100:.1f}%")
+            f"   ├─ 收益与敞口: 保底年化: +{worst_row['annual_return'] * 100:.1f}% (剥离最强年: {worst_row.get('rest_years_annual_mean', 0) * 100:+.1f}%) | 资金在市暴露度: {worst_row.get('time_in_market_pct', 0) * 100:.1f} | 资金最大占用: {f_row.get('max_money_ratio', 0) * 100:.1f}%")
         print(
             f"   ├─ 宏观心理折磨: 最大回撤: {worst_row['max_drawdown'] * 100:.1f}% | 最长水下: {worst_row.get('max_time_under_water_days', 0):.0f}天 | 历史最差滚动一年收益: {worst_row.get('rolling_12m_return_min', 0) * 100:.1f}%")
         print(
