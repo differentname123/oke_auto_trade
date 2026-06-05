@@ -298,7 +298,7 @@ def evaluate_and_print_top5(csv_path, raw_dfs_dict=None):
         family_final_score = mean_score - (penalty_factor * std_score)
 
         # 为报告准备输出字段：锁定最差同源分身作为实盘保底预期
-        worst_homo_row = homo_group.loc[homo_scores.idxmin()]
+        worst_homo_row = homo_group.loc[homo_scores.idxmax()]
         yield_spread = homo_group['annual_return'].max() - homo_group['annual_return'].min()
 
         family_results.append({
@@ -398,7 +398,7 @@ def evaluate_and_print_top5(csv_path, raw_dfs_dict=None):
     family_df = pd.DataFrame(valid_families)
     top5_families = family_df.sort_values('family_final_score', ascending=False).head(50)
     # 固定随机顺序（数字 42 可以换成任意整数，只要不变，顺序就永远固定）
-    top5_families = top5_families.sample(frac=1, random_state=42).reset_index(drop=True)
+    # top5_families = top5_families.sample(frac=1, random_state=42).reset_index(drop=True)
 
     print(f"✅ 家族降维筛选完成！一共提取出【实盘底层抗击打与稳健分综合最优】的前 {len(top5_families)} 大参数家族：\n")
     print("=" * 85)
