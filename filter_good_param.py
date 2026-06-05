@@ -25,6 +25,55 @@ def get_hard_filter_mask(df):
     )
 
 
+def get_failure_statistics(df, dead_mask):
+    """
+    【新增】统计在硬过滤中被淘汰的样本，具体是因为哪些指标不达标被淘汰的。
+    注意：一个样本可能同时触发多个淘汰条件，因此各项淘汰计数之和可能大于总淘汰人数。
+    """
+    dead_df = df[dead_mask]
+    if dead_df.empty:
+        return {}
+
+    stats = {}
+
+    # 精确镜像 get_hard_filter_mask 的条件，进行反向统计
+    c1 = ~(dead_df['expectancy_ci_low'] > 0)
+    if c1.sum() > 0: stats['期望为负'] = int(c1.sum())
+
+    c2 = ~(dead_df['bootstrap_pnl_mean_p5'] > 0)
+    if c2.sum() > 0: stats['最差5%亏损'] = int(c2.sum())
+
+    c3 = ~(dead_df['cost_stress_20bps_annual'] > 0)
+    if c3.sum() > 0: stats['滑点后亏损'] = int(c3.sum())
+
+    c4 = ~(dead_df['drop_top3_pnl_decay'] < 0.5)
+    if c4.sum() > 0: stats['Top3缩水>50%'] = int(c4.sum())
+
+    c5 = ~(dead_df['drop_top5_pnl_decay'] < 0.6)
+    if c5.sum() > 0: stats['Top5缩水>60%'] = int(c5.sum())
+
+    c6 = ~(dead_df['asset_top1_share'] < 0.7)
+    if c6.sum() > 0: stats['单币赌注过重'] = int(c6.sum())
+
+    c7 = ~(dead_df['negative_expectancy_assets'] <= 1)
+    if c7.sum() > 0: stats['负期望币>1个'] = int(c7.sum())
+
+    c8 = ~(dead_df['fee_to_pnl_ratio'] < 0.4)
+    if c8.sum() > 0: stats['手续费率>=40%'] = int(c8.sum())
+
+    c9 = ~(dead_df['avg_recovery_time_days'] < 60)
+    if c9.sum() > 0: stats['修复期>=60天'] = int(c9.sum())
+
+    c10 = ~(dead_df['profitable_years_ratio'] >= 0.7)
+    if c10.sum() > 0: stats['多数年份亏损'] = int(c10.sum())
+
+    c11 = ~(dead_df['max_drawdown'] > -0.70)
+    if c11.sum() > 0: stats['最大回撤超70%'] = int(c11.sum())
+
+    # 按照淘汰数量从大到小排序，方便直观查看核心死因
+    return dict(sorted(stats.items(), key=lambda item: item[1], reverse=True))
+
+
 def count_inconsistent_rows(df: pd.DataFrame) -> int:
     # 修正后的正则表达式：匹配数字+单位，且后面紧跟下划线或处于字符串末尾
     pattern = re.compile(r"(\d+(?:min|h|d))(?=_|$)")
@@ -54,7 +103,6 @@ def filter_different_offsets(df: pd.DataFrame) -> pd.DataFrame:
     return filtered_df
 
 
-import pandas as pd
 from typing import Tuple, List, Optional
 
 
@@ -225,6 +273,10 @@ def evaluate_and_print_top5(csv_path, raw_dfs_dict=None):
         alive_count = group['is_alive'].sum()
         survival_rate = alive_count / total_members if total_members > 0 else 0
 
+        # 【新增】获取本家族淘汰成员的具体原因统计
+        family_dead_mask = ~group['is_alive']
+        family_fail_stats = get_failure_statistics(group, family_dead_mask)
+
         # 第一层：外围抗扰动质检 (生存率必须 >= 80%)
         if survival_rate < 0.8:
             continue
@@ -232,7 +284,6 @@ def evaluate_and_print_top5(csv_path, raw_dfs_dict=None):
         # 🔴【修复】第二层：提取实盘同源分身组合，且要求它本身必须是存活的！
         homo_group = group[(group['offset_long'] == group['offset_short']) & (group['is_alive'])]
         homo_group = group[(group['is_alive'])]
-
 
         if len(homo_group) == 0:
             continue
@@ -255,6 +306,7 @@ def evaluate_and_print_top5(csv_path, raw_dfs_dict=None):
             'survival_rate': survival_rate,
             'alive_count': alive_count,
             'total_members': total_members,
+            'family_fail_stats': family_fail_stats,  # 【记录家族淘汰明细】
             'family_final_score': family_final_score,
             'worst_homo_row': worst_homo_row,
             'yield_spread': yield_spread,
@@ -323,11 +375,16 @@ def evaluate_and_print_top5(csv_path, raw_dfs_dict=None):
         neighborhood_alive = neighborhood_df['is_alive'].sum()
         neighborhood_survival_rate = neighborhood_alive / neighborhood_total if neighborhood_total > 0 else 0
 
+        # 【新增】获取群落邻居淘汰成员的具体原因统计
+        neighbor_dead_mask = ~neighborhood_df['is_alive']
+        neighbor_fail_stats = get_failure_statistics(neighborhood_df, neighbor_dead_mask)
+
         # 🔴 只保留群落生态也比较健康（>= 60%）的家族
         if neighborhood_survival_rate >= 0.60:
             f_row['neighborhood_survival_rate'] = neighborhood_survival_rate
             f_row['neighborhood_alive'] = neighborhood_alive  # 记录邻居存活数
             f_row['neighborhood_total'] = neighborhood_total  # 记录邻居总数
+            f_row['neighbor_fail_stats'] = neighbor_fail_stats  # 【记录群落淘汰明细】
             valid_families.append(f_row)
 
     if not valid_families:
@@ -340,11 +397,19 @@ def evaluate_and_print_top5(csv_path, raw_dfs_dict=None):
 
     family_df = pd.DataFrame(valid_families)
     top5_families = family_df.sort_values('family_final_score', ascending=False).head(50)
-    top5_families = top5_families.sample(frac=1).reset_index(drop=True)
+    # 固定随机顺序（数字 42 可以换成任意整数，只要不变，顺序就永远固定）
+    top5_families = top5_families.sample(frac=1, random_state=42).reset_index(drop=True)
+
     print(f"✅ 家族降维筛选完成！一共提取出【实盘底层抗击打与稳健分综合最优】的前 {len(top5_families)} 大参数家族：\n")
     print("=" * 85)
 
     medals = ['🥇', '🥈', '🥉', '🏅', '🏅']
+
+    # 辅助函数：格式化死因统计字典输出
+    def format_fail_stats(stats_dict):
+        if not stats_dict:
+            return "无淘汰"
+        return " | ".join([f"{k}({v}个)" for k, v in stats_dict.items()])
 
     for i, (_, f_row) in enumerate(top5_families.iterrows()):
         rank_medal = medals[i] if i < len(medals) else '🏅'
@@ -367,13 +432,17 @@ def evaluate_and_print_top5(csv_path, raw_dfs_dict=None):
         print(
             f" 🧬 家族宏观基因: {strat_A_type} [{core_long}](趋势:{trend_long}) + {strat_B_type} [{core_short}](趋势:{trend_short})")
 
-        # 🔴 [新增展现格式] 加入群落邻居平原存活率
-        # 🔴 [展现格式] 详细展示家族内部与外部群落邻居的存活比例
-        print(
-            f" 🛡️ 抗扰动表现: 本家族存活 {f_row['alive_count']}/{f_row['total_members']} ({f_row['survival_rate'] * 100:.1f}%) | 群落邻居存活: {f_row.get('neighborhood_alive', 0)}/{f_row.get('neighborhood_total', 0)} ({f_row['neighborhood_survival_rate'] * 100:.1f}%)")
+        # # 🔴 [新增展现格式] 加入群落邻居平原存活率
+        # # 🔴 [展现格式] 详细展示家族内部与外部群落邻居的存活比例
+        # print(
+        #     f" 🛡️ 抗扰动表现: 本家族存活 {f_row['alive_count']}/{f_row['total_members']} ({f_row['survival_rate'] * 100:.1f}%) | 群落邻居存活: {f_row.get('neighborhood_alive', 0)}/{f_row.get('neighborhood_total', 0)} ({f_row['neighborhood_survival_rate'] * 100:.1f}%)")
+        #
+        # # 🔴 [新增核心修改区] 打印家族成员及邻居由于哪些硬过滤规则被淘汰的详细统计
+        # print(f"    ├─ 本家族淘汰主因: {format_fail_stats(f_row.get('family_fail_stats', {}))}")
+        # print(f"    ├─ 群落邻居淘汰主因: {format_fail_stats(f_row.get('neighbor_fail_stats', {}))}")
 
         print(
-            f"    同源组合收益极差: {f_row['yield_spread'] * 100:.1f}% | 收益下界: {f_row['annual_return_min']}% | 收益上界: {f_row['annual_return_max']}%")
+            f"    └─ 同源组合收益极差: {f_row['yield_spread'] * 100:.1f}% | 收益下界: {f_row['annual_return_min']}% | 收益上界: {f_row['annual_return_max']}%")
         print(f" 📉 实盘保底表现 (源自本家族同源中表现最差的分身: {worst_offset})")
 
         # 🔴 [核心修改区] 将最丑陋一面的明细数据展示出来：精准暴露四大物理极限
@@ -390,6 +459,7 @@ def evaluate_and_print_top5(csv_path, raw_dfs_dict=None):
         print(
             f"   └─ 尾部动量捕获(肥尾依赖): 剔除最赚5笔后利润腰斩率: {worst_row.get('drop_top5_pnl_decay', 0) * 100:.1f}% | 负期望币种数: {int(worst_row.get('negative_expectancy_assets', 0))}个 | 币种HHI: {worst_row.get('asset_hhi', 0):.3f}")
         print("-" * 85)
+
 
 def print_advanced_report(metrics_dict):
     """
