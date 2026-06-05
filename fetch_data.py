@@ -41,7 +41,7 @@ crypto_scores = {
 
 INTERVAL = "1m"  # K线级别
 MARKET = "futures/um"  # 市场类型：现货填"spot"，U本位填"futures/um"
-START_DATE = "2025-01-01"  # 开始日期 (YYYY-MM-DD)
+START_DATE = "2023-01-01"  # 开始日期 (YYYY-MM-DD)
 END_DATE = "2026-06-03"  # 结束日期 (YYYY-MM-DD)
 SAVE_DIR = "./binance_data"  # ZIP文件临时保存路径
 MAX_WORKERS = 20  # 并发下载线程数（建议 5-10）
