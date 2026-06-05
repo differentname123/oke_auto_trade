@@ -1295,8 +1295,8 @@
 2026-06-05:
     已完成:
         1.重新选择最优的组合，之前没有考虑到仓位和都超过1的问题，新的组合：
-            LONG_ONLY [Grid_No.43629](趋势:120) + SHORT_ONLY [Grid_No.69393](趋势:720)
-
+            LONG_ONLY [Grid_No.43629](趋势:120) 具体参数MOM_WINDOW=48  VOL_WINDOW=42  BTC_TREND_WINDOW=120  MAX_WEIGHT=0.5  TOP_K=1  offset=2h
+            SHORT_ONLY [Grid_No.69393](趋势:720) 具体参数MOM_WINDOW=90  VOL_WINDOW=120  BTC_TREND_WINDOW=720  MAX_WEIGHT=0.05  TOP_K=3 offset=0h
     待完成：
         -4，完善信号的产生已经页面的展示
         -3.运行完成新的好用币对的配对，灵活的得到指定参数的信号，同时也上线cloudflare版本的，让全网都能够访问。

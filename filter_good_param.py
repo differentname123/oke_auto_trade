@@ -103,28 +103,38 @@ def filter_different_offsets(df: pd.DataFrame) -> pd.DataFrame:
     return filtered_df
 
 
-from typing import Tuple, List, Optional
+import pandas as pd
 
 
-def get_true_neighbor_cores(raw_df: pd.DataFrame, core_id: str, tolerance_pct=0.30) -> Tuple[
-    List[str], Optional[float]]:
+def get_true_neighbor_cores(raw_df, core_id, tolerance_pct=0.30):
     """
     根据阈值找到所有参数均在合理范围内的邻居，并返回邻居列表以及最大复合权重乘积。
 
     返回:
-        - 满足条件的 core_id 列表 (List[str])
-        - 满足条件的邻居中，param_MAX_WEIGHT * param_TOP_K 的最大值 (float 或 None)
+        - 满足条件的 core_id 列表
+        - 满足条件的邻居中，param_MAX_WEIGHT * param_TOP_K 的最大值
+        - 基准行核心参数拼接而成的字符串
     """
     # 1. 异常处理：原表为空
     if raw_df is None or raw_df.empty:
-        return [core_id], None
+        return [core_id], None, ""
 
     # 2. 异常处理：找不到目标 core_id
     target_rows = raw_df[raw_df['param_name'] == core_id]
     if target_rows.empty:
-        return [core_id], None
+        return [core_id], None, ""
 
     row = target_rows.iloc[0]
+
+    # ================= 🔴 新增逻辑：提取并拼接参数字符串 =================
+    # 动态获取所有以 'param_' 开头且不是 'param_name' 的列
+    param_cols = [col for col in raw_df.columns if col.startswith('param_') and col != 'param_name']
+    # param_cols.append('OFFSET_UNIVERSE')
+    # 按照“不需要前缀param”的要求，将字段名的 'param_' 剔除，与值拼接。
+    # 当前拼接格式示例: MOM_WINDOW=12_VOL_WINDOW=720_BTC_TREND_WINDOW=120_MAX_WEIGHT=0.12_TOP_K=1
+    # （如果你的业务仅需要纯数值拼接如 "12_720_120_0.12_1"，可将下面方括号内的代码改为: str(row[col]) ）
+    param_str = "  ".join([f"{col.replace('param_', '')}={row[col]}" for col in param_cols])
+    # ======================================================================
 
     # 初始化掩码，默认全表符合
     mask = pd.Series(True, index=raw_df.index)
@@ -157,8 +167,8 @@ def get_true_neighbor_cores(raw_df: pd.DataFrame, core_id: str, tolerance_pct=0.
         if pd.isna(max_product):
             max_product = None
 
-    # 返回：满足条件的列表，以及最大乘积值
-    return filtered_df['param_name'].tolist(), max_product
+    # 返回：满足条件的列表，最大乘积值，以及新增的拼接参数字符串
+    return filtered_df['param_name'].tolist(), max_product, param_str
 
 
 def evaluate_and_print_top5(csv_path, raw_dfs_dict=None):
@@ -338,12 +348,15 @@ def evaluate_and_print_top5(csv_path, raw_dfs_dict=None):
             raw_df_b = raw_dfs_dict.get(strat_b)
 
             # 🔴 1. 严格根据阈值找到各自的真实邻居 (所有参数均在合理浮动范围内)
-            valid_cores_a, max_product_a = get_true_neighbor_cores(raw_df_a, core_long, tolerance_pct=0.30)
+            valid_cores_a, max_product_a, param_str_a = get_true_neighbor_cores(raw_df_a, core_long, tolerance_pct=0.30)
 
-            valid_cores_b, max_product_b = get_true_neighbor_cores(raw_df_b, core_short, tolerance_pct=0.30)
+            valid_cores_b, max_product_b, param_str_b = get_true_neighbor_cores(raw_df_b, core_short, tolerance_pct=0.30)
             if max_product_a + max_product_b > 1:
                 continue
             f_row['max_money_ratio'] = max_product_a + max_product_b
+            f_row['param_str_a'] = param_str_a
+            f_row['param_str_b'] = param_str_b
+
             # if len(valid_cores_a) > 0:
             #     print()
             # else:
@@ -430,7 +443,7 @@ def evaluate_and_print_top5(csv_path, raw_dfs_dict=None):
         # 打印输出卡片 (升级至族群全景视角)
         print(f"第 {i + 1} 组家族 | 家族最终稳健分(Family_Final_Score): {family_score:.2f}")
         print(
-            f" 🧬 家族宏观基因: {strat_A_type} [{core_long}](趋势:{trend_long}) + {strat_B_type} [{core_short}](趋势:{trend_short})")
+            f" 🧬 家族宏观基因: \n{strat_A_type} [{core_long}](趋势:{trend_long}) 具体参数{f_row['param_str_a']}  offset={worst_row.get('offset_long', '0h')}  \n{strat_B_type} [{core_short}](趋势:{trend_short}) 具体参数{f_row['param_str_b']} offset={worst_row.get('offset_short', '0h')} ")
 
         # # 🔴 [新增展现格式] 加入群落邻居平原存活率
         # # 🔴 [展现格式] 详细展示家族内部与外部群落邻居的存活比例
