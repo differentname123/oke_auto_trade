@@ -1511,22 +1511,22 @@ if __name__ == "__main__":
 
 
     #
-    get_combine_data()
+    # get_combine_data()
     #
     # output_file = r"W:\project\python_project\oke_auto_trade\param_search_results\combined_metrics_results.csv"
     # df = pd.read_csv(output_file)
     # score_and_print_top_combinations(df, top_n=10)
 
-    #
-    # # 定义需要依次回测的时间错位列表
-    # offsets = ['30min', '1h', '2h', '3h','0h']
-    #
-    # for offset in offsets:
-    #     print(f"\n\n{'=' * 80}")
-    #     print(f"🌟 正在启动全局相位测试，当前测试阶段: [ 错位 {offset} ]")
-    #     print(f"{'=' * 80}")
-    #
-    #     # 依次回测，并传入当前的 offset
-    #     run_grid_search(time_offset=offset, max_workers=15)
-    #
-    # print("\n🎉 所有时间错位测试已全部执行完毕！请前往 results 文件夹对比各相位的 CSV 表现。")
+
+    # 定义需要依次回测的时间错位列表
+    offsets = ['30min', '1h', '2h', '3h','0h']
+
+    for offset in offsets:
+        print(f"\n\n{'=' * 80}")
+        print(f"🌟 正在启动全局相位测试，当前测试阶段: [ 错位 {offset} ]")
+        print(f"{'=' * 80}")
+
+        # 依次回测，并传入当前的 offset
+        run_grid_search(time_offset=offset, max_workers=15)
+
+    print("\n🎉 所有时间错位测试已全部执行完毕！请前往 results 文件夹对比各相位的 CSV 表现。")

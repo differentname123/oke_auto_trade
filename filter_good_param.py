@@ -409,7 +409,7 @@ def evaluate_and_print_top5(csv_path, raw_dfs_dict=None):
     # =========================================================================================
 
     family_df = pd.DataFrame(valid_families)
-    top5_families = family_df.sort_values('family_final_score', ascending=False).head(50)
+    top5_families = family_df.sort_values('family_final_score', ascending=False).head(5)
     # 固定随机顺序（数字 42 可以换成任意整数，只要不变，顺序就永远固定）
     # top5_families = top5_families.sample(frac=1, random_state=42).reset_index(drop=True)
 
@@ -586,6 +586,53 @@ def print_advanced_report(metrics_dict):
 
 
 if __name__ == "__main__":
+    result_csv =   r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_LONG_ONLY_dynamic_pool_offset_2h_with_Benchmark.csv'
+
+
+    if os.path.exists(result_csv):
+        df_results = pd.read_csv(result_csv)
+        if not df_results.empty:
+
+            # 找到 param_name 为 Grid_No.31396_1h的行
+            best_row = df_results[df_results['param_name'] == 'Grid_No.43629_2h'].iloc[0]
+
+            # # 假设你想看 sortino_ratio 排名第一的策略结果
+            # best_row = df_results.sort_values(by='sortino_ratio', ascending=False).iloc[0]
+
+            # 把 Series 转为字典喂给高级打印函数
+            best_metrics_dict = best_row.to_dict()
+
+            print_advanced_report(best_metrics_dict)
+    else:
+        print("未找到结果文件，请确保已经执行完带有 Benchmark 的回测流程。")
+
+
+    result_csv =   r'W:\project\python_project\oke_auto_trade\param_search_results\grid_search_131274_SHORT_ONLY_dynamic_pool_offset_0h_with_Benchmark.csv'
+
+
+    if os.path.exists(result_csv):
+        df_results = pd.read_csv(result_csv)
+        if not df_results.empty:
+
+            # 找到 param_name 为 Grid_No.31396_1h的行
+            best_row = df_results[df_results['param_name'] == 'Grid_No.69393_0h'].iloc[0]
+
+            # # 假设你想看 sortino_ratio 排名第一的策略结果
+            # best_row = df_results.sort_values(by='sortino_ratio', ascending=False).iloc[0]
+
+            # 把 Series 转为字典喂给高级打印函数
+            best_metrics_dict = best_row.to_dict()
+
+            print_advanced_report(best_metrics_dict)
+    else:
+        print("未找到结果文件，请确保已经执行完带有 Benchmark 的回测流程。")
+
+
+
+
+
+
+
     # # 将这里替换为你实际的 CSV 文件路径
     CSV_FILE_PATH = r"W:\project\python_project\oke_auto_trade\param_search_results\combined_metrics_results_op_op_op1.csv"
 
