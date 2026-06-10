@@ -1,1 +1,23 @@
 /kline_data/
+# Python 编译缓存
+__pycache__/
+
+# 历史行情数据与回测产出文件夹 (138万个文件的主要来源)
+k_line_*/
+binance_data/
+backtest_pair/
+param_search_results/
+
+# 临时文件目录与文件
+temp/
+temp*.json
+
+# 各种回测记录、日志和数据文件
+*.csv
+*.parquet
+
+# 自动生成的回测图表
+*.png
+
+# 配置文件 (极其重要！通常包含交易所 API Key，绝不能上传)
+config.json
