@@ -144,8 +144,10 @@ def process_symbols(symbol_list, interval, market, date_list):
                 save_path, success, msg = future.result()
                 if success:
                     downloaded_zips.append(save_path)
+                    print(f"[OK] {date} : {msg}")
                 else:
-                    pass
+                    print(f"[FAIL] {date} : {msg}")
+
 
         if not downloaded_zips:
             print(f"没有下载到 {symbol} 的任何数据，跳过。\n")
@@ -177,6 +179,15 @@ def process_symbols(symbol_list, interval, market, date_list):
 
         # 3. 数据校验：排序与去重
         print("\n=== 开始数据清洗与校验 ===")
+
+        # ！！！关键修复：修正币安脏数据，将微秒(16位)统一清洗为毫秒(13位)！！！
+        # 13位毫秒时间戳最大在 1.x * 10^12 级别。如果大于 10^14，说明绝对是微秒或纳秒级别脏数据
+        mask = final_df['open_time'] > 100000000000000
+        if mask.any():
+            dirty_count = mask.sum()
+            print(f"🔧 自动修复：检测到 {dirty_count} 条微秒级异常时间戳，正在转换为毫秒...")
+            final_df.loc[mask, 'open_time'] = final_df.loc[mask, 'open_time'] // 1000
+
         # 强制按时间戳升序排列
         final_df.sort_values('open_time', ascending=True, inplace=True)
 
@@ -215,8 +226,9 @@ def process_symbols(symbol_list, interval, market, date_list):
                     break
 
                 # 找到断层开始和结束的具体人类可读时间
-                gap_end_time = pd.to_datetime(row['open_time'], unit='ms')
-                gap_start_time = pd.to_datetime(final_df.loc[idx - 1, 'open_time'], unit='ms')
+                # 增加 errors='coerce' 防止极端脏数据再次引发 OutOfBounds 崩溃
+                gap_end_time = pd.to_datetime(row['open_time'], unit='ms', errors='coerce')
+                gap_start_time = pd.to_datetime(final_df.loc[idx - 1, 'open_time'], unit='ms', errors='coerce')
                 missing_count = (row['open_time'] - final_df.loc[idx - 1, 'open_time']) / INTERVAL_MS - 1
                 print(
                     f" -> 缺失时间段: {gap_start_time} 至 {gap_end_time}，约缺失 {int(missing_count)} {time_unit_str}数据")
