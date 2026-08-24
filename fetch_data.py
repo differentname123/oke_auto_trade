@@ -20,31 +20,28 @@ SYMBOLS = [
     "KASUSDT",
     "LDOUSDT",
     "LINKUSDT",
-    "MKRUSDT",
     "NEARUSDT",
     "ONDOUSDT",
     "PENDLEUSDT",
     "PYTHUSDT",
     "RAYUSDT",
     "RENDERUSDT",
-    "RNDRUSDT",
     "RUNEUSDT",
     "SKYUSDT",
     "SOLUSDT",
     "STXUSDT",
     "TAOUSDT",
-    "TONUSDT",
     "TRXUSDT",
     "UNIUSDT"
 ]
-SYMBOLS = []
+# SYMBOLS = []
 # 新增：单独拉取 1s 级别数据的币种列表
 SYMBOLS_1s = [
     "BTCUSDT",
     "ETHUSDT",
     "SOLUSDT"
 ]
-
+SYMBOLS_1s = []
 crypto_scores = {
     "BTCUSDT": 10.0,
     "ETHUSDT": 9.0,
