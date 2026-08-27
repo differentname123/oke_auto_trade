@@ -33,7 +33,7 @@ SYMBOLS = [
     "TRXUSDT",
     "UNIUSDT"
 ]
-SYMBOLS = []
+# SYMBOLS = []
 # 新增：单独拉取 1s 级别数据的币种列表
 SYMBOLS_1s = [
     "BTCUSDT",
@@ -43,7 +43,7 @@ SYMBOLS_1s = [
     "AAVEUSDT",
     "BNBUSDT"
 ]
-# SYMBOLS_1s = []
+SYMBOLS_1s = []
 crypto_scores = {
     "BTCUSDT": 10.0,
     "ETHUSDT": 9.0,
