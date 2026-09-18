@@ -65,10 +65,12 @@ crypto_scores = {
 
 INTERVAL = "1m"  # 原有 K线级别
 MARKET = "futures/um"  # 原有 市场类型：现货填"spot"，U本位填"futures/um"
+TIME_PERIOD = "daily"  # 【新增】下载粒度：支持 "daily" (按天) 或 "monthly" (按月)
 
 # 新增：1s 级别对应的配置
 INTERVAL_1s = "1s"
 MARKET_1s = "spot"  # 1s 数据通常存在于现货市场
+TIME_PERIOD_1s = "daily" # 【新增】1s 下载粒度：支持 "daily" 或 "monthly"
 
 START_DATE = "2021-01-01"  # 开始日期 (YYYY-MM-DD)
 END_DATE = "2026-08-30"  # 结束日期 (YYYY-MM-DD)
@@ -84,9 +86,10 @@ COLUMNS = [
 ]
 
 
-def download_single_day(symbol, date_str, market, interval):
-    """下载单日数据的核心函数 (已适配动态 market 和 interval)"""
-    base_url = f"https://data.binance.vision/data/{market}/daily/klines/{symbol}/{interval}/"
+# 【修改】函数名微调，并增加 time_period 参数。移除硬编码的 '/daily/'
+def download_kline_archive(symbol, date_str, market, interval, time_period):
+    """下载数据的核心函数 (已适配动态 market, interval 和 time_period)"""
+    base_url = f"https://data.binance.vision/data/{market}/{time_period}/klines/{symbol}/{interval}/"
     file_name = f"{symbol}-{interval}-{date_str}.zip"
     download_url = base_url + file_name
     save_path = os.path.join(SAVE_DIR, file_name)
@@ -118,25 +121,28 @@ def download_single_day(symbol, date_str, market, interval):
         return save_path, False, f"异常: {e}"
 
 
-def process_symbols(symbol_list, interval, market, date_list):
-    """提取出的核心处理逻辑，支持不同列表、级别和市场"""
+# 【修改】增加 time_period 参数接收
+def process_symbols(symbol_list, interval, market, time_period, date_list):
+    """提取出的核心处理逻辑，支持不同列表、级别、市场和周期"""
     for symbol in symbol_list:
         merged_file = f"kline_data/{symbol}_{interval}_{START_DATE}_merged.csv"
         # 确保最终输出目录存在
         os.makedirs(os.path.dirname(merged_file), exist_ok=True)
 
         print(f"\n=============================================")
-        print(f"=== 开始并行下载 {symbol} {interval} 数据 ===")
+        print(f"=== 开始并行下载 {symbol} {interval} ({time_period}) 数据 ===")
         print(f"=============================================")
-        print(f"时间范围: {START_DATE} 到 {END_DATE} (共 {len(date_list)} 天)")
+        print(f"时间范围: {START_DATE} 到 {END_DATE} (共 {len(date_list)} 个文件周期)")
 
         downloaded_zips = []
 
         # 1. 使用多线程并行下载
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            # 提交所有任务 (传入当前的 symbol, market, interval)
-            future_to_date = {executor.submit(download_single_day, symbol, date, market, interval): date for date in
-                              date_list}
+            # 提交所有任务 (传入当前的 symbol, market, interval, time_period)
+            future_to_date = {
+                executor.submit(download_kline_archive, symbol, date, market, interval, time_period): date
+                for date in date_list
+            }
 
             for future in as_completed(future_to_date):
                 date = future_to_date[future]
@@ -240,6 +246,27 @@ def process_symbols(symbol_list, interval, market, date_list):
         print(f"总数据量: {len(final_df)} 行\n")
 
 
+# 【新增】独立的日期列表生成器，支持日度 (YYYY-MM-DD) 和月度 (YYYY-MM) 切换
+def generate_date_list(start_date, end_date, time_period):
+    date_list = []
+    current = start_date
+    if time_period == "daily":
+        while current <= end_date:
+            date_list.append(current.strftime("%Y-%m-%d"))
+            current += timedelta(days=1)
+    elif time_period == "monthly":
+        # 强制设为每月1号，防止处理诸如1月31日加一个月后变成2月31日引发 ValueError 崩溃
+        current = current.replace(day=1)
+        while (current.year, current.month) <= (end_date.year, end_date.month):
+            date_list.append(current.strftime("%Y-%m"))
+            # 月份递增逻辑
+            if current.month == 12:
+                current = current.replace(year=current.year + 1, month=1)
+            else:
+                current = current.replace(month=current.month + 1)
+    return date_list
+
+
 def main():
     if not os.path.exists(SAVE_DIR):
         os.makedirs(SAVE_DIR)
@@ -247,22 +274,17 @@ def main():
     start = datetime.strptime(START_DATE, "%Y-%m-%d")
     end = datetime.strptime(END_DATE, "%Y-%m-%d")
 
-    # 生成需要下载的日期列表
-    date_list = []
-    current = start
-    while current <= end:
-        date_list.append(current.strftime("%Y-%m-%d"))
-        current += timedelta(days=1)
-
     # === 执行任务 1：拉取原来的 1m U本位合约数据 ===
     if SYMBOLS:
-        print("\n>>> 开始执行 1m 级别数据拉取任务 <<<")
-        process_symbols(SYMBOLS, INTERVAL, MARKET, date_list)
+        print(f"\n>>> 开始执行 1m 级别数据拉取任务 (粒度: {TIME_PERIOD}) <<<")
+        date_list = generate_date_list(start, end, TIME_PERIOD)
+        process_symbols(SYMBOLS, INTERVAL, MARKET, TIME_PERIOD, date_list)
 
     # === 执行任务 2：拉取新增的 1s 现货数据 ===
     if SYMBOLS_1s:
-        print("\n>>> 开始执行 1s 级别现货数据拉取任务 <<<")
-        process_symbols(SYMBOLS_1s, INTERVAL_1s, MARKET_1s, date_list)
+        print(f"\n>>> 开始执行 1s 级别现货数据拉取任务 (粒度: {TIME_PERIOD_1s}) <<<")
+        date_list_1s = generate_date_list(start, end, TIME_PERIOD_1s)
+        process_symbols(SYMBOLS_1s, INTERVAL_1s, MARKET_1s, TIME_PERIOD_1s, date_list_1s)
 
 
 if __name__ == "__main__":
