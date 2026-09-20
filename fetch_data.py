@@ -73,7 +73,7 @@ MARKET_1s = "spot"  # 1s 数据通常存在于现货市场
 TIME_PERIOD_1s = "daily" # 【新增】1s 下载粒度：支持 "daily" 或 "monthly"
 
 START_DATE = "2021-01-01"  # 开始日期 (YYYY-MM-DD)
-END_DATE = "2026-08-30"  # 结束日期 (YYYY-MM-DD)
+END_DATE = "2026-09-30"  # 结束日期 (YYYY-MM-DD)
 SAVE_DIR = "./binance_data"  # ZIP文件临时保存路径
 MAX_WORKERS = 20  # 并发下载线程数（建议 5-10）
 # ==========================================
